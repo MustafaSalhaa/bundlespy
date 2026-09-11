@@ -55,7 +55,7 @@ class AIConfig:
 class ReportingConfig:
     formats: List[str]    = field(default_factory=lambda: ["terminal"])
     output_dir: str       = "./bundlespy-reports"
-    show_sensitive: bool  = False
+    show_sensitive: bool  = True
 
 @dataclass
 class SafetyConfig:
