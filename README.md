@@ -64,7 +64,7 @@ If you don't have pipx:
 sudo apt install pipx
 pipx install bundlespy
 ```
-
+Or
 ```bash
 git clone https://github.com/MustafaSalhaa/bundlespy.git
 cd bundlespy
