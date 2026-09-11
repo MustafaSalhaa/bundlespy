@@ -56,6 +56,16 @@ Rate limiting, concurrency limits, crawl depth, page count, JS file count, and r
 ## Installation
 
 ```bash
+pipx install bundlespy
+```
+
+If you don't have pipx:
+```bash
+sudo apt install pipx
+pipx install bundlespy
+```
+
+```bash
 git clone https://github.com/MustafaSalhaa/bundlespy.git
 cd bundlespy
 pip install -r requirements.txt
