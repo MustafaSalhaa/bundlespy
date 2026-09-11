@@ -182,6 +182,26 @@ Combine formats: `--format terminal,html,json`
 
 ---
 
+## Stealth Mode
+
+By default BundleSpy identifies itself with its own User-Agent. If you are scanning a target protected by a WAF and want to reduce detection, use `--stealth`:
+
+```bash
+bundlespy scan https://example.com --stealth
+```
+
+What stealth mode does:
+
+- Rotates through 45 real browser User-Agents (Chrome, Firefox, Safari, Edge, Brave, Opera, mobile browsers)
+- Sends full browser header sets including Accept, Accept-Language, Sec-Fetch, and Sec-CH-UA headers
+- Adds random jitter to delays between requests instead of a fixed rate
+- Rotates the User-Agent periodically during the scan
+- Spoofs Referer headers to match the target origin
+
+This covers most WAF fingerprinting techniques based on headers and request patterns. It does not bypass TLS fingerprinting (JA3) used by advanced WAFs like Cloudflare in high security mode - that requires a different approach at the TLS stack level.
+
+Use stealth mode on authorized targets only.
+
 ## Output example
 
 ```
