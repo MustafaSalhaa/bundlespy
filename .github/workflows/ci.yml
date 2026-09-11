@@ -35,7 +35,7 @@ jobs:
 
       - name: Run demo mode (offline smoke test)
         run: |
-          PYTHONPATH=src python3 -m jsluice.cli demo
+          PYTHONPATH=src python3 -m bundlespy.cli demo
 
   lint:
     name: Lint
@@ -49,7 +49,7 @@ jobs:
         run: pip install pyflakes
       - name: Check for obvious errors
         run: |
-          python -m pyflakes src/jsluice/ || true
+          python -m pyflakes src/bundlespy/ || true
 
   safety:
     name: Safety - confirm no private IP requests possible
@@ -64,7 +64,7 @@ jobs:
       - name: Verify private IP blocking
         run: |
           PYTHONPATH=src python3 -c "
-          from jsluice.safety.network import validate_url, is_ip_blocked
+          from bundlespy.safety.network import validate_url, is_ip_blocked
           blocked = [
               'http://127.0.0.1/',
               'http://192.168.1.1/',
