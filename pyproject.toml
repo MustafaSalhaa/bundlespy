@@ -4,16 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bundlespy"
-version = "1.0.0"
+version = "1.0.1"
 description = "JavaScript Intelligence and Secret Exposure Scanner for authorized security assessments"
 authors = [{name = "Mustafa Salha"}]
 license = {text = "MIT"}
 requires-python = ">=3.8"
+readme = "README.md"
+keywords = ["security", "pentesting", "javascript", "secret-scanner", "bug-bounty", "recon"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Intended Audience :: Information Technology",
+]
 dependencies = [
     "requests>=2.28.0",
     "urllib3>=1.26.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MustafaSalhaa/bundlespy"
+Repository = "https://github.com/MustafaSalhaa/bundlespy"
 
 [project.scripts]
 bundlespy = "bundlespy.cli:main"
@@ -26,3 +39,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+bundlespy = ["rules/*.yaml"]
