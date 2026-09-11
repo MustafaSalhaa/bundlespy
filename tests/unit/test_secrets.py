@@ -37,10 +37,10 @@ class TestFalsePositiveDetection:
 
 
 class TestSecretScanner:
-    def setup_method(self):
-        self.scanner = SecretScanner(
-            rules_path="/home/claude/bundlespy/rules/secrets.yaml"
-        )
+       def setup_method(self):
+        from pathlib import Path
+        rules = Path(__file__).parent.parent.parent / "rules" / "secrets.yaml"
+        self.scanner = SecretScanner(rules_path=str(rules))
 
     def test_aws_key_detected(self):
         js = "const key = 'AKIAIOSFODNN7REALKEY';"
