@@ -1,13 +1,12 @@
 """
-HTTP fetcher with rate limiting, retries, backoff, and safety checks.
-Every request in BundleSpy goes through this module.
+HTTP fetcher with rate limiting, retries, backoff, safety checks,
+and optional stealth mode for WAF evasion.
 """
 
 import time
 import hashlib
 import logging
 from typing import Optional, Tuple
-from urllib.parse import urlparse
 
 import requests
 import requests.adapters
@@ -15,6 +14,7 @@ import urllib3
 
 from ..config import USER_AGENT
 from ..safety.network import validate_url
+from ..utils.stealth import random_ua, get_stealth_headers, stealth_delay
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -29,13 +29,17 @@ class Fetcher:
         retry_limit: int = 2,
         requests_per_second: int = 2,
         user_agent: str = USER_AGENT,
+        stealth: bool = False,
     ):
         self.timeout           = timeout
         self.max_response_size = max_response_size
         self.retry_limit       = retry_limit
         self.min_delay         = 1.0 / max(requests_per_second, 1)
         self.user_agent        = user_agent
+        self.stealth           = stealth
+        self.rps               = requests_per_second
         self._last_request     = 0.0
+        self._current_ua       = random_ua() if stealth else user_agent
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -48,24 +52,31 @@ class Fetcher:
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
-        self.session.headers.update({"User-Agent": self.user_agent})
+
+        if not stealth:
+            self.session.headers.update({"User-Agent": self.user_agent})
 
     def _rate_limit(self) -> None:
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < self.min_delay:
-            time.sleep(self.min_delay - elapsed)
+        if self.stealth:
+            stealth_delay(self.rps)
+            # Rotate UA every few requests
+            if time.monotonic() % 5 < 1:
+                self._current_ua = random_ua()
+        else:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self.min_delay:
+                time.sleep(self.min_delay - elapsed)
         self._last_request = time.monotonic()
 
     def get(
         self,
         url: str,
+        referer: str = "",
         check_content_type: Optional[str] = None,
     ) -> Tuple[Optional[str], int, str, str]:
         """
         Fetch a URL safely.
-
         Returns: (content, status_code, content_type, sha256)
-        content is None on failure.
         """
         safe, reason = validate_url(url, check_dns=True)
         if not safe:
@@ -74,6 +85,12 @@ class Fetcher:
 
         self._rate_limit()
 
+        # Build headers
+        if self.stealth:
+            headers = get_stealth_headers(self._current_ua, referer=referer)
+        else:
+            headers = {"User-Agent": self.user_agent}
+
         try:
             resp = self.session.get(
                 url,
@@ -81,26 +98,24 @@ class Fetcher:
                 verify=False,
                 allow_redirects=True,
                 stream=True,
+                headers=headers,
             )
 
             content_type = resp.headers.get("Content-Type", "")
 
-            # Read up to size limit
             chunks = []
             total  = 0
             for chunk in resp.iter_content(chunk_size=8192):
                 total += len(chunk)
                 if total > self.max_response_size:
                     logger.warning(
-                        "Response from %s exceeded size limit (%d bytes), truncating",
-                        url, self.max_response_size,
+                        "Response from %s exceeded size limit, truncating", url
                     )
                     break
                 chunks.append(chunk)
 
             raw = b"".join(chunks)
 
-            # Decode safely
             try:
                 content = raw.decode("utf-8", errors="replace")
             except Exception:
