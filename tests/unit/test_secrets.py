@@ -1,10 +1,13 @@
 """Unit tests for the secret detection engine."""
 
-import pytest
 import sys
-sys.path.insert(0, "/home/claude/bundlespy/src")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from bundlespy.analysis.secrets import SecretScanner, _shannon_entropy, _is_likely_fp
+
+RULES_PATH = str(Path(__file__).parent.parent.parent / "rules" / "secrets.yaml")
 
 
 class TestEntropy:
@@ -37,10 +40,8 @@ class TestFalsePositiveDetection:
 
 
 class TestSecretScanner:
-       def setup_method(self):
-        from pathlib import Path
-        rules = Path(__file__).parent.parent.parent / "rules" / "secrets.yaml"
-        self.scanner = SecretScanner(rules_path=str(rules))
+    def setup_method(self):
+        self.scanner = SecretScanner(rules_path=RULES_PATH)
 
     def test_aws_key_detected(self):
         js = "const key = 'AKIAIOSFODNN7REALKEY';"
@@ -85,7 +86,6 @@ class TestSecretScanner:
         const debug = false;
         """
         findings = self.scanner.scan(js, "https://example.com/app.js")
-        # Only check for high-confidence findings to reduce noise
         high_conf = [f for f in findings if f.confidence > 0.7 and f.status != "likely_false_positive"]
         assert len(high_conf) == 0
 
