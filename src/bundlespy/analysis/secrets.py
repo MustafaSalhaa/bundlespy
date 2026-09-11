@@ -87,7 +87,7 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
     """Load detection rules from YAML file."""
     if rules_path is None:
         # Find rules relative to package
-        here = Path(__file__).parent.parent.parent.parent
+        here = Path(__file__).parent.parent.parent
         rules_path = here / "rules" / "secrets.yaml"
 
     try:
