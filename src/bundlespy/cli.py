@@ -59,11 +59,12 @@ Examples:
     scan.add_argument("--exclude",       nargs="+", default=[],   help="Exclude hostnames from scope")
     scan.add_argument("--format",        default="terminal",       help="Output format: terminal,json (default: terminal)")
     scan.add_argument("--output",        default="",              help="Output directory for reports")
-    scan.add_argument("--show-sensitive",action="store_true", default=True, help="Show full secret values in output")
+    scan.add_argument("--show-sensitive",action="store_true",     help="Show full secret values in output (use carefully)")
     scan.add_argument("--verbose",       action="store_true",     help="Verbose logging")
     scan.add_argument("--quiet",         action="store_true",     help="Suppress non-essential output")
     scan.add_argument("--no-color",      action="store_true",     help="Disable colored output")
     scan.add_argument("--yes",           action="store_true",     help="Skip authorization prompt (CI use)")
+    scan.add_argument("--stealth",       action="store_true",     help="Stealth mode - random UA rotation, realistic headers, jitter delays")
 
     # demo command
     subparsers.add_parser("demo", help="Run offline demo with fake data")
@@ -106,6 +107,7 @@ def run_scan(args) -> int:
     fetcher = Fetcher(
         timeout=args.timeout,
         requests_per_second=args.rate,
+        stealth=args.stealth,
     )
     scope = ScopeChecker(
         target_url  = target,
@@ -123,6 +125,8 @@ def run_scan(args) -> int:
         common_paths  = args.common_paths,
     )
 
+    if args.stealth:
+        print(f"  {chr(27)}[93m[*] Stealth mode enabled - UA rotation, jitter delays, browser headers{chr(27)}[0m")
     print(f"  Scanning: {target}")
     print(f"  Depth: {args.depth} | Max pages: {args.max_pages} | Max JS: {args.max_js}")
     print(f"  Rate: {args.rate} req/s | Timeout: {args.timeout}s\n")
