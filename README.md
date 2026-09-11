@@ -4,7 +4,7 @@ JavaScript Intelligence and Secret Exposure Scanner for authorized penetration t
 
 BundleSpy crawls a target web application, collects JavaScript files, and analyzes them for exposed secrets, hardcoded credentials, internal API endpoints, private IP addresses, cloud storage references, and infrastructure details that can inform a security assessment.
 
-It is a passive reconnaissance tool. It reads publicly served JavaScript — it does not exploit anything, authenticate anywhere, or touch internal systems.
+It is a passive reconnaissance tool. It reads publicly served JavaScript - it does not exploit anything, authenticate anywhere, or touch internal systems.
 
 ---
 
@@ -12,7 +12,7 @@ It is a passive reconnaissance tool. It reads publicly served JavaScript — it 
 
 Modern web applications serve large JavaScript bundles that often contain more than intended: AWS keys accidentally left in environment configs, internal API routes baked into React builds, Firebase tokens, database URLs from development environments, staging hostnames, and JWT tokens hardcoded during testing.
 
-These don't require authentication to find — they're sitting in files the browser downloads on every visit. The problem is that hunting through dozens of minified 2MB bundles manually takes hours. BundleSpy automates that.
+These don't require authentication to find - they're sitting in files the browser downloads on every visit. The problem is that hunting through dozens of minified 2MB bundles manually takes hours. BundleSpy automates that.
 
 ---
 
