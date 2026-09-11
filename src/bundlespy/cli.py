@@ -59,7 +59,7 @@ Examples:
     scan.add_argument("--exclude",       nargs="+", default=[],   help="Exclude hostnames from scope")
     scan.add_argument("--format",        default="terminal",       help="Output format: terminal,json (default: terminal)")
     scan.add_argument("--output",        default="",              help="Output directory for reports")
-    scan.add_argument("--show-sensitive",action="store_true",     help="Show full secret values in output (use carefully)")
+    scan.add_argument("--show-sensitive",action="store_true", default=True, help="Show full secret values in output")
     scan.add_argument("--verbose",       action="store_true",     help="Verbose logging")
     scan.add_argument("--quiet",         action="store_true",     help="Suppress non-essential output")
     scan.add_argument("--no-color",      action="store_true",     help="Disable colored output")
