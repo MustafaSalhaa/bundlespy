@@ -246,6 +246,7 @@ def run_scan(args) -> int:
         from .discovery.passive import collect_passive_js_urls
         passive_urls = collect_passive_js_urls(target)
         print(f"  [*] Found {len(passive_urls)} historical JS URLs")
+        extras["passive_urls"] = len(passive_urls)
 
         seen_passive = set()
         for url in passive_urls[:args.max_js]:
@@ -272,6 +273,7 @@ def run_scan(args) -> int:
         from .discovery.headless import collect_headless_js
         headless_files = collect_headless_js(target, scope, stealth=args.stealth)
         print(f"  [*] Headless captured {len(headless_files)} JS files")
+        extras["headless_files"] = len(headless_files)
         all_js.extend(headless_files)
 
     # ── Source maps ───────────────────────────────────────────────────────────
@@ -286,6 +288,7 @@ def run_scan(args) -> int:
                 recovered_files.extend(result.recovered_files)
         all_js.extend(recovered_files)
         print(f"  [*] Total recovered source files: {len(recovered_files)}")
+        extras["recovered_sources"] = len(recovered_files)
 
     # ── Webpack chunks ────────────────────────────────────────────────────────
     if args.chunks:
@@ -298,6 +301,10 @@ def run_scan(args) -> int:
             chunk_files.extend(chunks)
         all_js.extend(chunk_files)
         print(f"  [*] Discovered {len(chunk_files)} additional chunks")
+        extras["chunks_found"] = len(chunk_files)
+
+    # ── Track extras for terminal output ─────────────────────────────────────
+    extras = {}
 
     # ── Analysis ──────────────────────────────────────────────────────────────
     secret_scanner = SecretScanner()
@@ -312,6 +319,7 @@ def run_scan(args) -> int:
         discovered_urls = [ep.url for ep in all_endpoints]
         subdomains    = harvest_subdomains(target, js_contents, discovered_urls)
         print(f"  [*] Found {len(subdomains)} subdomains")
+        extras["subdomains"] = len(subdomains)
         for sub in subdomains[:20]:
             print(f"      {sub}")
 
@@ -375,7 +383,15 @@ def run_scan(args) -> int:
     formats = [f.strip() for f in args.format.split(",")]
 
     if "terminal" in formats:
-        print_report(result, show_sensitive=args.show_sensitive, no_color=args.no_color)
+        print_report(
+            result,
+            show_sensitive      = args.show_sensitive,
+            no_color            = args.no_color,
+            extras              = extras,
+            validation_results  = validation_results,
+            graphql_schemas     = graphql_schemas,
+            subdomains          = subdomains,
+        )
 
     _write_reports(result, formats, args.output, args.show_sensitive, started)
 
@@ -425,7 +441,15 @@ def run_local(args) -> int:
 
     formats = [f.strip() for f in args.format.split(",")]
     if "terminal" in formats:
-        print_report(result, show_sensitive=args.show_sensitive, no_color=args.no_color)
+        print_report(
+            result,
+            show_sensitive      = args.show_sensitive,
+            no_color            = args.no_color,
+            extras              = extras,
+            validation_results  = validation_results,
+            graphql_schemas     = graphql_schemas,
+            subdomains          = subdomains,
+        )
 
     _write_reports(result, formats, args.output, args.show_sensitive, started)
 
