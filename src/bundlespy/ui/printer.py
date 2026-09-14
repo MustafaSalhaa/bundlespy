@@ -212,6 +212,54 @@ def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0):
     _p()
 
 
+def _print_libraries(lib_findings: list) -> None:
+    """Print vulnerable library findings — clean, clear, reportable."""
+    if not lib_findings:
+        return
+
+    sev_colors = {
+        "CRITICAL": A.RED + A.BOLD,
+        "HIGH":     A.ORANGE + A.BOLD,
+        "MEDIUM":   A.YELLOW,
+        "LOW":      A.BLUE,
+    }
+
+    counts: dict = {}
+    for lf in lib_findings:
+        counts[lf.severity] = counts.get(lf.severity, 0) + 1
+
+    _section("VULNERABLE LIBRARIES", str(len(lib_findings)), A.RED)
+
+    # Summary counts
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        if counts.get(sev):
+            c = sev_colors.get(sev, "")
+            _p(f"  {c}{sev:<10}{A.RESET}  {counts[sev]}")
+    _p()
+
+    # Individual findings
+    shown_libs = set()
+    for lf in sorted(lib_findings, key=lambda x: -x.cvss):
+        c = sev_colors.get(lf.severity, "")
+
+        lib_key = f"{lf.library}:{lf.version}"
+        is_new  = lib_key not in shown_libs
+        shown_libs.add(lib_key)
+
+        if is_new:
+            _p(f"  {c}{lf.severity:<8}{A.RESET}  {A.WHITE}{A.BOLD}{lf.library} v{lf.version}{A.RESET}")
+            fname = lf.source_file.split("/")[-1] if "/" in lf.source_file else lf.source_file
+            _p(f"  {_label('File', 14)}{fname}")
+        else:
+            _p(f"  {A.GREY}{'':8}{A.RESET}  {A.GREY}+ additional CVE{A.RESET}")
+
+        _p(f"  {_label('CVE', 14)}{c}{lf.cve_id}{A.RESET}  {A.GREY}CVSS {lf.cvss}{A.RESET}")
+        _p(f"  {_label('Issue', 14)}{lf.description}")
+        _p(f"  {_label('Fix', 14)}{lf.remediation}")
+        _p(f"  {A.GREY}{'─' * 60}{A.RESET}")
+        _p()
+
+
 def _print_intelligence(intel) -> None:
     has = (intel.sitemap_urls or intel.api_endpoints or
            intel.security_txt or intel.openid_config or intel.api_schema)
@@ -617,6 +665,7 @@ def print_report(
     report_paths:       dict  = None,
     verbose:            bool  = False,
     show_fp:            bool  = False,
+    lib_findings:       list  = None,
 ) -> None:
     extras = extras or {}
 
@@ -648,6 +697,9 @@ def print_report(
     intel = extras.get("intel")
     if intel:
         _print_intelligence(intel)
+
+    if lib_findings:
+        _print_libraries(lib_findings)
 
     print_secret_analysis(result.findings)
     print_findings(result.findings, verbose=verbose, show_fp=show_fp)
