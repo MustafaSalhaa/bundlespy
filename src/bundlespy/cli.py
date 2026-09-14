@@ -258,6 +258,9 @@ def run_scan(args) -> int:
         errors.extend(crawler.errors)
         all_js.extend(crawler.js_files)
 
+        # Include HTML attribute findings from crawler
+        html_findings_from_crawler = getattr(crawler, "html_findings", [])
+
         for script_content, source_page in crawler.inline_scripts:
             import hashlib
             all_js.append(JSFile(
@@ -396,16 +399,6 @@ def run_scan(args) -> int:
         phase("Analyzing JavaScript")
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
-
-    # Final dedup pass
-    seen_final = set()
-    deduped = []
-    for ep in all_endpoints:
-        key = ep.url.rstrip("/").lower().split("?")[0]
-        if key not in seen_final:
-            seen_final.add(key)
-            deduped.append(ep)
-    all_endpoints = deduped
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
