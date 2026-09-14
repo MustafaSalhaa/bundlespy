@@ -616,15 +616,16 @@ def collect_headless_js(
 def collect_headless_full(
     url:           str,
     scope,
-    timeout:       int  = 30,
-    stealth:       bool = False,
-    max_pages:     int  = 100,
-    external_seen: set  = None,
+    timeout:       int   = 30,
+    stealth:       bool  = False,
+    max_pages:     int   = 500,
+    external_seen: set   = None,
+    seed_urls:     list  = None,
 ) -> dict:
     """
     Full interface returning JS files, endpoints, routes, and stats.
-    max_pages=100 by default — set higher for unlimited-style crawling.
-    external_seen: set of URLs already fetched by the crawler (avoids re-fetching).
+    seed_urls: additional pages to visit (from crawler, sitemap, etc.)
+    external_seen: URLs already fetched by crawler (avoids re-fetching).
     """
     engine = HeadlessEngine(
         target_url = url,
@@ -636,4 +637,9 @@ def collect_headless_full(
     )
     if external_seen:
         engine.external_seen = external_seen
+    # Pre-seed with pages already discovered by the static crawler
+    if seed_urls:
+        for seed_url in seed_urls:
+            if seed_url not in engine.seen_urls:
+                engine.routes.add(urlparse(seed_url).path or "/")
     return engine.run()
