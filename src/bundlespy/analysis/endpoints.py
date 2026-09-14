@@ -59,7 +59,7 @@ def _get_line_number(content: str, pos: int) -> int:
     return content[:pos].count("\n") + 1
 
 
-# Domains to skip — documentation, CDNs, framework URLs
+# Domains to skip — docs, social, CDNs, framework URLs
 SKIP_DOMAINS = {
     "reactjs.org", "www.reactjs.org",
     "w3.org", "www.w3.org",
@@ -72,14 +72,61 @@ SKIP_DOMAINS = {
     "schema.org", "json-ld.org",
     "ogp.me", "opengraph.io",
     "example.com", "example.org",
+    # Social media — not API endpoints
+    "twitter.com", "www.twitter.com", "x.com",
+    "linkedin.com", "www.linkedin.com",
+    "facebook.com", "www.facebook.com",
+    "instagram.com", "www.instagram.com",
+    "youtube.com", "www.youtube.com",
+    "t.me", "telegram.org",
+    "wa.me", "whatsapp.com",
+    # Analytics/CDN
+    "google.com", "www.google.com", "googleapis.com",
+    "googletagmanager.com", "google-analytics.com",
+    "cloudflare.com", "cdnjs.cloudflare.com",
+    "unpkg.com", "jsdelivr.net",
+    "fonts.googleapis.com", "fonts.gstatic.com",
 }
 
-def _is_doc_url(url: str) -> bool:
-    """Return True if URL is a documentation or framework reference."""
+# URL patterns that are not API endpoints
+SKIP_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".css", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pdf", ".zip", ".mp4", ".mp3", ".avi",
+}
+
+SKIP_PATH_PATTERNS = {
+    "/storage/", "/uploads/", "/images/", "/img/",
+    "/assets/images/", "/static/images/", "/media/",
+    "/fonts/", "/icons/",
+}
+
+
+def _is_skip_url(url: str) -> bool:
+    """Return True if URL should be skipped as a non-endpoint."""
     try:
         from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-        return host in SKIP_DOMAINS or host.endswith(".w3.org") or host.endswith(".reactjs.org")
+        parsed = urlparse(url)
+        host   = parsed.hostname or ""
+        path   = parsed.path.lower()
+
+        # Skip known non-API domains
+        if host in SKIP_DOMAINS:
+            return True
+        if host.endswith(".w3.org") or host.endswith(".reactjs.org"):
+            return True
+
+        # Skip static asset extensions
+        if any(path.endswith(ext) for ext in SKIP_EXTENSIONS):
+            return True
+
+        # Skip storage/media paths that look like UUIDs (not API routes)
+        if any(pat in path for pat in SKIP_PATH_PATTERNS):
+            # Allow if it also has /api/ in the path
+            if "/api/" not in path:
+                return True
+
+        return False
     except Exception:
         return False
 
@@ -90,9 +137,10 @@ def extract_endpoints(content: str, file_url: str) -> List[Endpoint]:
     seen = set()
 
     def add(path: str, method: str, line_no: int) -> None:
-        if _is_doc_url(path):
+        if _is_skip_url(path):
             return
-        key = f"{path}:{method}"
+        # Deduplicate by URL only — same endpoint from multiple inline scripts counts once
+        key = path.rstrip("/").lower()
         if key in seen:
             return
         seen.add(key)
