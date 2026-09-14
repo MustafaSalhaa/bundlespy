@@ -399,6 +399,13 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
+    # Merge HTML attribute findings from crawler
+    seen_html = {f.sha256 for f in all_findings}
+    for f in html_findings_from_crawler:
+        if f.sha256 not in seen_html:
+            seen_html.add(f.sha256)
+            all_findings.append(f)
+
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
