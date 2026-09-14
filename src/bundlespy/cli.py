@@ -510,8 +510,6 @@ def run_scan(args) -> int:
             graphql_schemas     = graphql_schemas,
             subdomains          = subdomains,
             report_paths        = file_paths,
-            show_fp             = getattr(args, "show_fp", False),
-            lib_findings        = extras.get("lib_findings", []),
         )
     elif getattr(args, "silent", False):
         # Silent mode — print only findings, one per line
