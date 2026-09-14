@@ -239,7 +239,6 @@ def run_scan(args) -> int:
 
     all_js: list = []
     errors: list = []
-    html_findings_from_crawler: list = []
 
     # ── Active crawl ──────────────────────────────────────────────────────────
     if not args.passive:
@@ -400,13 +399,6 @@ def run_scan(args) -> int:
         phase("Analyzing JavaScript")
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
-
-    # Add HTML attribute findings from crawler
-    seen_html = {f.sha256 for f in all_findings}
-    for f in html_findings_from_crawler:
-        if f.sha256 not in seen_html:
-            seen_html.add(f.sha256)
-            all_findings.append(f)
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
