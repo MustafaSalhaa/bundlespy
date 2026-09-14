@@ -1,299 +1,439 @@
 """
-Printer — high-level print functions for every feature section.
-Every output in BundleSpy goes through here.
+BundleSpy terminal UI — clean, modern, professional.
+Every section is consistent, readable, and information-dense.
+No noise. No clutter. Maximum signal.
 """
 
+import os
 import sys
-from typing import List, Optional
+import shutil
+from typing import List, Optional, Dict
 from datetime import datetime
 
-from .theme import A, SEVERITY_COLOR, STATUS_COLOR
-from .renderer import (
-    section, kv, truncate_url, severity_badge, redact,
-    two_col_table, count_table, severity_table, divider,
-    bullet, progress_bar, _w,
-)
+from .theme import A
+from .renderer import divider, two_col_table, severity_table, truncate_url, redact, section, _w
 
 
 def _p(text: str = "") -> None:
     print(text)
 
 
-def _err(text: str) -> None:
-    print(f"  {A.RED}Error:{A.RESET} {text}", file=sys.stderr)
+def _w() -> int:
+    try:
+        return min(shutil.get_terminal_size((80, 24)).columns, 110)
+    except Exception:
+        return 80
+
+
+def _line(char: str = "─", color: str = "") -> str:
+    rst = A.RESET if color else ""
+    return f"{color}{char * _w()}{rst}"
+
+
+def _label(text: str, width: int = 18) -> str:
+    return f"{A.GREY}{text.ljust(width)}{A.RESET}"
+
+
+def _val(text: str, color: str = "") -> str:
+    rst = A.RESET if color else ""
+    return f"{color}{text}{rst}"
+
+
+def _badge(severity: str) -> str:
+    colors = {
+        "CRITICAL": A.RED + A.BOLD,
+        "HIGH":     A.ORANGE + A.BOLD,
+        "MEDIUM":   A.YELLOW,
+        "LOW":      A.BLUE,
+        "INFO":     A.GREY,
+    }
+    c = colors.get(severity, A.GREY)
+    return f"{c}{severity:<8}{A.RESET}"
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
 def print_header(
-    target:   str,
-    mode:     str = "Active",
-    scope:    str = "Strict",
-    version:  str = "1.0.0",
-    author:   str = "Mustafa Salha",
+    target:  str,
+    mode:    str = "Active",
+    scope:   str = "Strict",
+    version: str = "1.0.0",
+    author:  str = "Mustafa Salha",
 ) -> None:
-    ts = datetime.utcnow().strftime("%H:%M:%S UTC")
+    ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
     _p()
-    _p(f"  {A.BOLD}{A.WHITE}BundleSpy{A.RESET}  {A.GREY}v{version}  -  {author}{A.RESET}")
-    _p(f"  {A.GREY}{divider()}{A.RESET}")
-    _p(kv("Target",  truncate_url(target, 70), value_color=A.CYAN))
-    _p(kv("Mode",    mode,   value_color=A.WHITE))
-    _p(kv("Scope",   scope,  value_color=A.WHITE))
-    _p(kv("Started", ts,     value_color=A.GREY))
+    _p(f"  {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
+    _p(f"  {A.GREY}{_line()}{A.RESET}")
+    _p(f"  {_label('Target')}{A.CYAN}{truncate_url(target, _w() - 22)}{A.RESET}")
+    _p(f"  {_label('Mode')}{mode}")
+    _p(f"  {_label('Scope')}{scope}")
+    _p(f"  {_label('Started')}{A.GREY}{ts}{A.RESET}")
     _p()
 
 
-# ── Phase announcements ───────────────────────────────────────────────────────
+# ── Phase lines ───────────────────────────────────────────────────────────────
 
 def phase(label: str) -> None:
-    _p(f"  {A.GREY}>{A.RESET} {label}")
+    _p(f"  {A.GREY}›{A.RESET}  {label}")
 
 
 def phase_done(label: str, detail: str = "") -> None:
     det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.GREEN}✓{A.RESET} {label}{det}")
+    _p(f"  {A.GREEN}✓{A.RESET}  {label}{det}")
 
 
 def phase_warn(label: str) -> None:
-    _p(f"  {A.YELLOW}!{A.RESET} {label}")
+    _p(f"  {A.YELLOW}!{A.RESET}  {label}")
 
 
 def phase_error(label: str) -> None:
-    _p(f"  {A.RED}x{A.RESET} {label}", )
+    print(f"  {A.RED}✗{A.RESET}  {label}", file=sys.stderr)
 
 
-# ── Discovery ─────────────────────────────────────────────────────────────────
+# ── Section header ─────────────────────────────────────────────────────────────
 
-def print_discovery(
-    pages:       int,
-    js_files:    int,
-    source_maps: int = 0,
-    chunks:      int = 0,
-    inline:      int = 0,
-    duration:    float = 0.0,
-) -> None:
-    _p(section("DISCOVERY"))
-    rows = [
-        ("Pages crawled",    str(pages)),
-        ("JavaScript files", str(js_files)),
-    ]
-    if source_maps:
-        rows.append(("Source maps",  str(source_maps)))
-    if chunks:
-        rows.append(("Chunks",       str(chunks)))
-    if inline:
-        rows.append(("Inline scripts", str(inline)))
-    _p(two_col_table(rows))
-    if duration:
-        _p(f"\n  {A.GREY}Discovery complete in {duration:.1f}s{A.RESET}")
+def _section(title: str, count: str = "", color: str = "") -> None:
+    c   = color or A.WHITE
+    cnt = f"  {A.GREY}({count}){A.RESET}" if count else ""
     _p()
+    _p(f"  {c}{A.BOLD}{title}{A.RESET}{cnt}")
+    _p(f"  {A.GREY}{_line('─')}{A.RESET}")
 
 
-# ── JS Inventory ─────────────────────────────────────────────────────────────
+# ── JS Inventory ──────────────────────────────────────────────────────────────
 
 def print_js_inventory(js_files: list, verbose: bool = False) -> None:
     if not js_files:
         return
-    _p(section("JAVASCRIPT ASSETS", f"{len(js_files)} collected"))
 
-    show = js_files if verbose else js_files[:20]
+    show = js_files if verbose else js_files[:15]
+    _section("JAVASCRIPT ASSETS", str(len(js_files)), A.CYAN)
+
     for js in show:
-        size = f"{js.size_bytes:,}b" if js.size_bytes else "?"
-        tech = f"  {A.GREY}[{js.technology}]{A.RESET}" if js.technology else ""
-        smap = f"  {A.YELLOW}[map]{A.RESET}" if js.has_source_map else ""
-        url  = truncate_url(js.url, _w() - 20)
+        size  = f"{js.size_bytes:,}b" if js.size_bytes else "?"
+        tech  = f"  {A.GREY}[{js.technology}]{A.RESET}" if js.technology else ""
+        smap  = f"  {A.YELLOW}map{A.RESET}" if js.has_source_map else ""
+        url   = js.url
 
         prefix = ""
-        if js.url.startswith("sourcemap://"):
-            url    = js.url.replace("sourcemap://", "")
-            prefix = f"  {A.GREEN}recovered{A.RESET}  "
-        elif js.url.startswith("local://"):
-            url    = js.url.replace("local://", "")
-            prefix = f"  {A.YELLOW}local{A.RESET}     "
+        if url.startswith("sourcemap://"):
+            url    = url.replace("sourcemap://", "")
+            prefix = f"{A.GREEN}recovered  {A.RESET}"
+        elif url.startswith("local://"):
+            url    = url.replace("local://", "")
+            prefix = f"{A.YELLOW}local      {A.RESET}"
+        elif url.startswith("inline:"):
+            prefix = f"{A.GREY}inline     {A.RESET}"
+            url    = url.replace("inline:", "")
+        elif url.startswith("html:"):
+            prefix = f"{A.BLUE}html       {A.RESET}"
+            url    = url.replace("html:", "")
 
-        _p(f"  {A.GREY}•{A.RESET} {prefix}{url}{tech}{smap}  {A.GREY}{size}{A.RESET}")
+        url = truncate_url(url, _w() - 28)
+        _p(f"  {A.GREY}  {prefix}{A.RESET}{url}{tech}{smap}  {A.GREY}{size}{A.RESET}")
 
-    if not verbose and len(js_files) > 20:
-        _p(f"  {A.GREY}... and {len(js_files) - 20} more  (use -v to show all){A.RESET}")
+    if not verbose and len(js_files) > 15:
+        _p(f"  {A.GREY}  ... and {len(js_files) - 15} more  (-v to show all){A.RESET}")
     _p()
 
 
-# ── Source maps ───────────────────────────────────────────────────────────────
+# ── Feature summaries ─────────────────────────────────────────────────────────
 
-def print_source_maps(
-    discovered:  int,
-    valid:       int,
-    recovered:   int,
-    sources:     int,
-    details:     list = None,
-) -> None:
-    _p(section("SOURCE MAPS"))
-    _p(two_col_table([
-        ("Discovered",  str(discovered)),
-        ("Valid",       str(valid)),
-        ("Recovered",   str(recovered)),
-        ("Sources",     str(sources)),
-    ]))
-    if details:
-        _p()
-        for d in details:
-            _p(f"  {A.WHITE}{d.get('js','')}{A.RESET}")
-            _p(f"  {A.GREY}└─ {d.get('map','')}{A.RESET}")
-            if d.get("sources"):
-                _p(f"     {A.GREY}├─ {d['sources']} original sources{A.RESET}")
-            if d.get("endpoints"):
-                _p(f"     {A.GREY}├─ {d['endpoints']} endpoints{A.RESET}")
-            if d.get("findings"):
-                _p(f"     {A.GREY}└─ {d['findings']} potential secrets{A.RESET}")
-    _p()
-
-
-# ── Webpack ───────────────────────────────────────────────────────────────────
-
-def print_webpack(
-    runtime:    bool,
-    discovered: int,
-    downloaded: int,
-    endpoints:  int = 0,
-    findings:   int = 0,
-) -> None:
-    _p(section("WEBPACK"))
+def print_source_maps(discovered, valid, recovered, sources, details=None):
+    if not discovered:
+        return
+    _section("SOURCE MAPS", "", A.YELLOW)
     rows = [
-        ("Runtime detected", "yes" if runtime else "no"),
-        ("Chunks discovered", str(discovered)),
-        ("Chunks downloaded", str(downloaded)),
+        ("Discovered", str(discovered)),
+        ("Valid",      str(valid)),
+        ("Recovered",  str(recovered)),
+        ("Sources",    str(sources)),
+    ]
+    for label, val in rows:
+        _p(f"  {_label(label, 14)}{val}")
+    if details:
+        for d in details:
+            _p(f"\n  {A.WHITE}{d.get('js','')}{A.RESET}")
+            _p(f"  {A.GREY}  └─ {d.get('map','')}{A.RESET}")
+            if d.get("sources"):
+                _p(f"  {A.GREY}     ├─ {d['sources']} original sources{A.RESET}")
+    _p()
+
+
+def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0):
+    if not discovered:
+        return
+    _section("WEBPACK CHUNKS", "", A.YELLOW)
+    rows = [
+        ("Runtime",    "detected" if runtime else "not found"),
+        ("Discovered", str(discovered)),
+        ("Downloaded", str(downloaded)),
     ]
     if endpoints:
         rows.append(("New endpoints", str(endpoints)))
     if findings:
         rows.append(("New findings",  str(findings)))
-    _p(two_col_table(rows))
+    for label, val in rows:
+        _p(f"  {_label(label, 14)}{val}")
     _p()
 
 
-# ── Passive ───────────────────────────────────────────────────────────────────
-
-def print_passive(
-    source:   str,
-    urls:     int,
-    js:       int,
-    unique:   int,
-    new:      int,
-) -> None:
-    _p(section("PASSIVE DISCOVERY"))
-    _p(two_col_table([
+def print_passive(source, urls, js, unique, new):
+    _section("PASSIVE DISCOVERY", "", A.CYAN)
+    rows = [
         ("Source",     source),
         ("URLs found", str(urls)),
         ("JS assets",  str(js)),
         ("Unique",     str(unique)),
-        ("New assets", str(new)),
-    ]))
+        ("New",        str(new)),
+    ]
+    for label, val in rows:
+        _p(f"  {_label(label, 14)}{val}")
     _p()
 
 
-# ── Headless ─────────────────────────────────────────────────────────────────
-
-def print_headless(
-    pages:      int,
-    js:         int,
-    xhr:        int = 0,
-    fetch:      int = 0,
-    ws:         int = 0,
-    chunks:     int = 0,
-    endpoints:  int = 0,
-    routes:     int = 0,
-) -> None:
-    _p(section("BROWSER DISCOVERY"))
+def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0):
+    _section("BROWSER DISCOVERY", "", A.CYAN)
     rows = [
-        ("Engine",      "Chromium (advanced)"),
-        ("Pages visited", str(pages)),
-        ("JS assets",   str(js)),
+        ("Engine",      "Chromium"),
+        ("Pages",       str(pages)),
+        ("JS captured", str(js)),
     ]
     if xhr or fetch:
-        rows.append(("XHR/fetch calls", str(xhr + fetch)))
+        rows.append(("API calls", str(xhr + fetch)))
     if ws:
-        rows.append(("WebSockets",    str(ws)))
+        rows.append(("WebSockets", str(ws)))
     if routes:
-        rows.append(("Routes found",  str(routes)))
+        rows.append(("Routes",    str(routes)))
     if endpoints:
-        rows.append(("API endpoints", str(endpoints)))
-    _p(two_col_table(rows))
+        rows.append(("Endpoints", str(endpoints)))
+    for label, val in rows:
+        _p(f"  {_label(label, 14)}{val}")
+    _p()
+
+
+def _print_intelligence(intel) -> None:
+    has = (intel.sitemap_urls or intel.api_endpoints or
+           intel.security_txt or intel.openid_config or intel.api_schema)
+    if not has:
+        return
+
+    _section("PASSIVE INTELLIGENCE", "", A.PURPLE)
+
+    if intel.sitemap_urls:
+        _p(f"  {_label('Sitemap URLs', 16)}{len(intel.sitemap_urls)}")
+        for url in intel.sitemap_urls[:8]:
+            _p(f"  {A.GREY}  • {truncate_url(url, _w() - 8)}{A.RESET}")
+        if len(intel.sitemap_urls) > 8:
+            _p(f"  {A.GREY}  ... and {len(intel.sitemap_urls) - 8} more{A.RESET}")
+
+    if intel.api_schema:
+        _p(f"\n  {_label('API Schema', 16)}{intel.api_schema.get('type', '?')}  {A.GREY}{intel.api_schema.get('url', '')}{A.RESET}")
+        for ep in intel.api_endpoints[:12]:
+            _p(f"  {A.GREY}  • {ep}{A.RESET}")
+
+    if intel.security_txt:
+        _p(f"\n  {_label('security.txt', 16)}{A.GREEN}found{A.RESET}")
+        for line in intel.security_txt.splitlines()[:5]:
+            if line.strip() and not line.startswith("#"):
+                _p(f"  {A.GREY}  {line.strip()}{A.RESET}")
+
+    if intel.openid_config:
+        _p(f"\n  {_label('OpenID Config', 16)}{A.YELLOW}found{A.RESET}")
+        if isinstance(intel.openid_config, dict):
+            for k in ["issuer", "authorization_endpoint", "token_endpoint"]:
+                if k in intel.openid_config:
+                    _p(f"  {A.GREY}  {k}: {intel.openid_config[k]}{A.RESET}")
+    _p()
+
+
+# ── Secret analysis ───────────────────────────────────────────────────────────
+
+def print_secret_analysis(findings: list) -> None:
+    if not findings:
+        return
+    total     = len(findings)
+    high_conf = sum(1 for f in findings if f.confidence >= 0.85 and f.status != "likely_false_positive")
+    validated = sum(1 for f in findings if f.status == "validated")
+    fps       = sum(1 for f in findings if f.status == "likely_false_positive")
+
+    _section("SECRET ANALYSIS", "", A.RED)
+    for label, val, color in [
+        ("Detected",        str(total),      ""),
+        ("High confidence", str(high_conf),  A.RED if high_conf else ""),
+        ("Likely FP",       str(fps),        A.GREY),
+        ("Validated",       str(validated),  A.RED + A.BOLD if validated else ""),
+    ]:
+        _p(f"  {_label(label, 18)}{_val(val, color)}")
+    _p()
+
+
+# ── Findings ──────────────────────────────────────────────────────────────────
+
+def print_findings(findings: list, verbose: bool = False) -> None:
+    real = [f for f in findings if f.status != "likely_false_positive"]
+    fps  = [f for f in findings if f.status == "likely_false_positive"]
+
+    if not real and not fps:
+        _section("FINDINGS")
+        _p(f"  {A.GREY}No findings detected above the confidence threshold.{A.RESET}")
+        _p()
+        return
+
+    counts: dict = {}
+    for f in real:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    sev_colors = {
+        "CRITICAL": A.RED + A.BOLD,
+        "HIGH":     A.ORANGE + A.BOLD,
+        "MEDIUM":   A.YELLOW,
+        "LOW":      A.BLUE,
+        "INFO":     A.GREY,
+    }
+
+    fp_note = f"  {A.GREY}({len(fps)} likely false positives excluded){A.RESET}" if fps else ""
+    _section("FINDINGS", f"{len(real)} confirmed{fp_note}", A.RED)
+
+    # Severity breakdown
+    for sev in order:
+        if counts.get(sev):
+            c = sev_colors.get(sev, "")
+            _p(f"  {c}{sev:<10}{A.RESET}  {counts[sev]}")
+    _p()
+
+    # Individual findings
+    for f in sorted(real, key=lambda x: order.index(x.severity) if x.severity in order else 99):
+        _print_finding(f, verbose=verbose)
+
+    if fps and verbose:
+        _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
+        _p(f"  {A.GREY}Likely false positives ({len(fps)}){A.RESET}")
+        for f in fps[:5]:
+            fname = f.file_url.split("/")[-1] if "/" in f.file_url else f.file_url
+            _p(f"  {A.GREY}  • {f.title}  {fname}:{f.line_number}{A.RESET}")
+    _p()
+
+
+def _print_finding(f, verbose: bool = False) -> None:
+    sev_colors = {
+        "CRITICAL": A.RED + A.BOLD,
+        "HIGH":     A.ORANGE + A.BOLD,
+        "MEDIUM":   A.YELLOW,
+        "LOW":      A.BLUE,
+        "INFO":     A.GREY,
+    }
+    sc  = sev_colors.get(f.severity, "")
+    rst = A.RESET
+
+    # Finding header
+    _p(f"  {sc}{f.severity:<8}{rst}  {A.WHITE}{A.BOLD}{f.title}{rst}  {A.GREY}({f.rule_id}){rst}")
+    _p()
+
+    # Location
+    url  = truncate_url(f.file_url, _w() - 6)
+    _p(f"  {_label('Location', 14)}{url}  {A.GREY}line {f.line_number}{rst}")
+
+    # Category and confidence
+    status_colors = {
+        "likely_secret":         A.RED,
+        "validated":             A.RED + A.BOLD,
+        "candidate":             A.YELLOW,
+        "likely_false_positive": A.GREY,
+    }
+    sc2 = status_colors.get(f.status, "")
+    _p(f"  {_label('Type', 14)}{f.category}")
+    _p(f"  {_label('Confidence', 14)}{f.confidence:.0%}  {sc2}{f.status}{rst}")
+
+    # Evidence — always show full value
+    _p(f"  {_label('Evidence', 14)}{sc}{f.matched_value}{rst}")
+
+    # Context
+    if f.context and verbose:
+        ctx = f.context[:120].replace("\n", " ").strip()
+        _p(f"  {_label('Context', 14)}{A.GREY}{ctx}{rst}")
+
+    # Recommendation
+    _p(f"  {_label('Fix', 14)}{f.remediation[:100]}")
+
+    # Validated
+    if f.status == "validated":
+        _p(f"  {A.RED}{A.BOLD}  ⚡ CONFIRMED ACTIVE — immediate action required{rst}")
+
+    _p(f"  {A.GREY}{'─' * 60}{rst}")
     _p()
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-def print_endpoints(
-    endpoints:          list,
-    validation_results: list = None,
-    verbose:            bool = False,
-) -> None:
+def print_endpoints(endpoints: list, validation_results: list = None, verbose: bool = False) -> None:
     if not endpoints:
         return
 
-    # Count by category
     by_cat: dict = {}
     for ep in endpoints:
         by_cat.setdefault(ep.category, []).append(ep)
 
-    auth_count   = len(by_cat.get("AUTH", []))
-    admin_count  = len(by_cat.get("ADMIN", []))
-    gql_count    = len(by_cat.get("GRAPHQL", []))
-    api_count    = len(by_cat.get("API", []))
-    ext_count    = sum(1 for ep in endpoints if ep.url.startswith("http") and _is_external(ep.url, endpoints))
-
-    _p(section("ENDPOINTS", f"{len(endpoints)} discovered"))
-    rows = [("Total", str(len(endpoints)))]
-    if api_count:
-        rows.append(("API",        str(api_count)))
-    if gql_count:
-        rows.append(("GraphQL",    str(gql_count)))
-    if auth_count:
-        rows.append(("Auth-related", str(auth_count)))
-    if admin_count:
-        rows.append(("Admin",      str(admin_count)))
-    _p(two_col_table(rows))
-
-    # Build validation lookup
     val_map: dict = {}
     if validation_results:
         for r in validation_results:
             val_map[r.endpoint] = r
 
-    # Show endpoints — with or without validation
-    _p()
-    order = ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "UNKNOWN"]
-    shown = 0
-    limit = 9999 if verbose else 60
+    total = len(endpoints)
+    _section("ENDPOINTS", str(total), A.BLUE)
 
-    for cat in order:
+    # Summary counts
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "API", "WEBSOCKET", "UPLOAD", "DOWNLOAD", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
-        cat_color = A.RED if cat in ("AUTH", "ADMIN") else (A.PURPLE if cat == "GRAPHQL" else A.BLUE)
-        _p(f"  {cat_color}{A.BOLD}{cat}{A.RESET}")
+        cat_colors = {
+            "AUTH":      A.RED,
+            "ADMIN":     A.ORANGE,
+            "GRAPHQL":   A.PURPLE,
+            "API":       A.BLUE,
+            "WEBSOCKET": A.CYAN,
+        }
+        c = cat_colors.get(cat, A.GREY)
+        _p(f"  {c}{A.BOLD}{cat:<12}{A.RESET}  {len(eps)}")
+
+    _p()
+
+    # Endpoint list
+    shown = 0
+    limit = 9999 if verbose else 40
+
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "UNKNOWN"]:
+        eps = by_cat.get(cat, [])
+        if not eps:
+            continue
+        cat_colors = {
+            "AUTH":    A.RED,
+            "ADMIN":   A.ORANGE,
+            "GRAPHQL": A.PURPLE,
+            "API":     A.BLUE,
+        }
+        c = cat_colors.get(cat, A.GREY)
+
         for ep in eps:
             if shown >= limit:
                 break
-            method = (ep.method or "?").ljust(6)
-            path   = truncate_url(ep.url, _w() - 30)
+            method = (ep.method or "?").ljust(5)
+            url    = truncate_url(ep.url, _w() - 20)
             vr     = val_map.get(ep.url)
+
             if vr:
-                sc    = str(vr.status_code).rjust(4)
-                sc_c  = A.GREEN if vr.status_code == 200 else (A.YELLOW if vr.status_code in (301,302,307) else A.RED)
-                ct    = vr.content_type.split(";")[0][:25] if vr.content_type else ""
-                _p(f"  {A.GREY}{method}{A.RESET}  {path}  {sc_c}{sc}{A.RESET}  {A.GREY}{ct}{A.RESET}")
+                sc = A.GREEN if vr.status_code == 200 else (A.YELLOW if vr.status_code in (301,302,307) else (A.RED if vr.status_code in (401,403) else A.GREY))
+                ct = vr.content_type.split(";")[0][:20] if vr.content_type else ""
+                _p(f"  {A.GREY}{method}{A.RESET}  {c}{url}{A.RESET}  {sc}{vr.status_code}{A.RESET}  {A.GREY}{ct}{A.RESET}")
             else:
-                _p(f"  {A.GREY}{method}{A.RESET}  {path}")
+                _p(f"  {A.GREY}{method}{A.RESET}  {c}{url}{A.RESET}")
             shown += 1
 
-    if not verbose and shown >= limit:
-        _p(f"\n  {A.GREY}... use -v to show all {len(endpoints)} endpoints{A.RESET}")
+    if shown >= limit and not verbose:
+        _p(f"\n  {A.GREY}  ... use -v to show all {total} endpoints{A.RESET}")
     _p()
-
-
-def _is_external(url: str, endpoints: list) -> bool:
-    return False  # placeholder
 
 
 # ── GraphQL ───────────────────────────────────────────────────────────────────
@@ -305,29 +445,25 @@ def print_graphql(schemas: list) -> None:
     total_types     = sum(len(s.types)     for s in schemas if not s.error)
     total_queries   = sum(len(s.queries)   for s in schemas if not s.error)
     total_mutations = sum(len(s.mutations) for s in schemas if not s.error)
-    enabled         = sum(1 for s in schemas if not s.error)
 
-    _p(section("GRAPHQL"))
-    _p(two_col_table([
-        ("Endpoints",     str(len(schemas))),
-        ("Introspection", "enabled" if enabled else "disabled"),
-        ("Types",         str(total_types)),
-        ("Queries",       str(total_queries)),
-        ("Mutations",     str(total_mutations)),
-    ]))
+    _section("GRAPHQL", "", A.PURPLE)
+    _p(f"  {_label('Endpoints',     14)}{len(schemas)}")
+    _p(f"  {_label('Introspection', 14)}{'enabled' if any(not s.error for s in schemas) else 'disabled'}")
+    _p(f"  {_label('Types',         14)}{total_types}")
+    _p(f"  {_label('Queries',       14)}{total_queries}")
+    _p(f"  {_label('Mutations',     14)}{total_mutations}")
 
     for schema in schemas:
-        _p()
-        _p(f"  {A.WHITE}{truncate_url(schema.endpoint)}{A.RESET}")
+        _p(f"\n  {A.WHITE}{truncate_url(schema.endpoint)}{A.RESET}")
         if schema.error:
             _p(f"  {A.GREY}  Status: {schema.error}{A.RESET}")
             continue
         if schema.queries:
-            _p(f"  {A.GREY}  Queries:   {', '.join(schema.queries[:8])}{A.RESET}")
+            _p(f"  {A.GREY}  Queries:{A.RESET}   {', '.join(schema.queries[:8])}")
         if schema.mutations:
-            _p(f"  {A.YELLOW}  Mutations: {', '.join(schema.mutations[:8])}{A.RESET}")
+            _p(f"  {A.ORANGE}  Mutations:{A.RESET}  {', '.join(schema.mutations[:8])}")
         if schema.sensitive_fields:
-            _p(f"  {A.RED}  Sensitive: {', '.join(schema.sensitive_fields[:6])}{A.RESET}")
+            _p(f"  {A.RED}  Sensitive:{A.RESET}  {', '.join(schema.sensitive_fields[:6])}")
     _p()
 
 
@@ -341,14 +477,14 @@ def print_infrastructure(items: list) -> None:
     for item in items:
         by_cls.setdefault(item.classification, []).append(item)
 
-    _p(section("INFRASTRUCTURE INTELLIGENCE", f"{len(items)} indicators"))
+    _section("INFRASTRUCTURE", str(len(items)), A.YELLOW)
 
     for cls, its in sorted(by_cls.items()):
-        cls_c = A.RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else (A.YELLOW if "HOSTNAME" in cls else A.GREY)
+        cls_c = A.RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else (A.ORANGE if "HOSTNAME" in cls else A.GREY)
         _p(f"\n  {cls_c}{cls}{A.RESET}  {A.GREY}({len(its)}){A.RESET}")
-        for item in its[:15]:
+        for item in its[:10]:
             fname = item.source_file.split("/")[-1] if "/" in item.source_file else item.source_file
-            _p(f"  {A.GREY}  •{A.RESET} {item.value}  {A.GREY}line {item.line_number} in {fname}{A.RESET}")
+            _p(f"  {A.GREY}  • {item.value}  line {item.line_number} in {fname}{A.RESET}")
     _p()
 
 
@@ -358,194 +494,172 @@ def print_subdomains(subdomains: list) -> None:
     if not subdomains:
         return
 
-    _p(section("SUBDOMAINS", f"{len(subdomains)} discovered"))
-    for sub in subdomains[:40]:
-        _p(f"  {A.GREY}•{A.RESET} {sub}")
-    if len(subdomains) > 40:
-        _p(f"  {A.GREY}... and {len(subdomains) - 40} more{A.RESET}")
+    _section("SUBDOMAINS", str(len(subdomains)), A.GREEN)
+    for sub in subdomains[:30]:
+        _p(f"  {A.GREY}  • {sub}{A.RESET}")
+    if len(subdomains) > 30:
+        _p(f"  {A.GREY}  ... and {len(subdomains) - 30} more{A.RESET}")
     _p()
 
 
-# ── Secret analysis ───────────────────────────────────────────────────────────
+# ── Endpoint validation ───────────────────────────────────────────────────────
 
-def print_secret_analysis(findings: list) -> None:
-    if not findings:
+def print_validation_results(results: list) -> None:
+    interesting = [r for r in results if r.interesting]
+    if not interesting:
         return
 
-    total      = len(findings)
-    high_conf  = sum(1 for f in findings if f.confidence >= 0.85 and f.status != "likely_false_positive")
-    validated  = sum(1 for f in findings if f.status == "validated")
-    fps        = sum(1 for f in findings if f.status == "likely_false_positive")
+    _section("ENDPOINT VALIDATION", f"{len(interesting)} interesting", A.GREEN)
 
-    _p(section("SECRET ANALYSIS"))
-    _p(two_col_table([
-        ("Detected",        str(total)),
-        ("High confidence", str(high_conf)),
-        ("Likely FP",       str(fps)),
-        ("Validated",       str(validated) if validated else "0"),
-    ]))
+    for r in interesting:
+        sc = A.GREEN if r.status_code == 200 else (A.YELLOW if r.status_code in (301,302,307) else (A.RED if r.status_code in (401,403) else A.GREY))
+        url = truncate_url(r.endpoint, _w() - 20)
+        notes = " | ".join(r.notes[:2]) if r.notes else ""
+        _p(f"  {sc}{r.status_code}{A.RESET}  {url}  {A.GREY}{notes}{A.RESET}")
     _p()
 
 
-# ── Findings ──────────────────────────────────────────────────────────────────
+# ── Summary ───────────────────────────────────────────────────────────────────
 
-def print_findings(findings: list, verbose: bool = False) -> None:
-    real = [f for f in findings if f.status != "likely_false_positive"]
-    fps  = [f for f in findings if f.status == "likely_false_positive"]
-
-    if not real and not fps:
-        _p(section("FINDINGS"))
-        _p(f"  {A.GREY}No findings detected above the confidence threshold.{A.RESET}")
-        _p()
-        return
-
-    # Severity counts
-    counts: dict = {}
-    for f in real:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-
-    _p(section("FINDINGS", f"{len(real)} confirmed  {A.GREY}({len(fps)} likely FP excluded){A.RESET}"))
-    _p(severity_table(counts))
-    _p()
-
-    # Print each finding
-    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    for f in sorted(real, key=lambda x: order.index(x.severity) if x.severity in order else 99):
-        _print_finding(f, verbose=verbose)
-
-    if fps and verbose:
-        _p(f"\n  {A.GREY}--- Likely false positives ({len(fps)}) ---{A.RESET}")
-        for f in fps:
-            _p(f"  {A.GREY}•{A.RESET} {f.title}  {A.GREY}{f.file_url.split('/')[-1]}:{f.line_number}{A.RESET}")
-    _p()
-
-
-def _print_finding(f, verbose: bool = False) -> None:
-    badge = severity_badge(f.severity)
-    sev_c = SEVERITY_COLOR.get(f.severity, "")
-    rst   = A.RESET
-
-    _p(f"{badge}  {sev_c}{f.title}{rst}")
-    _p()
-    _p(f"  {A.GREY}Location{rst}")
-    _p(f"  {A.WHITE}{truncate_url(f.file_url)}:{f.line_number}{rst}")
-    _p()
-    _p(f"  {A.GREY}Type{rst}")
-    _p(f"  {f.category}  {A.GREY}({f.rule_id}){rst}")
-    _p()
-    _p(f"  {A.GREY}Confidence{rst}")
-    _p(f"  {f.confidence:.0%}  {A.GREY}{f.status}{rst}")
-    _p()
-    _p(f"  {A.GREY}Evidence{rst}")
-
-    # Redact only actual secrets — show infrastructure/endpoint values as-is
-    secret_categories = {"AWS", "Azure", "Google", "GitHub", "GitLab", "Stripe",
-                         "Slack", "Email", "JWT", "Cryptographic", "Database",
-                         "Package Registry", "E-Commerce", "Twilio", "Discord",
-                         "Maps", "Generic"}
-    if f.category in secret_categories:
-        val = redact(f.matched_value)
-    else:
-        val = f.matched_value
-    _p(f"  {sev_c}{val}{rst}")
-
-    if f.context and verbose:
-        _p()
-        _p(f"  {A.GREY}Context{rst}")
-        ctx = f.context[:120].replace("\n", " ").strip()
-        _p(f"  {A.GREY}{ctx}{rst}")
-
-    if f.remediation:
-        _p()
-        _p(f"  {A.GREY}Recommendation{rst}")
-        _p(f"  {f.remediation[:120]}")
-
-    if f.status == "validated":
-        _p()
-        _p(f"  {A.RED}{A.BOLD}VALIDATED — Secret confirmed active{rst}")
-        _p(f"  {A.RED}Provider: {f.description.split('VALIDATED:')[-1].strip()[:80] if 'VALIDATED:' in f.description else 'confirmed'}{rst}")
-
-    _p()
-    _p(f"  {A.GREY}{'─' * 48}{A.RESET}")
-    _p()
-
-
-# ── Final summary ─────────────────────────────────────────────────────────────
-
-def print_summary(
-    result,
-    extras:      dict = None,
-    report_paths: dict = None,
-) -> None:
-    extras = extras or {}
+def print_summary(result, extras=None, report_paths=None) -> None:
+    extras       = extras or {}
     report_paths = report_paths or {}
 
     findings = result.findings
     real     = [f for f in findings if f.status != "likely_false_positive"]
-
     counts: dict = {}
     for f in real:
         counts[f.severity] = counts.get(f.severity, 0) + 1
+
+    validated = [f for f in findings if f.status == "validated"]
 
     duration = ""
     if result.finished_at and result.started_at:
         secs     = (result.finished_at - result.started_at).total_seconds()
         duration = f"{secs:.1f}s"
 
+    sev_colors = {
+        "CRITICAL": A.RED + A.BOLD,
+        "HIGH":     A.ORANGE + A.BOLD,
+        "MEDIUM":   A.YELLOW,
+        "LOW":      A.BLUE,
+        "INFO":     A.GREY,
+    }
+
     _p()
-    _p(f"  {A.BOLD}{A.WHITE}SCAN COMPLETE{A.RESET}")
-    _p(f"  {A.GREY}{divider()}{A.RESET}")
+    _p(f"  {A.WHITE}{A.BOLD}{'─' * _w()}{A.RESET}")
+    _p(f"  {A.WHITE}{A.BOLD}SCAN COMPLETE{A.RESET}  {A.GREY}{duration}{A.RESET}")
+    _p(f"  {A.WHITE}{A.BOLD}{'─' * _w()}{A.RESET}")
     _p()
-    _p(f"  {A.GREY}Target{A.RESET}")
-    _p(f"  {A.CYAN}{truncate_url(result.target_url, 70)}{A.RESET}")
-    if duration:
-        _p()
-        _p(f"  {A.GREY}Duration{A.RESET}")
-        _p(f"  {duration}")
+
+    # Target
+    _p(f"  {_label('Target', 18)}{A.CYAN}{truncate_url(result.target_url, 70)}{A.RESET}")
+    _p(f"  {_label('Pages crawled', 18)}{result.pages_crawled}")
 
     # Assets
-    _p()
-    _p(f"  {A.GREY}Assets{A.RESET}")
     js_count = len([js for js in result.js_files if not js.url.startswith("sourcemap://")])
-    _p(f"  {js_count} JavaScript files")
+    _p(f"  {_label('JS files', 18)}{js_count}")
     if extras.get("recovered_sources"):
-        _p(f"  {extras['recovered_sources']} recovered source files")
+        _p(f"  {_label('Recovered', 18)}{A.GREEN}{extras['recovered_sources']} source files{A.RESET}")
     if extras.get("chunks_found"):
-        _p(f"  {extras['chunks_found']} webpack chunks")
-    if extras.get("passive_urls"):
-        _p(f"  {extras['passive_urls']} archive URLs collected")
+        _p(f"  {_label('Chunks', 18)}{extras['chunks_found']}")
+
+    _p()
 
     # Intelligence
-    _p()
-    _p(f"  {A.GREY}Intelligence{A.RESET}")
-    _p(f"  {len(result.endpoints)} endpoints")
+    _p(f"  {_label('Endpoints', 18)}{len(result.endpoints)}")
     if extras.get("subdomains"):
-        _p(f"  {extras['subdomains']} subdomains")
+        _p(f"  {_label('Subdomains', 18)}{extras['subdomains']}")
     if extras.get("graphql_queries"):
-        _p(f"  {extras['graphql_queries']} GraphQL operations")
-    if real:
-        _p(f"  {len(real)} secrets / potential secrets")
+        _p(f"  {_label('GraphQL ops', 18)}{extras['graphql_queries']}")
     if result.infrastructure:
-        _p(f"  {len(result.infrastructure)} infrastructure indicators")
+        _p(f"  {_label('Infrastructure', 18)}{len(result.infrastructure)}")
+
+    _p()
 
     # Findings
-    _p()
-    _p(f"  {A.GREY}Findings{A.RESET}")
-    if counts:
-        _p(severity_table(counts))
-    else:
-        _p(f"  {A.GREEN}none{A.RESET}")
+    _p(f"  {_label('Findings', 18)}{len(real)}")
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+        if counts.get(sev):
+            c = sev_colors.get(sev, "")
+            _p(f"  {A.GREY}  {sev:<10}{A.RESET}  {c}{counts[sev]}{A.RESET}")
+
+    if validated:
+        _p(f"\n  {A.RED}{A.BOLD}  ⚡ {len(validated)} secrets VALIDATED as active{A.RESET}")
 
     # Reports
     if report_paths:
         _p()
-        _p(f"  {A.GREY}Reports{A.RESET}")
+        _p(f"  {_label('Reports', 18)}")
         for fmt, path in report_paths.items():
-            _p(f"  {fmt.upper().ljust(6)}  {A.GREY}{path}{A.RESET}")
+            _p(f"  {A.GREY}  {fmt.upper():<8}{A.RESET}  {path}")
 
     _p()
-    if counts.get("CRITICAL") or counts.get("HIGH"):
-        _p(f"  {A.RED}Completed with critical findings. Immediate action required.{A.RESET}")
+    if counts.get("CRITICAL") or counts.get("HIGH") or validated:
+        _p(f"  {A.RED}{A.BOLD}Critical findings present. Immediate action required.{A.RESET}")
     else:
-        _p(f"  {A.GREEN}Completed successfully.{A.RESET}")
+        _p(f"  {A.GREEN}Scan complete. No critical findings.{A.RESET}")
     _p()
+
+
+# ── Main report ───────────────────────────────────────────────────────────────
+
+def print_report(
+    result,
+    show_sensitive:     bool  = True,
+    no_color:           bool  = False,
+    min_severity:       str   = "INFO",
+    extras:             dict  = None,
+    validation_results: list  = None,
+    graphql_schemas:    list  = None,
+    subdomains:         list  = None,
+    report_paths:       dict  = None,
+    verbose:            bool  = False,
+) -> None:
+    extras = extras or {}
+
+    print_js_inventory(result.js_files, verbose=verbose)
+
+    if extras.get("source_map_details"):
+        d = extras["source_map_details"]
+        print_source_maps(d.get("discovered",0), d.get("valid",0),
+                          d.get("recovered",0), d.get("sources",0),
+                          d.get("items",[]))
+
+    if extras.get("chunk_stats"):
+        c = extras["chunk_stats"]
+        print_webpack(c.get("runtime",False), c.get("discovered",0),
+                      c.get("downloaded",0), c.get("endpoints",0),
+                      c.get("findings",0))
+
+    if extras.get("passive_stats"):
+        p = extras["passive_stats"]
+        print_passive(p.get("source",""), p.get("urls",0),
+                      p.get("js",0), p.get("unique",0), p.get("new",0))
+
+    if extras.get("headless_stats"):
+        h = extras["headless_stats"]
+        print_headless(h.get("pages",0), h.get("js",0), h.get("xhr",0),
+                       h.get("fetch",0), h.get("ws",0), h.get("routes",0),
+                       h.get("endpoints",0))
+
+    intel = extras.get("intel")
+    if intel:
+        _print_intelligence(intel)
+
+    print_secret_analysis(result.findings)
+    print_findings(result.findings, verbose=verbose)
+    print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
+
+    if validation_results:
+        print_validation_results(validation_results)
+
+    if graphql_schemas:
+        print_graphql(graphql_schemas)
+
+    print_infrastructure(result.infrastructure)
+
+    if subdomains:
+        print_subdomains(subdomains)
+
+    print_summary(result, extras=extras, report_paths=report_paths)
