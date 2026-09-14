@@ -457,7 +457,7 @@ def _print_finding(f, verbose: bool = False) -> None:
         _p(f"  {A.RED}Provider: {f.description.split('VALIDATED:')[-1].strip()[:80] if 'VALIDATED:' in f.description else 'confirmed'}{rst}")
 
     _p()
-    _p(f"  {A.GREY}{divider('─', 48)}{rst}")
+    _p(f"  {A.GREY}{'─' * 48}{A.RESET}")
     _p()
 
 
