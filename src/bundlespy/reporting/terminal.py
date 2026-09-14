@@ -62,8 +62,9 @@ def print_report(
             pages=h.get("pages", 0),
             js=h.get("js", 0),
             xhr=h.get("xhr", 0),
+            fetch=h.get("fetch", 0),
             ws=h.get("ws", 0),
-            chunks=h.get("chunks", 0),
+            routes=h.get("routes", 0),
             endpoints=h.get("endpoints", 0),
         )
 
