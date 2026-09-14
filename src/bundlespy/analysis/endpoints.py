@@ -110,6 +110,24 @@ def _is_skip_url(url: str) -> bool:
         host   = parsed.hostname or ""
         path   = parsed.path.lower()
 
+        if host in SKIP_DOMAINS:
+            return True
+        if host.endswith(".w3.org") or host.endswith(".reactjs.org"):
+            return True
+
+        skip_ext = {".png",".jpg",".jpeg",".gif",".svg",".ico",".webp",
+                    ".css",".woff",".woff2",".ttf",".eot",".pdf",".zip"}
+        if any(path.endswith(ext) for ext in skip_ext):
+            return True
+
+        skip_path = {"/storage/", "/uploads/", "/images/", "/img/", "/media/", "/fonts/"}
+        if any(p in path for p in skip_path) and "/api/" not in path:
+            return True
+
+        return False
+    except Exception:
+        return False
+
         # Skip known non-API domains
         if host in SKIP_DOMAINS:
             return True
