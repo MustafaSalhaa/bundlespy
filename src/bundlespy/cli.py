@@ -27,7 +27,6 @@ from .reporting.csv_report import generate as generate_csv
 from .reporting.burp_export import generate_burp_xml, generate_url_list
 from .ui.printer import (
     print_header, phase, phase_done, phase_warn, phase_error,
-    print_discovery,
 )
 from .ui.theme import A
 
