@@ -167,10 +167,23 @@ def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
     findings   = []
     endpoints  = []
     infra      = []
+    seen_eps   = set()
+    seen_finds = set()
+
     for js in js_files:
-        findings.extend(scanner.scan(js.content, js.url, js.source_page))
-        endpoints.extend(extract_endpoints(js.content, js.url))
+        for f in scanner.scan(js.content, js.url, js.source_page):
+            if f.sha256 not in seen_finds:
+                seen_finds.add(f.sha256)
+                findings.append(f)
+
+        for ep in extract_endpoints(js.content, js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                endpoints.append(ep)
+
         infra.extend(extract_infrastructure(js.content, js.url))
+
     return findings, endpoints, infra
 
 
