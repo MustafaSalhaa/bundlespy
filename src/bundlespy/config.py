@@ -20,9 +20,9 @@ class ScopeConfig:
 
 @dataclass
 class CrawlerConfig:
-    depth: int               = 2
-    max_pages: int           = 100
-    max_js_files: int        = 200
+    depth: int               = 5
+    max_pages: int           = 1000
+    max_js_files: int        = 2000
     concurrency: int         = 4
     requests_per_second: int = 2
     timeout: int             = 10
@@ -83,4 +83,4 @@ class BundleSpyConfig:
     policy: PolicyConfig         = field(default_factory=PolicyConfig)
     verbose: bool                = False
     quiet: bool                  = False
-    no_color: bool               = False
+    no_color: bool               = True
