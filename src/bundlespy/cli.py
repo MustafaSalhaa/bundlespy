@@ -56,10 +56,10 @@ examples:
     scan.add_argument("target")
 
     # Crawl
-    scan.add_argument("--depth",       type=int, default=2)
-    scan.add_argument("--max-pages",   type=int, default=100)
-    scan.add_argument("--max-js",      type=int, default=200)
-    scan.add_argument("--rate",        type=int, default=2)
+    scan.add_argument("--depth",       type=int, default=5)
+    scan.add_argument("--max-pages",   type=int, default=500)
+    scan.add_argument("--max-js",      type=int, default=1000)
+    scan.add_argument("--rate",        type=int, default=3)
     scan.add_argument("--timeout",     type=int, default=10)
     scan.add_argument("--common-paths",action="store_true")
     scan.add_argument("--subdomains",  action="store_true")
@@ -309,13 +309,15 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase("Launching advanced headless browser")
         from .discovery.headless import collect_headless_full
-        # Pass crawler's already-seen JS URLs so headless doesn't re-fetch them
-        crawler_seen = getattr(crawler if not args.passive else None, "visited_js", set()) or set()
+        # Pass crawler's already-seen JS URLs and visited pages to headless
+        crawler_seen  = getattr(crawler if not args.passive else None, "visited_js", set()) or set()
+        crawler_pages = list(getattr(crawler if not args.passive else None, "visited_pages", set()) or set())
         headless_result = collect_headless_full(target, scope,
                                                 stealth=args.stealth,
                                                 timeout=args.timeout,
                                                 max_pages=args.max_pages,
-                                                external_seen=crawler_seen)
+                                                external_seen=crawler_seen,
+                                                seed_urls=crawler_pages)
         headless_files    = headless_result.get("js_files", [])
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats    = headless_result.get("stats", {})
