@@ -59,12 +59,39 @@ def _get_line_number(content: str, pos: int) -> int:
     return content[:pos].count("\n") + 1
 
 
+# Domains to skip — documentation, CDNs, framework URLs
+SKIP_DOMAINS = {
+    "reactjs.org", "www.reactjs.org",
+    "w3.org", "www.w3.org",
+    "github.com", "www.github.com",
+    "developer.mozilla.org", "mdn.io",
+    "tc39.es", "ecma-international.org",
+    "nodejs.org", "npmjs.com",
+    "webpack.js.org", "babeljs.io",
+    "vuejs.org", "angular.io",
+    "schema.org", "json-ld.org",
+    "ogp.me", "opengraph.io",
+    "example.com", "example.org",
+}
+
+def _is_doc_url(url: str) -> bool:
+    """Return True if URL is a documentation or framework reference."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        return host in SKIP_DOMAINS or host.endswith(".w3.org") or host.endswith(".reactjs.org")
+    except Exception:
+        return False
+
+
 def extract_endpoints(content: str, file_url: str) -> List[Endpoint]:
     """Extract all endpoints and interesting URLs from JS content."""
     endpoints: List[Endpoint] = []
     seen = set()
 
     def add(path: str, method: str, line_no: int) -> None:
+        if _is_doc_url(path):
+            return
         key = f"{path}:{method}"
         if key in seen:
             return
