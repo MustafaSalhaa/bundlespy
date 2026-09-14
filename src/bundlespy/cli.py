@@ -207,7 +207,7 @@ def run_scan(args) -> int:
     started = datetime.utcnow()
     extras  = {}
 
-    if not args.quiet and not getattr(args, 'silent', False):
+    if not args.quiet:
         mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
         if args.stealth:
             mode += " + Stealth"
@@ -243,7 +243,7 @@ def run_scan(args) -> int:
 
     # ── Active crawl ──────────────────────────────────────────────────────────
     if not args.passive:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Crawling target")
         crawler = Crawler(
             target_url=target, fetcher=fetcher, scope=scope,
@@ -271,13 +271,13 @@ def run_scan(args) -> int:
                 content=script_content,
             ))
 
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Crawl complete",
                 f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
 
     # ── Passive ───────────────────────────────────────────────────────────────
     if args.passive:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Collecting from web archives")
         from .discovery.passive import collect_passive_js_urls
         passive_urls = collect_passive_js_urls(target)
@@ -301,12 +301,12 @@ def run_scan(args) -> int:
             "urls": len(passive_urls), "js": new_js,
             "unique": new_js, "new": new_js,
         }
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Passive collection", f"{len(passive_urls)} archive URLs  {new_js} JS assets")
 
     # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Launching advanced headless browser")
         from .discovery.headless import collect_headless_full
         # Pass crawler's already-seen JS URLs so headless doesn't re-fetch them
@@ -337,7 +337,7 @@ def run_scan(args) -> int:
             "routes":    headless_stats.get("routes", 0),
             "endpoints": headless_stats.get("endpoints", 0),
         }
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Browser discovery",
                 f"{headless_stats.get('pages',0)} pages  "
                 f"{len(headless_files)} JS  "
@@ -349,7 +349,7 @@ def run_scan(args) -> int:
     # ── Source maps ───────────────────────────────────────────────────────────
     sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
     if args.source_maps:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Analyzing source maps")
         from .discovery.source_maps import process_js_file
         recovered_files = []
@@ -370,14 +370,14 @@ def run_scan(args) -> int:
         all_js.extend(recovered_files)
         extras["source_map_details"] = sm_details
         extras["recovered_sources"]  = len(recovered_files)
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Source map analysis",
                 f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
 
     # ── Webpack chunks ────────────────────────────────────────────────────────
     chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0}
     if args.chunks:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Discovering webpack chunks")
         from .discovery.webpack_chunks import fetch_chunks, detect_webpack
         seen_chunk_urls = {js.url for js in all_js}
@@ -392,11 +392,11 @@ def run_scan(args) -> int:
         chunk_stats["downloaded"] = len(chunk_files)
         extras["chunk_stats"]  = chunk_stats
         extras["chunks_found"] = len(chunk_files)
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Chunk discovery", f"{len(chunk_files)} chunks")
 
     # ── Analysis ──────────────────────────────────────────────────────────────
-    if not args.quiet and not getattr(args, 'silent', False):
+    if not args.quiet:
         phase("Analyzing JavaScript")
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
@@ -409,7 +409,7 @@ def run_scan(args) -> int:
             if key not in seen_ep_keys:
                 seen_ep_keys.add(key)
                 all_endpoints.append(ep)
-    if not args.quiet and not getattr(args, 'silent', False):
+    if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
 
@@ -421,7 +421,7 @@ def run_scan(args) -> int:
     # ── Subdomain harvesting ──────────────────────────────────────────────────
     subdomains = []
     if args.harvest_subs:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Harvesting subdomains")
         from .discovery.subdomains import harvest_subdomains
         subdomains = harvest_subdomains(
@@ -430,13 +430,13 @@ def run_scan(args) -> int:
             [ep.url for ep in all_endpoints],
         )
         extras["subdomains"] = len(subdomains)
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Subdomain harvest", f"{len(subdomains)} subdomains")
 
     # ── Endpoint validation ───────────────────────────────────────────────────
     validation_results = []
     if args.validate and all_endpoints:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase(f"Validating {len(all_endpoints)} endpoints")
         from .analysis.endpoint_validator import validate_endpoints
         validation_results = validate_endpoints(
@@ -444,13 +444,13 @@ def run_scan(args) -> int:
             stealth=args.stealth, rate=max(1, args.rate // 2),
         )
         interesting = sum(1 for r in validation_results if r.interesting)
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Endpoint validation", f"{interesting} interesting")
 
     # ── GraphQL ───────────────────────────────────────────────────────────────
     graphql_schemas = []
     if args.graphql and all_endpoints:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("GraphQL introspection")
         from .analysis.graphql import find_graphql_endpoints, introspect
         gql_urls = find_graphql_endpoints(all_endpoints)
@@ -460,12 +460,12 @@ def run_scan(args) -> int:
                 graphql_schemas.append(schema)
         total_ops = sum(len(s.queries) + len(s.mutations) for s in graphql_schemas if not s.error)
         extras["graphql_queries"] = total_ops
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("GraphQL", f"{len(gql_urls)} endpoints  {total_ops} operations")
 
     # ── Secret validation ─────────────────────────────────────────────────────
     if args.validate_secrets and all_findings:
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase("Validating secrets")
         from .analysis.secret_validator import validate_finding
         validated = 0
@@ -477,7 +477,7 @@ def run_scan(args) -> int:
                 finding.status      = "validated"
                 finding.description += f" | VALIDATED: {vr.detail}"
                 validated += 1
-        if not args.quiet and not getattr(args, 'silent', False):
+        if not args.quiet:
             phase_done("Secret validation", f"{validated} confirmed active")
 
     # ── Build result ──────────────────────────────────────────────────────────
@@ -511,6 +511,7 @@ def run_scan(args) -> int:
             subdomains          = subdomains,
             report_paths        = file_paths,
             show_fp             = getattr(args, "show_fp", False),
+            lib_findings        = extras.get("lib_findings", []),
         )
     elif getattr(args, "silent", False):
         # Silent mode — print only findings, one per line
