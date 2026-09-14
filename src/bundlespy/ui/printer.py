@@ -270,7 +270,7 @@ def print_secret_analysis(findings: list) -> None:
 
 # ── Findings ──────────────────────────────────────────────────────────────────
 
-def print_findings(findings: list, verbose: bool = False) -> None:
+def print_findings(findings: list, verbose: bool = False, show_fp: bool = False) -> None:
     real = [f for f in findings if f.status != "likely_false_positive"]
     fps  = [f for f in findings if f.status == "likely_false_positive"]
 
@@ -293,7 +293,7 @@ def print_findings(findings: list, verbose: bool = False) -> None:
         "INFO":     A.GREY,
     }
 
-    fp_note = f"  {A.GREY}({len(fps)} likely false positives excluded){A.RESET}" if fps else ""
+    fp_note = f"  {A.GREY}+{len(fps)} FP excluded{A.RESET}" if fps else ""
     _section("FINDINGS", f"{len(real)} confirmed{fp_note}", A.RED)
 
     # Severity breakdown
@@ -307,12 +307,12 @@ def print_findings(findings: list, verbose: bool = False) -> None:
     for f in sorted(real, key=lambda x: order.index(x.severity) if x.severity in order else 99):
         _print_finding(f, verbose=verbose)
 
-    if fps and verbose:
+    if fps and (verbose or show_fp):
         _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
         _p(f"  {A.GREY}Likely false positives ({len(fps)}){A.RESET}")
-        for f in fps[:5]:
+        for f in fps[:10]:
             fname = f.file_url.split("/")[-1] if "/" in f.file_url else f.file_url
-            _p(f"  {A.GREY}  • {f.title}  {fname}:{f.line_number}{A.RESET}")
+            _p(f"  {A.GREY}  • {f.title}  {fname}:{f.line_number}  {f.matched_value[:40]}{A.RESET}")
     _p()
 
 
@@ -577,12 +577,13 @@ def print_summary(result, extras=None, report_paths=None) -> None:
 
     _p()
 
-    # Findings
+    # Findings — severity colored in summary
     _p(f"  {_label('Findings', 18)}{len(real)}")
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-        if counts.get(sev):
+        n = counts.get(sev, 0)
+        if n:
             c = sev_colors.get(sev, "")
-            _p(f"  {A.GREY}  {sev:<10}{A.RESET}  {c}{counts[sev]}{A.RESET}")
+            _p(f"  {c}  {sev:<10}  {n}{A.RESET}")
 
     if validated:
         _p(f"\n  {A.RED}{A.BOLD}  ⚡ {len(validated)} secrets VALIDATED as active{A.RESET}")
@@ -615,6 +616,7 @@ def print_report(
     subdomains:         list  = None,
     report_paths:       dict  = None,
     verbose:            bool  = False,
+    show_fp:            bool  = False,
 ) -> None:
     extras = extras or {}
 
@@ -648,7 +650,7 @@ def print_report(
         _print_intelligence(intel)
 
     print_secret_analysis(result.findings)
-    print_findings(result.findings, verbose=verbose)
+    print_findings(result.findings, verbose=verbose, show_fp=show_fp)
     print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
 
     if validation_results:
