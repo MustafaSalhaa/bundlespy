@@ -88,6 +88,8 @@ examples:
     scan.add_argument("--no-color",       action="store_true")
     scan.add_argument("--json",           action="store_true", help="JSON output only")
     scan.add_argument("--csv",            action="store_true", help="CSV output only")
+    scan.add_argument("--show-fp",        action="store_true", help="Show likely false positives in output")
+    scan.add_argument("--silent",         action="store_true", help="Findings only - no progress, no headers")
 
     # ── local ─────────────────────────────────────────────────────────────────
     local = sub.add_parser("local", help="Scan local JS files")
@@ -399,13 +401,6 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
-    # Merge HTML attribute findings from crawler
-    seen_html = {f.sha256 for f in all_findings}
-    for f in html_findings_from_crawler:
-        if f.sha256 not in seen_html:
-            seen_html.add(f.sha256)
-            all_findings.append(f)
-
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
@@ -505,7 +500,7 @@ def run_scan(args) -> int:
     if file_formats:
         file_paths = _write_reports(result, file_formats, args.output, started)
 
-    if "terminal" in formats and not args.quiet:
+    if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
         print_report(
             result,
             verbose             = args.verbose,
@@ -515,7 +510,13 @@ def run_scan(args) -> int:
             graphql_schemas     = graphql_schemas,
             subdomains          = subdomains,
             report_paths        = file_paths,
+            show_fp             = getattr(args, "show_fp", False),
         )
+    elif getattr(args, "silent", False):
+        # Silent mode — print only findings, one per line
+        real = [f for f in all_findings if f.status != "likely_false_positive"]
+        for f in real:
+            print(f"[{f.severity}] {f.title} | {f.file_url}:{f.line_number} | {f.matched_value}")
     elif args.quiet and file_paths:
         for fmt, path in file_paths.items():
             print(path)
