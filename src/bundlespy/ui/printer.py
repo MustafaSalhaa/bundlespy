@@ -34,7 +34,7 @@ def print_header(
 ) -> None:
     ts = datetime.utcnow().strftime("%H:%M:%S UTC")
     _p()
-    _p(f"  {A.BOLD}{A.WHITE}BundleSpy{A.RESET}  {A.GREY}v{version}  -  {author}{A.RESET}")
+    _p(f"  {A.BOLD}{A.WHITE}BundleSpy{A.RESET}  {A.GREY}v{version}  —  {author}{A.RESET}")
     _p(f"  {A.GREY}{divider()}{A.RESET}")
     _p(kv("Target",  truncate_url(target, 70), value_color=A.CYAN))
     _p(kv("Mode",    mode,   value_color=A.WHITE))
@@ -439,7 +439,14 @@ def _print_finding(f, verbose: bool = False) -> None:
     _p(f"  {A.GREY}Evidence{rst}")
 
     # Redact only actual secrets — show infrastructure/endpoint values as-is
-    val = f.matched_value
+    secret_categories = {"AWS", "Azure", "Google", "GitHub", "GitLab", "Stripe",
+                         "Slack", "Email", "JWT", "Cryptographic", "Database",
+                         "Package Registry", "E-Commerce", "Twilio", "Discord",
+                         "Maps", "Generic"}
+    if f.category in secret_categories:
+        val = redact(f.matched_value)
+    else:
+        val = f.matched_value
     _p(f"  {sev_c}{val}{rst}")
 
     if f.context and verbose:
