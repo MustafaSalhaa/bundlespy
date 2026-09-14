@@ -197,24 +197,26 @@ def print_headless(
     pages:      int,
     js:         int,
     xhr:        int = 0,
+    fetch:      int = 0,
     ws:         int = 0,
     chunks:     int = 0,
     endpoints:  int = 0,
+    routes:     int = 0,
 ) -> None:
     _p(section("BROWSER DISCOVERY"))
     rows = [
-        ("Engine",    "Chromium"),
-        ("Pages",     str(pages)),
-        ("JS assets", str(js)),
+        ("Engine",      "Chromium (advanced)"),
+        ("Pages visited", str(pages)),
+        ("JS assets",   str(js)),
     ]
-    if xhr:
-        rows.append(("XHR/fetch",  str(xhr)))
+    if xhr or fetch:
+        rows.append(("XHR/fetch calls", str(xhr + fetch)))
     if ws:
-        rows.append(("WebSockets", str(ws)))
-    if chunks:
-        rows.append(("Chunks",     str(chunks)))
+        rows.append(("WebSockets",    str(ws)))
+    if routes:
+        rows.append(("Routes found",  str(routes)))
     if endpoints:
-        rows.append(("Endpoints",  str(endpoints)))
+        rows.append(("API endpoints", str(endpoints)))
     _p(two_col_table(rows))
     _p()
 
