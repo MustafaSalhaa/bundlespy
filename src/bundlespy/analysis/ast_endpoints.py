@@ -9,7 +9,6 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from .config import BundleSpyConfig, CrawlerConfig, ScopeConfig, ReportingConfig
 from .config import PROJECT_NAME, PROJECT_VERSION, AUTHOR_NAME, GITHUB_URL
 from .safety.network import validate_url
 from .crawler.fetcher import Fetcher
