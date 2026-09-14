@@ -78,9 +78,15 @@ def _get_line_number(content: str, pos: int) -> int:
 def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
     """Load detection rules from YAML file."""
     if rules_path is None:
-        pkg_rules  = Path(__file__).parent / "rules" / "secrets.yaml"
-        repo_rules = Path(__file__).parent.parent.parent / "rules" / "secrets.yaml"
-        rules_path = pkg_rules if pkg_rules.exists() else repo_rules
+        here = Path(__file__).resolve().parent
+        rules_path = None
+        for p in [here, here.parent, here.parent.parent, here.parent.parent.parent]:
+            candidate = p / 'rules' / 'secrets.yaml'
+            if candidate.exists():
+                rules_path = candidate
+                break
+        if rules_path is None:
+            rules_path = here.parent.parent / 'rules' / 'secrets.yaml'
 
     try:
         with open(rules_path) as f:
