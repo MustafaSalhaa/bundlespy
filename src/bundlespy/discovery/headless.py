@@ -605,20 +605,23 @@ def collect_headless_js(
 
 
 def collect_headless_full(
-    url:      str,
+    url:       str,
     scope,
-    timeout:  int  = 30,
-    stealth:  bool = False,
+    timeout:   int  = 30,
+    stealth:   bool = False,
+    max_pages: int  = 100,
 ) -> dict:
     """
     Full interface returning JS files, endpoints, routes, and stats.
+    max_pages=100 by default — set higher for unlimited-style crawling.
+    Practical limit is how long you want to wait.
     """
     engine = HeadlessEngine(
         target_url = url,
         scope      = scope,
         timeout    = timeout,
         stealth    = stealth,
-        max_pages  = 20,
+        max_pages  = max_pages,
         interact   = True,
     )
     return engine.run()
