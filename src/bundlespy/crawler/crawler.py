@@ -27,6 +27,7 @@ from .fetcher import Fetcher
 from .scope import ScopeChecker
 from ..discovery.html import extract_js_urls, extract_links, extract_inline_scripts
 from ..storage.models import JSFile
+from ..analysis.html_scanner import scan_html
 
 logger = logging.getLogger("bundlespy.crawler")
 
@@ -290,6 +291,7 @@ class Crawler:
 
         self.js_files:        List[JSFile] = []
         self.inline_scripts:  List[Tuple[str, str]] = []
+        self.html_findings:   List = []  # Findings from HTML attribute scanning
         self.errors:          List[str] = []
         self.pages_crawled:   int = 0
 
@@ -338,6 +340,12 @@ class Crawler:
             return
 
         self.pages_crawled += 1
+
+        # Scan HTML for secrets in attributes and comments
+        html_findings = scan_html(content, url)
+        if html_findings:
+            self.html_findings.extend(html_findings)
+            logger.info("HTML scan: %d findings on %s", len(html_findings), url)
 
         # Extract JS from all possible locations in the HTML
         js_urls = self._extract_all_js_from_html(content, url)
