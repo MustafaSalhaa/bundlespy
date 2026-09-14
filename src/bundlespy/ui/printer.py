@@ -439,14 +439,7 @@ def _print_finding(f, verbose: bool = False) -> None:
     _p(f"  {A.GREY}Evidence{rst}")
 
     # Redact only actual secrets — show infrastructure/endpoint values as-is
-    secret_categories = {"AWS", "Azure", "Google", "GitHub", "GitLab", "Stripe",
-                         "Slack", "Email", "JWT", "Cryptographic", "Database",
-                         "Package Registry", "E-Commerce", "Twilio", "Discord",
-                         "Maps", "Generic"}
-    if f.category in secret_categories:
-        val = redact(f.matched_value)
-    else:
-        val = f.matched_value
+    val = f.matched_value
     _p(f"  {sev_c}{val}{rst}")
 
     if f.context and verbose:
