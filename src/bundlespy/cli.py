@@ -413,6 +413,48 @@ def run_scan(args) -> int:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
 
+    # Merge HTML attribute findings from crawler
+    html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
+    seen_html = {f.sha256 for f in all_findings}
+    for f in html_findings_from_crawler:
+        if f.sha256 not in seen_html:
+            seen_html.add(f.sha256)
+            all_findings.append(f)
+
+    # Final endpoint dedup
+    seen_final = set()
+    deduped = []
+    for ep in all_endpoints:
+        key = ep.url.rstrip("/").lower().split("?")[0]
+        if key not in seen_final:
+            seen_final.add(key)
+            deduped.append(ep)
+    all_endpoints = deduped
+
+    # ── Vulnerable library detection ───────────────────────────────────────────
+    if not args.quiet and not getattr(args, "silent", False):
+        phase("Scanning for vulnerable libraries")
+    from .analysis.library_scanner import scan_for_vulnerable_libraries
+    lib_findings = []
+    lib_seen = set()
+    for js in all_js:
+        for lf in scan_for_vulnerable_libraries(js.content, js.url):
+            key = f"{lf.library}:{lf.version}:{lf.cve_id}"
+            if key not in lib_seen:
+                lib_seen.add(key)
+                lib_findings.append(lf)
+    extras["lib_findings"] = lib_findings
+    if not args.quiet and not getattr(args, "silent", False):
+        if lib_findings:
+            crit = sum(1 for l in lib_findings if l.severity == "CRITICAL")
+            high = sum(1 for l in lib_findings if l.severity == "HIGH")
+            detail = f"{len(lib_findings)} vulnerable {'library' if len(lib_findings)==1 else 'libraries'}"
+            if crit: detail += f"  {crit} critical"
+            if high: detail += f"  {high} high"
+            phase_done("Library scan", detail)
+        else:
+            phase_done("Library scan", "no known vulnerable libraries")
+
     # Update chunk stats with findings
     if args.chunks:
         chunk_stats["findings"]  = len([f for f in all_findings if any(c.technology == "webpack-chunk" for c in all_js if c.url == f.file_url)])
