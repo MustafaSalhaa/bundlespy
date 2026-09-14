@@ -167,23 +167,10 @@ def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
     findings   = []
     endpoints  = []
     infra      = []
-    seen_eps   = set()
-    seen_finds = set()
-
     for js in js_files:
-        for f in scanner.scan(js.content, js.url, js.source_page):
-            if f.sha256 not in seen_finds:
-                seen_finds.add(f.sha256)
-                findings.append(f)
-
-        for ep in extract_endpoints(js.content, js.url):
-            key = ep.url.rstrip("/").lower().split("?")[0]
-            if key not in seen_eps:
-                seen_eps.add(key)
-                endpoints.append(ep)
-
+        findings.extend(scanner.scan(js.content, js.url, js.source_page))
+        endpoints.extend(extract_endpoints(js.content, js.url))
         infra.extend(extract_infrastructure(js.content, js.url))
-
     return findings, endpoints, infra
 
 
@@ -301,15 +288,41 @@ def run_scan(args) -> int:
     # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
         if not args.quiet:
-            phase("Launching headless browser")
-        from .discovery.headless import collect_headless_js
-        headless_files = collect_headless_js(target, scope, stealth=args.stealth)
+            phase("Launching advanced headless browser")
+        from .discovery.headless import collect_headless_full
+        headless_result = collect_headless_full(target, scope,
+                                                stealth=args.stealth,
+                                                timeout=args.timeout,
+                                                max_pages=args.max_pages)
+        headless_files    = headless_result.get("js_files", [])
+        headless_endpoints = headless_result.get("endpoints", [])
+        headless_stats    = headless_result.get("stats", {})
+
         all_js.extend(headless_files)
+
+        # Add network-intercepted endpoints directly
+        if headless_endpoints:
+            all_endpoints_extra = headless_endpoints
+        else:
+            all_endpoints_extra = []
+
         extras["headless_stats"] = {
-            "pages": 1, "js": len(headless_files),
+            "pages":     headless_stats.get("pages", 0),
+            "js":        len(headless_files),
+            "xhr":       headless_stats.get("xhr", 0),
+            "fetch":     headless_stats.get("fetch", 0),
+            "ws":        headless_stats.get("ws", 0),
+            "routes":    headless_stats.get("routes", 0),
+            "endpoints": headless_stats.get("endpoints", 0),
         }
         if not args.quiet:
-            phase_done("Browser discovery", f"{len(headless_files)} JS files captured")
+            phase_done("Browser discovery",
+                f"{headless_stats.get('pages',0)} pages  "
+                f"{len(headless_files)} JS  "
+                f"{headless_stats.get('xhr',0)+headless_stats.get('fetch',0)} API calls  "
+                f"{headless_stats.get('ws',0)} WS  "
+                f"{headless_stats.get('routes',0)} routes"
+            )
 
     # ── Source maps ───────────────────────────────────────────────────────────
     sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
@@ -365,6 +378,15 @@ def run_scan(args) -> int:
         phase("Analyzing JavaScript")
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
+
+    # Merge headless-intercepted endpoints (real network calls, high confidence)
+    if args.headless and "all_endpoints_extra" in dir():
+        seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
+        for ep in all_endpoints_extra:
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_ep_keys:
+                seen_ep_keys.add(key)
+                all_endpoints.append(ep)
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
