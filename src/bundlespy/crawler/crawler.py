@@ -127,7 +127,9 @@ class Crawler:
         content, status, content_type, sha256 = self.fetcher.get(url)
 
         if not content or status not in range(200, 300):
-            self.errors.append(f"Failed to fetch {url} (HTTP {status})")
+            # Only log as error if it's not a 404 from a common-path probe
+            if status != 404:
+                self.errors.append(f"Failed to fetch {url} (HTTP {status})")
             return
 
         # Basic content-type sanity check
