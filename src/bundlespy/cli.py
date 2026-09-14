@@ -1,18 +1,16 @@
 """
-BundleSpy CLI entry point.
+BundleSpy CLI — clean, automation-friendly, no interactive prompts.
 """
 
 import sys
 import os
 import argparse
 import logging
-import json
 from datetime import datetime
 from pathlib import Path
 
 from .config import BundleSpyConfig, CrawlerConfig, ScopeConfig, ReportingConfig
-from .banner import print_banner
-from .safety.authorization import require_authorization
+from .config import PROJECT_NAME, PROJECT_VERSION, AUTHOR_NAME, GITHUB_URL
 from .safety.network import validate_url
 from .crawler.fetcher import Fetcher
 from .crawler.scope import ScopeChecker
@@ -27,166 +25,190 @@ from .reporting.json_report import generate as generate_json
 from .reporting.html_report import generate as generate_html
 from .reporting.csv_report import generate as generate_csv
 from .reporting.burp_export import generate_burp_xml, generate_url_list
+from .ui.printer import (
+    print_header, phase, phase_done, phase_warn, phase_error,
+    print_discovery,
+)
+from .ui.theme import A
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bundlespy",
-        description="BundleSpy - JavaScript Intelligence and Secret Exposure Scanner",
+        description="BundleSpy — JavaScript Intelligence and Secret Exposure Scanner",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
-Examples:
+examples:
   bundlespy scan https://example.com
-  bundlespy scan https://example.com --depth 2 --source-maps --chunks
+  bundlespy scan https://example.com --source-maps --chunks --validate
   bundlespy scan https://example.com --passive --format html --output ./reports/
   bundlespy scan https://example.com --headless --stealth
-  bundlespy scan https://example.com --validate --graphql
+  bundlespy scan https://example.com --graphql --harvest-subs
   bundlespy scan https://example.com --format html,json,burp --output ./reports/
   bundlespy local ./dist/
   bundlespy demo
 """,
     )
 
-    subparsers = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command")
 
-    # ── scan command ──────────────────────────────────────────────────────────
-    scan = subparsers.add_parser("scan", help="Scan a target URL")
-    scan.add_argument("target", help="Target URL (e.g. https://example.com)")
+    # ── scan ──────────────────────────────────────────────────────────────────
+    scan = sub.add_parser("scan", help="Scan a target URL")
+    scan.add_argument("target")
 
-    # Crawl options
-    scan.add_argument("--depth",         type=int, default=2,   help="Crawl depth (default: 2)")
-    scan.add_argument("--max-pages",     type=int, default=100, help="Max pages to crawl (default: 100)")
-    scan.add_argument("--max-js",        type=int, default=200, help="Max JS files to fetch (default: 200)")
-    scan.add_argument("--concurrency",   type=int, default=4,   help="Concurrent requests (default: 4)")
-    scan.add_argument("--rate",          type=int, default=2,   help="Requests per second (default: 2)")
-    scan.add_argument("--timeout",       type=int, default=10,  help="Request timeout seconds (default: 10)")
-    scan.add_argument("--common-paths",  action="store_true",   help="Try common JS paths like /app.js, /main.js")
-    scan.add_argument("--subdomains",    action="store_true",   help="Include subdomains in scope")
-    scan.add_argument("--exclude",       nargs="+", default=[], help="Exclude hostnames from scope")
+    # Crawl
+    scan.add_argument("--depth",       type=int, default=2)
+    scan.add_argument("--max-pages",   type=int, default=100)
+    scan.add_argument("--max-js",      type=int, default=200)
+    scan.add_argument("--rate",        type=int, default=2)
+    scan.add_argument("--timeout",     type=int, default=10)
+    scan.add_argument("--common-paths",action="store_true")
+    scan.add_argument("--subdomains",  action="store_true")
+    scan.add_argument("--exclude",     nargs="+", default=[])
 
-    # Feature flags
-    scan.add_argument("--source-maps",   action="store_true",   help="Download and analyze source maps")
-    scan.add_argument("--chunks",        action="store_true",   help="Discover and scan webpack/Vite chunks")
-    scan.add_argument("--passive",       action="store_true",   help="Passive mode - collect JS from Wayback Machine/CommonCrawl")
-    scan.add_argument("--headless",      action="store_true",   help="Use headless Chromium browser (requires playwright)")
-    scan.add_argument("--validate",      action="store_true",   help="Validate discovered endpoints with safe GET/HEAD requests")
-    scan.add_argument("--graphql",       action="store_true",   help="Run GraphQL introspection on detected endpoints")
-    scan.add_argument("--harvest-subs",  action="store_true",   help="Passively harvest subdomains from JS and CT logs")
-    scan.add_argument("--validate-secrets", action="store_true",help="Validate detected secrets against provider APIs (read-only)")
-    scan.add_argument("--stealth",       action="store_true",   help="Stealth mode - UA rotation, jitter, browser headers")
+    # Features
+    scan.add_argument("--source-maps",    action="store_true")
+    scan.add_argument("--chunks",         action="store_true")
+    scan.add_argument("--passive",        action="store_true")
+    scan.add_argument("--headless",       action="store_true")
+    scan.add_argument("--validate",       action="store_true")
+    scan.add_argument("--graphql",        action="store_true")
+    scan.add_argument("--harvest-subs",   action="store_true")
+    scan.add_argument("--validate-secrets", action="store_true")
+    scan.add_argument("--stealth",        action="store_true")
 
     # Output
-    scan.add_argument("--format",        default="terminal",    help="Output formats: terminal,json,html,csv,burp (comma-separated)")
-    scan.add_argument("--output",        default="",            help="Output directory for report files")
-    scan.add_argument("--show-sensitive",action="store_true", default=True, help="Show full secret values in output")
+    scan.add_argument("--format", default="terminal")
+    scan.add_argument("--output", default="")
+    scan.add_argument("-v", "--verbose",  action="store_true")
+    scan.add_argument("-vv","--debug",    action="store_true")
+    scan.add_argument("-q", "--quiet",    action="store_true")
+    scan.add_argument("--no-color",       action="store_true")
+    scan.add_argument("--json",           action="store_true", help="JSON output only")
+    scan.add_argument("--csv",            action="store_true", help="CSV output only")
 
-    # Misc
-    scan.add_argument("--verbose",       action="store_true",   help="Verbose logging")
-    scan.add_argument("--quiet",         action="store_true",   help="Suppress non-essential output")
-    scan.add_argument("--no-color",      action="store_true",   help="Disable colored output")
-    scan.add_argument("--yes",           action="store_true",   help="Skip authorization prompt (CI use)")
+    # ── local ─────────────────────────────────────────────────────────────────
+    local = sub.add_parser("local", help="Scan local JS files")
+    local.add_argument("path")
+    local.add_argument("--format",   default="terminal")
+    local.add_argument("--output",   default="")
+    local.add_argument("-v", "--verbose", action="store_true")
+    local.add_argument("--no-color", action="store_true")
 
-    # ── local command ─────────────────────────────────────────────────────────
-    local = subparsers.add_parser("local", help="Scan local JS files without crawling")
-    local.add_argument("path",           help="Local directory or file to scan")
-    local.add_argument("--source-maps",  action="store_true",  help="Also analyze .map files in the directory")
-    local.add_argument("--format",       default="terminal",   help="Output formats: terminal,json,html,csv (comma-separated)")
-    local.add_argument("--output",       default="",           help="Output directory for report files")
-    local.add_argument("--show-sensitive", action="store_true", default=True, help="Show full secret values")
-    local.add_argument("--verbose",      action="store_true",  help="Verbose logging")
-    local.add_argument("--no-color",     action="store_true",  help="Disable colored output")
-
-    # ── demo command ──────────────────────────────────────────────────────────
-    subparsers.add_parser("demo", help="Run offline demo with synthetic data")
+    # ── demo ──────────────────────────────────────────────────────────────────
+    sub.add_parser("demo", help="Run offline demo")
 
     return parser
 
 
-def _setup_logging(verbose: bool, quiet: bool) -> None:
-    level = logging.DEBUG if verbose else (logging.ERROR if quiet else logging.INFO)
-    logging.basicConfig(level=level, format="  [%(levelname)s] %(name)s: %(message)s")
+def _setup_logging(verbose: bool, debug: bool, quiet: bool) -> None:
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    elif quiet:
+        level = logging.ERROR
+    else:
+        level = logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="  %(message)s",
+    )
 
 
-def _write_reports(result: ScanResult, formats: list, output_dir: str,
-                   show_sensitive: bool, started: datetime) -> None:
-    ts = started.strftime("%Y%m%d_%H%M%S")
+def _write_reports(
+    result:    ScanResult,
+    formats:   list,
+    output_dir: str,
+    started:   datetime,
+) -> dict:
+    """Write file reports. Returns dict of format -> path."""
+    ts      = started.strftime("%Y%m%d_%H%M%S")
+    paths   = {}
 
     if "json" in formats:
-        out = generate_json(result, show_sensitive=show_sensitive)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            p = Path(output_dir) / f"bundlespy_{ts}.json"
-            p.write_text(out)
-            print(f"\n  [+] JSON report saved to {p}")
-        else:
-            print(out)
+        out = generate_json(result)
+        d   = output_dir or "./bundlespy-reports"
+        os.makedirs(d, exist_ok=True)
+        p   = Path(d) / f"bundlespy_{ts}.json"
+        p.write_text(out)
+        paths["json"] = str(p)
 
     if "html" in formats:
-        out = generate_html(result, show_sensitive=show_sensitive)
+        out = generate_html(result)
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
         p   = Path(d) / f"bundlespy_{ts}.html"
         p.write_text(out)
-        print(f"\n  [+] HTML report saved to {p}")
+        paths["html"] = str(p)
 
     if "csv" in formats:
-        out = generate_csv(result, show_sensitive=show_sensitive)
+        out = generate_csv(result)
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
         p   = Path(d) / f"bundlespy_{ts}.csv"
         p.write_text(out)
-        print(f"\n  [+] CSV report saved to {p}")
+        paths["csv"] = str(p)
 
     if "burp" in formats:
-        xml_out  = generate_burp_xml(result)
-        url_out  = generate_url_list(result)
-        d        = output_dir or "./bundlespy-reports"
+        d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
-        p1 = Path(d) / f"bundlespy_{ts}_burp.xml"
-        p2 = Path(d) / f"bundlespy_{ts}_urls.txt"
-        p1.write_text(xml_out)
-        p2.write_text(url_out)
-        print(f"\n  [+] Burp XML saved to {p1}")
-        print(f"  [+] URL list saved to {p2}")
+        p1  = Path(d) / f"bundlespy_{ts}_burp.xml"
+        p2  = Path(d) / f"bundlespy_{ts}_urls.txt"
+        p1.write_text(generate_burp_xml(result))
+        p2.write_text(generate_url_list(result))
+        paths["burp-xml"]  = str(p1)
+        paths["burp-urls"] = str(p2)
+
+    return paths
 
 
-def _analyze_js_files(js_files: list, secret_scanner) -> tuple:
-    """Run all analyzers on a list of JSFile objects."""
-    all_findings    = []
-    all_endpoints   = []
-    all_infra       = []
-
-    for js_file in js_files:
-        content = js_file.content
-        all_findings.extend(secret_scanner.scan(content, js_file.url, js_file.source_page))
-        all_endpoints.extend(extract_endpoints(content, js_file.url))
-        all_infra.extend(extract_infrastructure(content, js_file.url))
-
-    return all_findings, all_endpoints, all_infra
+def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
+    findings   = []
+    endpoints  = []
+    infra      = []
+    for js in js_files:
+        findings.extend(scanner.scan(js.content, js.url, js.source_page))
+        endpoints.extend(extract_endpoints(js.content, js.url))
+        infra.extend(extract_infrastructure(js.content, js.url))
+    return findings, endpoints, infra
 
 
 def run_scan(args) -> int:
-    _setup_logging(args.verbose, args.quiet)
+    # Handle --json / --csv shortcuts
+    if args.json:
+        args.format = "json"
+        args.quiet  = True
+    if args.csv:
+        args.format = "csv"
+        args.quiet  = True
 
-    if not args.no_color:
-        print_banner()
-    else:
-        print_banner(no_color=True)
+    _setup_logging(args.verbose, getattr(args, "debug", False), args.quiet)
+
+    # Apply NO_COLOR
+    if args.no_color or os.environ.get("NO_COLOR"):
+        os.environ["NO_COLOR"] = "1"
 
     target = args.target
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
+    # Safety check — fail cleanly, no prompt
     safe, reason = validate_url(target, check_dns=False)
     if not safe:
-        print(f"\n  [ERROR] Target URL is not safe to scan: {reason}\n")
+        phase_error(f"Target blocked by safety policy: {reason}")
         return 2
 
-    if not require_authorization(target, skip=args.yes):
-        return 0
-
+    formats = [f.strip() for f in args.format.split(",")]
     started = datetime.utcnow()
-    errors  = []
+    extras  = {}
+
+    if not args.quiet:
+        mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
+        if args.stealth:
+            mode += " + Stealth"
+        scope_label = "Subdomains included" if args.subdomains else "Strict"
+        print_header(target, mode=mode, scope=scope_label, version=PROJECT_VERSION, author=AUTHOR_NAME)
 
     fetcher = Fetcher(
         timeout=args.timeout,
@@ -194,264 +216,297 @@ def run_scan(args) -> int:
         stealth=args.stealth,
     )
     scope = ScopeChecker(
-        target_url  = target,
-        same_origin = True,
-        subdomains  = args.subdomains,
-        exclude     = args.exclude,
+        target_url=target,
+        same_origin=True,
+        subdomains=args.subdomains,
+        exclude=args.exclude,
     )
 
-    if args.stealth:
-        print(f"  \033[93m[*] Stealth mode - UA rotation, jitter delays, browser headers\033[0m")
-
-    print(f"  Scanning: {target}")
-    print(f"  Depth: {args.depth} | Max pages: {args.max_pages} | Max JS: {args.max_js}")
-    print(f"  Rate: {args.rate} req/s | Timeout: {args.timeout}s\n")
+    all_js: list = []
+    errors: list = []
 
     # ── Active crawl ──────────────────────────────────────────────────────────
-    all_js: list = []
-
     if not args.passive:
+        if not args.quiet:
+            phase("Crawling target")
         crawler = Crawler(
-            target_url   = target,
-            fetcher      = fetcher,
-            scope        = scope,
-            max_depth    = args.depth,
-            max_pages    = args.max_pages,
-            max_js_files = args.max_js,
-            common_paths = args.common_paths,
+            target_url=target, fetcher=fetcher, scope=scope,
+            max_depth=args.depth, max_pages=args.max_pages,
+            max_js_files=args.max_js, common_paths=args.common_paths,
         )
         try:
             crawler.crawl()
         except KeyboardInterrupt:
-            print("\n  Scan interrupted.")
+            phase_warn("Scan interrupted by user")
             return 0
 
         errors.extend(crawler.errors)
         all_js.extend(crawler.js_files)
 
-        # Inline scripts
         for script_content, source_page in crawler.inline_scripts:
             import hashlib
-            inline = JSFile(
+            all_js.append(JSFile(
                 url="inline:" + source_page, source_page=source_page,
                 status_code=200, content_type="text/javascript",
                 size_bytes=len(script_content), sha256="",
                 content=script_content,
-            )
-            all_js.append(inline)
+            ))
 
-    # ── Passive mode ──────────────────────────────────────────────────────────
+        if not args.quiet:
+            phase_done("Crawl complete",
+                f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
+
+    # ── Passive ───────────────────────────────────────────────────────────────
     if args.passive:
-        print("  [*] Passive mode - collecting from Wayback Machine and CommonCrawl...")
+        if not args.quiet:
+            phase("Collecting from web archives")
         from .discovery.passive import collect_passive_js_urls
         passive_urls = collect_passive_js_urls(target)
-        print(f"  [*] Found {len(passive_urls)} historical JS URLs")
-        extras["passive_urls"] = len(passive_urls)
-
-        seen_passive = set()
+        new_js = 0
+        seen   = set()
         for url in passive_urls[:args.max_js]:
-            if url in seen_passive:
+            if url in seen or not scope.in_scope(url):
                 continue
-            seen_passive.add(url)
-            if not scope.in_scope(url):
-                continue
+            seen.add(url)
             content, status, ct, sha256 = fetcher.get(url)
             if content and status in range(200, 300):
                 from datetime import datetime as dt
-                import hashlib as hl
-                js = JSFile(
+                all_js.append(JSFile(
                     url=url, source_page=target, status_code=status,
                     content_type=ct, size_bytes=len(content),
-                    sha256=sha256, content=content,
-                    discovered_at=dt.utcnow(),
-                )
-                all_js.append(js)
+                    sha256=sha256, content=content, discovered_at=dt.utcnow(),
+                ))
+                new_js += 1
+        extras["passive_stats"] = {
+            "source": "Wayback Machine + CommonCrawl",
+            "urls": len(passive_urls), "js": new_js,
+            "unique": new_js, "new": new_js,
+        }
+        if not args.quiet:
+            phase_done("Passive collection", f"{len(passive_urls)} archive URLs  {new_js} JS assets")
 
-    # ── Headless browser ──────────────────────────────────────────────────────
+    # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
-        print("  [*] Headless browser mode - launching Chromium...")
+        if not args.quiet:
+            phase("Launching headless browser")
         from .discovery.headless import collect_headless_js
         headless_files = collect_headless_js(target, scope, stealth=args.stealth)
-        print(f"  [*] Headless captured {len(headless_files)} JS files")
-        extras["headless_files"] = len(headless_files)
         all_js.extend(headless_files)
+        extras["headless_stats"] = {
+            "pages": 1, "js": len(headless_files),
+        }
+        if not args.quiet:
+            phase_done("Browser discovery", f"{len(headless_files)} JS files captured")
 
     # ── Source maps ───────────────────────────────────────────────────────────
+    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
     if args.source_maps:
-        print("  [*] Analyzing source maps...")
-        from .discovery.source_maps import process_js_file, try_predictable_map_paths
+        if not args.quiet:
+            phase("Analyzing source maps")
+        from .discovery.source_maps import process_js_file
         recovered_files = []
         for js_file in list(all_js):
             result = process_js_file(js_file, fetcher, scope)
-            if result and result.recovered_files:
-                print(f"  [+] Source map: recovered {len(result.recovered_files)} files from {js_file.url}")
-                recovered_files.extend(result.recovered_files)
+            if result:
+                sm_details["discovered"] += 1
+                if result.recovered_files:
+                    sm_details["valid"]     += 1
+                    sm_details["recovered"] += 1
+                    sm_details["sources"]   += len(result.recovered_files)
+                    sm_details["items"].append({
+                        "js":      js_file.url.split("/")[-1],
+                        "map":     result.map_url.split("/")[-1] if not result.map_url.startswith("data:") else "inline",
+                        "sources": len(result.recovered_files),
+                    })
+                    recovered_files.extend(result.recovered_files)
         all_js.extend(recovered_files)
-        print(f"  [*] Total recovered source files: {len(recovered_files)}")
-        extras["recovered_sources"] = len(recovered_files)
+        extras["source_map_details"] = sm_details
+        extras["recovered_sources"]  = len(recovered_files)
+        if not args.quiet:
+            phase_done("Source map analysis",
+                f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
 
     # ── Webpack chunks ────────────────────────────────────────────────────────
+    chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0}
     if args.chunks:
-        print("  [*] Discovering webpack/Vite chunks...")
-        from .discovery.webpack_chunks import fetch_chunks
+        if not args.quiet:
+            phase("Discovering webpack chunks")
+        from .discovery.webpack_chunks import fetch_chunks, detect_webpack
         seen_chunk_urls = {js.url for js in all_js}
-        chunk_files = []
+        chunk_files     = []
         for js_file in list(all_js):
+            if detect_webpack(js_file.content):
+                chunk_stats["runtime"] = True
             chunks = fetch_chunks(js_file, fetcher, scope, seen_chunk_urls)
             chunk_files.extend(chunks)
         all_js.extend(chunk_files)
-        print(f"  [*] Discovered {len(chunk_files)} additional chunks")
+        chunk_stats["discovered"] = len(chunk_files)
+        chunk_stats["downloaded"] = len(chunk_files)
+        extras["chunk_stats"]  = chunk_stats
         extras["chunks_found"] = len(chunk_files)
-
-    # ── Track extras for terminal output ─────────────────────────────────────
-    extras = {}
+        if not args.quiet:
+            phase_done("Chunk discovery", f"{len(chunk_files)} chunks")
 
     # ── Analysis ──────────────────────────────────────────────────────────────
-    secret_scanner = SecretScanner()
-    all_findings, all_endpoints, all_infra = _analyze_js_files(all_js, secret_scanner)
+    if not args.quiet:
+        phase("Analyzing JavaScript")
+    scanner = SecretScanner()
+    all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
+    if not args.quiet:
+        phase_done("Analysis complete",
+            f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
+
+    # Update chunk stats with findings
+    if args.chunks:
+        chunk_stats["findings"]  = len([f for f in all_findings if any(c.technology == "webpack-chunk" for c in all_js if c.url == f.file_url)])
+        chunk_stats["endpoints"] = len([e for e in all_endpoints if any(c.technology == "webpack-chunk" for c in all_js if c.url == e.source_file)])
 
     # ── Subdomain harvesting ──────────────────────────────────────────────────
     subdomains = []
     if args.harvest_subs:
-        print("  [*] Harvesting subdomains...")
+        if not args.quiet:
+            phase("Harvesting subdomains")
         from .discovery.subdomains import harvest_subdomains
-        js_contents   = [js.content for js in all_js]
-        discovered_urls = [ep.url for ep in all_endpoints]
-        subdomains    = harvest_subdomains(target, js_contents, discovered_urls)
-        print(f"  [*] Found {len(subdomains)} subdomains")
+        subdomains = harvest_subdomains(
+            target,
+            [js.content for js in all_js],
+            [ep.url for ep in all_endpoints],
+        )
         extras["subdomains"] = len(subdomains)
-        for sub in subdomains[:20]:
-            print(f"      {sub}")
+        if not args.quiet:
+            phase_done("Subdomain harvest", f"{len(subdomains)} subdomains")
 
     # ── Endpoint validation ───────────────────────────────────────────────────
     validation_results = []
     if args.validate and all_endpoints:
-        print(f"  [*] Validating {len(all_endpoints)} endpoints...")
+        if not args.quiet:
+            phase(f"Validating {len(all_endpoints)} endpoints")
         from .analysis.endpoint_validator import validate_endpoints
         validation_results = validate_endpoints(
             all_endpoints, target, scope,
             stealth=args.stealth, rate=max(1, args.rate // 2),
         )
-        interesting = [r for r in validation_results if r.interesting]
-        print(f"  [*] {len(interesting)} interesting endpoints found")
+        interesting = sum(1 for r in validation_results if r.interesting)
+        if not args.quiet:
+            phase_done("Endpoint validation", f"{interesting} interesting")
 
-    # ── GraphQL introspection ─────────────────────────────────────────────────
+    # ── GraphQL ───────────────────────────────────────────────────────────────
     graphql_schemas = []
     if args.graphql and all_endpoints:
+        if not args.quiet:
+            phase("GraphQL introspection")
         from .analysis.graphql import find_graphql_endpoints, introspect
         gql_urls = find_graphql_endpoints(all_endpoints)
-        if gql_urls:
-            print(f"  [*] Running GraphQL introspection on {len(gql_urls)} endpoint(s)...")
-            for gql_url in gql_urls:
-                schema = introspect(gql_url, stealth=args.stealth)
-                if schema and not schema.error:
-                    graphql_schemas.append(schema)
-                    print(f"  [+] GraphQL schema: {len(schema.queries)} queries, {len(schema.mutations)} mutations")
-                    if schema.sensitive_fields:
-                        print(f"  [!] Sensitive fields: {', '.join(schema.sensitive_fields[:5])}")
+        for gql_url in gql_urls:
+            schema = introspect(gql_url, stealth=args.stealth)
+            if schema:
+                graphql_schemas.append(schema)
+        total_ops = sum(len(s.queries) + len(s.mutations) for s in graphql_schemas if not s.error)
+        extras["graphql_queries"] = total_ops
+        if not args.quiet:
+            phase_done("GraphQL", f"{len(gql_urls)} endpoints  {total_ops} operations")
 
     # ── Secret validation ─────────────────────────────────────────────────────
     if args.validate_secrets and all_findings:
+        if not args.quiet:
+            phase("Validating secrets")
         from .analysis.secret_validator import validate_finding
-        validated_count = 0
+        validated = 0
         for finding in all_findings:
             if finding.status == "likely_false_positive":
                 continue
-            vresult = validate_finding(finding.rule_id, finding.matched_value)
-            if vresult and vresult.valid:
-                finding.status = "validated"
-                finding.description += f" | VALIDATED: {vresult.detail}"
-                validated_count += 1
-        if validated_count:
-            print(f"  \033[91m[!!] {validated_count} secrets VALIDATED as active\033[0m")
+            vr = validate_finding(finding.rule_id, finding.matched_value)
+            if vr and vr.valid:
+                finding.status      = "validated"
+                finding.description += f" | VALIDATED: {vr.detail}"
+                validated += 1
+        if not args.quiet:
+            phase_done("Secret validation", f"{validated} confirmed active")
 
     # ── Build result ──────────────────────────────────────────────────────────
     finished = datetime.utcnow()
-    result   = ScanResult(
-        target_url    = target,
-        started_at    = started,
-        finished_at   = finished,
-        pages_crawled = getattr(crawler, "pages_crawled", 0) if not args.passive else 0,
-        js_files      = [js for js in all_js if not js.url.startswith("sourcemap://")],
-        findings      = all_findings,
-        endpoints     = all_endpoints,
+    result = ScanResult(
+        target_url     = target,
+        started_at     = started,
+        finished_at    = finished,
+        pages_crawled  = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
+        js_files       = all_js,
+        findings       = all_findings,
+        endpoints      = all_endpoints,
         infrastructure = all_infra,
-        errors        = errors,
+        errors         = errors,
     )
 
     # ── Reports ───────────────────────────────────────────────────────────────
-    formats = [f.strip() for f in args.format.split(",")]
+    file_paths = {}
+    file_formats = [f for f in formats if f != "terminal"]
+    if file_formats:
+        file_paths = _write_reports(result, file_formats, args.output, started)
 
-    if "terminal" in formats:
+    if "terminal" in formats and not args.quiet:
         print_report(
             result,
-            show_sensitive      = args.show_sensitive,
+            verbose             = args.verbose,
             no_color            = args.no_color,
             extras              = extras,
             validation_results  = validation_results,
             graphql_schemas     = graphql_schemas,
             subdomains          = subdomains,
+            report_paths        = file_paths,
         )
+    elif args.quiet and file_paths:
+        for fmt, path in file_paths.items():
+            print(path)
 
-    _write_reports(result, formats, args.output, args.show_sensitive, started)
-
-    # ── Exit code ─────────────────────────────────────────────────────────────
     critical = [f for f in all_findings
                 if f.severity == "CRITICAL" and f.status != "likely_false_positive"]
     return 1 if critical else 0
 
 
 def run_local(args) -> int:
-    _setup_logging(args.verbose, False)
-
-    if not args.no_color:
-        print_banner()
-    else:
-        print_banner(no_color=True)
+    _setup_logging(args.verbose, False, False)
+    if args.no_color or os.environ.get("NO_COLOR"):
+        os.environ["NO_COLOR"] = "1"
 
     path = args.path
-    print(f"  Local scan: {path}\n")
+    if not args.verbose:
+        from .ui.printer import phase
+        phase(f"Local scan: {path}")
 
     from .discovery.local_scanner import load_local_files
     js_files = load_local_files(path)
 
     if not js_files:
-        print("  No JS files found.")
+        phase_error("No JavaScript files found.")
         return 0
 
-    print(f"  Loaded {len(js_files)} file(s)\n")
-
-    secret_scanner = SecretScanner()
-    all_findings, all_endpoints, all_infra = _analyze_js_files(js_files, secret_scanner)
+    scanner = SecretScanner()
+    all_findings, all_endpoints, all_infra = _analyze(js_files, scanner)
 
     started  = datetime.utcnow()
     finished = datetime.utcnow()
 
     result = ScanResult(
-        target_url     = f"local://{path}",
-        started_at     = started,
-        finished_at    = finished,
-        pages_crawled  = 0,
-        js_files       = js_files,
-        findings       = all_findings,
-        endpoints      = all_endpoints,
-        infrastructure = all_infra,
-        errors         = [],
+        target_url=f"local://{path}", started_at=started, finished_at=finished,
+        pages_crawled=0, js_files=js_files,
+        findings=all_findings, endpoints=all_endpoints,
+        infrastructure=all_infra, errors=[],
     )
 
+    extras = {"local_path": path}
     formats = [f.strip() for f in args.format.split(",")]
+    file_paths = {}
+    file_formats = [f for f in formats if f != "terminal"]
+    if file_formats:
+        file_paths = _write_reports(result, file_formats, args.output, started)
+
     if "terminal" in formats:
         print_report(
             result,
-            show_sensitive      = args.show_sensitive,
-            no_color            = args.no_color,
-            extras              = extras,
-            validation_results  = validation_results,
-            graphql_schemas     = graphql_schemas,
-            subdomains          = subdomains,
+            verbose=args.verbose,
+            no_color=args.no_color,
+            report_paths=file_paths,
         )
-
-    _write_reports(result, formats, args.output, args.show_sensitive, started)
 
     critical = [f for f in all_findings
                 if f.severity == "CRITICAL" and f.status != "likely_false_positive"]
@@ -459,16 +514,11 @@ def run_local(args) -> int:
 
 
 def run_demo() -> int:
-    print_banner()
-    print("  Running in DEMO mode - no network requests will be made.\n")
-    print("  This demonstrates what BundleSpy output looks like on a real target.\n")
-    print(f"  {'─' * 60}")
-
     from .storage.models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
     import hashlib
 
     fake_js = JSFile(
-        url="https://demo.example.com/static/js/main.chunk.js",
+        url="https://demo.example.com/static/js/main.8f31ab.chunk.js",
         source_page="https://demo.example.com/",
         status_code=200, content_type="application/javascript",
         size_bytes=42000, sha256=hashlib.sha256(b"fake").hexdigest(),
@@ -481,26 +531,42 @@ def run_demo() -> int:
             category="AWS", severity="CRITICAL", confidence=0.96,
             file_url=fake_js.url, source_page=fake_js.source_page,
             line_number=18291, column=12,
-            matched_value="AKIAIOSFODNN7EXAMPLE",
-            redacted_value="AKIA************PLE",
-            sha256="abc123", context="const awsKey = 'AKIAIOSFODNN7EXAMPLE'",
+            matched_value="AKIAIOSFODNN7REALKEY",
+            redacted_value="AKIA***************EY",
+            sha256="abc123",
+            context="const awsKey = 'AKIAIOSFODNN7REALKEY'",
             description="AWS Access Key ID found in JavaScript bundle.",
             impact="", remediation="Remove from client-side code. Rotate in AWS console.",
             false_positive_notes="", status="likely_secret",
-            occurrences=["main.chunk.js:18291"],
+            occurrences=["main.8f31ab.chunk.js:18291"],
         ),
         Finding(
             id="demo002", rule_id="JWT_TOKEN", title="JSON Web Token",
             category="JWT", severity="HIGH", confidence=0.89,
             file_url=fake_js.url, source_page=fake_js.source_page,
             line_number=1882, column=22,
-            matched_value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.FAKE",
-            redacted_value="eyJhbGci...REDACTED",
-            sha256="def456", context="const token = 'eyJhbGciOi...'",
+            matched_value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SIGFAKE",
+            redacted_value="eyJhbGci...FAKE",
+            sha256="def456",
+            context="const token = 'eyJhbGciOi...'",
             description="JWT token hardcoded in JavaScript.",
             impact="", remediation="Remove hardcoded tokens. Use runtime authentication.",
             false_positive_notes="", status="likely_secret",
-            occurrences=["main.chunk.js:1882"],
+            occurrences=["main.8f31ab.chunk.js:1882"],
+        ),
+        Finding(
+            id="demo003", rule_id="GENERIC_API_KEY", title="Generic API Key",
+            category="Generic", severity="MEDIUM", confidence=0.70,
+            file_url=fake_js.url, source_page=fake_js.source_page,
+            line_number=3441, column=4,
+            matched_value="api_key_placeholder_do_not_use",
+            redacted_value="api_key_plac...use",
+            sha256="ghi789",
+            context="const config = { api_key: 'placeholder' }",
+            description="Generic API key assignment.",
+            impact="", remediation="Move to environment variables.",
+            false_positive_notes="contains placeholder indicator", status="likely_false_positive",
+            occurrences=["main.8f31ab.chunk.js:3441"],
         ),
     ]
 
@@ -513,25 +579,46 @@ def run_demo() -> int:
                  source_file=fake_js.url, line_number=891, confidence=0.75),
         Endpoint(url="/graphql",         path="/graphql",         method="POST", category="GRAPHQL",
                  source_file=fake_js.url, line_number=1024, confidence=0.90),
+        Endpoint(url="/api/v1/config",   path="/api/v1/config",   method="GET",  category="API",
+                 source_file=fake_js.url, line_number=1201, confidence=0.78),
     ]
 
     fake_infra = [
         InfrastructureItem(
-            value="http://192.168.1.50/api", classification="PRIVATE_IP",
+            value="192.168.1.50", classification="PRIVATE_IP",
             source_file=fake_js.url, line_number=912, confidence=0.92, action="report_only",
         ),
     ]
 
-    result = ScanResult(
-        target_url="https://demo.example.com (DEMO MODE)",
-        started_at=datetime.utcnow(), finished_at=datetime.utcnow(),
-        pages_crawled=42, js_files=[fake_js],
+    started = datetime.utcnow()
+    result  = ScanResult(
+        target_url="https://demo.example.com",
+        started_at=started, finished_at=datetime.utcnow(),
+        pages_crawled=31, js_files=[fake_js],
         findings=fake_findings, endpoints=fake_endpoints,
         infrastructure=fake_infra, errors=[],
     )
 
-    print_report(result)
-    print("  This was demo mode. No real requests were made.\n")
+    print_header(
+        "https://demo.example.com",
+        mode="Demo (offline)",
+        scope="Strict",
+        version=PROJECT_VERSION,
+        author=AUTHOR_NAME,
+    )
+
+    print_report(
+        result,
+        verbose=True,
+        extras={
+            "source_map_details": {"discovered": 2, "valid": 2, "recovered": 2, "sources": 31, "items": [
+                {"js": "main.8f31ab.chunk.js", "map": "main.8f31ab.chunk.js.map", "sources": 31},
+            ]},
+            "chunk_stats": {"runtime": True, "discovered": 8, "downloaded": 8, "endpoints": 14, "findings": 1},
+            "passive_stats": {"source": "Wayback Machine", "urls": 142, "js": 23, "unique": 19, "new": 4},
+        },
+        subdomains=["api.example.com", "staging.example.com", "admin.example.com"],
+    )
     return 0
 
 
