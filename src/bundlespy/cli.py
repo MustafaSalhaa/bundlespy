@@ -397,6 +397,16 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
+    # Final dedup pass
+    seen_final = set()
+    deduped = []
+    for ep in all_endpoints:
+        key = ep.url.rstrip("/").lower().split("?")[0]
+        if key not in seen_final:
+            seen_final.add(key)
+            deduped.append(ep)
+    all_endpoints = deduped
+
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
