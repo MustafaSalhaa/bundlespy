@@ -76,6 +76,9 @@ examples:
     scan.add_argument("--harvest-subs",   action="store_true")
     scan.add_argument("--validate-secrets", action="store_true")
     scan.add_argument("--stealth",        action="store_true")
+    scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
+    scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
+                      help="Extra header to include in all requests (can use multiple times)")
 
     # Output
     scan.add_argument("--format", default="terminal")
@@ -207,13 +210,25 @@ def run_scan(args) -> int:
         mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
         if args.stealth:
             mode += " + Stealth"
+        if args.cookie or args.header:
+            mode += " + Authenticated"
         scope_label = "Subdomains included" if args.subdomains else "Strict"
         print_header(target, mode=mode, scope=scope_label, version=PROJECT_VERSION, author=AUTHOR_NAME)
+
+    # Parse extra headers
+    extra_headers = {}
+    for h in args.header:
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+    if args.cookie:
+        extra_headers["Cookie"] = args.cookie
 
     fetcher = Fetcher(
         timeout=args.timeout,
         requests_per_second=args.rate,
         stealth=args.stealth,
+        extra_headers=extra_headers,
     )
     scope = ScopeChecker(
         target_url=target,
