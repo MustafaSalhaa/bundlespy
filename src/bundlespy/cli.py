@@ -290,10 +290,13 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase("Launching advanced headless browser")
         from .discovery.headless import collect_headless_full
+        # Pass crawler's already-seen JS URLs so headless doesn't re-fetch them
+        crawler_seen = getattr(crawler if not args.passive else None, "visited_js", set()) or set()
         headless_result = collect_headless_full(target, scope,
                                                 stealth=args.stealth,
                                                 timeout=args.timeout,
-                                                max_pages=args.max_pages)
+                                                max_pages=args.max_pages,
+                                                external_seen=crawler_seen)
         headless_files    = headless_result.get("js_files", [])
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats    = headless_result.get("stats", {})
@@ -380,24 +383,13 @@ def run_scan(args) -> int:
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
-    headless_extra = locals().get("all_endpoints_extra", [])
-    if headless_extra:
+    if args.headless and "all_endpoints_extra" in dir():
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
-        for ep in headless_extra:
+        for ep in all_endpoints_extra:
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_ep_keys:
                 seen_ep_keys.add(key)
                 all_endpoints.append(ep)
-
-    # Final dedup pass - catches duplicates from headless inline scripts
-    seen_final = set()
-    deduped = []
-    for ep in all_endpoints:
-        key = ep.url.rstrip("/").lower().split("?")[0]
-        if key not in seen_final:
-            seen_final.add(key)
-            deduped.append(ep)
-    all_endpoints = deduped
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
