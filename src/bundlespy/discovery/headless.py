@@ -209,6 +209,7 @@ class HeadlessEngine:
         self.routes:      Set[str]      = set()
         self.seen_js:     Set[str]      = set()
         self.seen_urls:   Set[str]      = set()
+        self.external_seen: Set[str]   = set()  # URLs already fetched by crawler
         self.pages_visited: int         = 0
 
     def _make_js_file(self, url: str, body: bytes, source_page: str, tech: str = "") -> JSFile:
@@ -239,7 +240,15 @@ class HeadlessEngine:
             if not is_js:
                 return
 
-            if url in self.seen_js:
+            # Normalize URL for dedup (strip query string)
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            norm_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+            if norm_url in self.seen_js:
+                return
+            # Also check against externally provided seen set (from crawler)
+            if norm_url in self.external_seen:
                 return
 
             safe, _ = validate_url(url)
@@ -249,7 +258,7 @@ class HeadlessEngine:
             if not self.scope.in_scope(url):
                 return
 
-            self.seen_js.add(url)
+            self.seen_js.add(norm_url)
 
             try:
                 body    = response.body()
@@ -605,16 +614,17 @@ def collect_headless_js(
 
 
 def collect_headless_full(
-    url:       str,
+    url:           str,
     scope,
-    timeout:   int  = 30,
-    stealth:   bool = False,
-    max_pages: int  = 100,
+    timeout:       int  = 30,
+    stealth:       bool = False,
+    max_pages:     int  = 100,
+    external_seen: set  = None,
 ) -> dict:
     """
     Full interface returning JS files, endpoints, routes, and stats.
     max_pages=100 by default — set higher for unlimited-style crawling.
-    Practical limit is how long you want to wait.
+    external_seen: set of URLs already fetched by the crawler (avoids re-fetching).
     """
     engine = HeadlessEngine(
         target_url = url,
@@ -624,4 +634,6 @@ def collect_headless_full(
         max_pages  = max_pages,
         interact   = True,
     )
+    if external_seen:
+        engine.external_seen = external_seen
     return engine.run()
