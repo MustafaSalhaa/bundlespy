@@ -30,6 +30,7 @@ class Fetcher:
         requests_per_second: int = 2,
         user_agent: str = USER_AGENT,
         stealth: bool = False,
+        extra_headers: dict = None,
     ):
         self.timeout           = timeout
         self.max_response_size = max_response_size
@@ -38,6 +39,7 @@ class Fetcher:
         self.user_agent        = user_agent
         self.stealth           = stealth
         self.rps               = requests_per_second
+        self.extra_headers     = extra_headers or {}
         self._last_request     = 0.0
         self._current_ua       = random_ua() if stealth else user_agent
 
@@ -90,6 +92,10 @@ class Fetcher:
             headers = get_stealth_headers(self._current_ua, referer=referer)
         else:
             headers = {"User-Agent": self.user_agent}
+
+        # Merge auth headers (cookie, custom headers) — always applied
+        if self.extra_headers:
+            headers.update(self.extra_headers)
 
         try:
             resp = self.session.get(
