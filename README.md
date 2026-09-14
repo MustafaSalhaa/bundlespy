@@ -261,6 +261,44 @@ Exports discovered endpoints and JS file URLs into Burp Suite sitemap XML format
 ```bash
 bundlespy scan https://example.com --format html,json,burp --output ./reports/
 ```
+### Authenticated scanning (`--cookie`, `--header`)
+
+By default BundleSpy scans as an anonymous user. If the target requires authentication to access the interesting JS, API routes, or admin panels, pass your session cookie and any required headers.
+
+**How to get your session cookie:**
+1. Log into the target in your browser
+2. Open DevTools (F12) → Application tab → Cookies
+3. Copy the cookie name and value
+4. Pass it to BundleSpy with `--cookie`
+
+```bash
+# Cookie only
+bundlespy scan https://app.example.com --cookie "session=abc123"
+
+# Multiple cookies (same format as browser)
+bundlespy scan https://app.example.com --cookie "session=abc123; csrf=xyz; remember_me=1"
+
+# Cookie + Authorization header
+bundlespy scan https://app.example.com \
+  --cookie "session=abc123" \
+  --header "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+
+# Multiple custom headers
+bundlespy scan https://app.example.com \
+  --cookie "session=abc123" \
+  --header "X-Api-Key: mykey" \
+  --header "X-Tenant-Id: company1"
+
+# Full authenticated scan with all features
+bundlespy scan https://app.example.com \
+  --cookie "session=abc123" \
+  --headless --source-maps --chunks --validate --graphql \
+  --format html --output ./reports/
+```
+
+The cookie and headers are sent on every request including headless browser mode. The terminal output shows `Authenticated` in the mode line when credentials are active.
+
+**Why this matters:** Authenticated JS bundles often contain internal API routes, admin endpoints, staging environment references, and hardcoded credentials that are never exposed to anonymous users. Scanning as an authenticated user gives you the full attack surface.
 
 ---
 
