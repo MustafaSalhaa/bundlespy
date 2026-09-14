@@ -34,7 +34,7 @@ def print_header(
 ) -> None:
     ts = datetime.utcnow().strftime("%H:%M:%S UTC")
     _p()
-    _p(f"  {A.BOLD}{A.WHITE}BundleSpy{A.RESET}  {A.GREY}v{version}  —  {author}{A.RESET}")
+    _p(f"  {A.BOLD}{A.WHITE}BundleSpy{A.RESET}  {A.GREY}v{version}  -  {author}{A.RESET}")
     _p(f"  {A.GREY}{divider()}{A.RESET}")
     _p(kv("Target",  truncate_url(target, 70), value_color=A.CYAN))
     _p(kv("Mode",    mode,   value_color=A.WHITE))
