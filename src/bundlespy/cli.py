@@ -380,13 +380,24 @@ def run_scan(args) -> int:
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
-    if args.headless and "all_endpoints_extra" in dir():
+    headless_extra = locals().get("all_endpoints_extra", [])
+    if headless_extra:
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
-        for ep in all_endpoints_extra:
+        for ep in headless_extra:
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_ep_keys:
                 seen_ep_keys.add(key)
                 all_endpoints.append(ep)
+
+    # Final dedup pass - catches duplicates from headless inline scripts
+    seen_final = set()
+    deduped = []
+    for ep in all_endpoints:
+        key = ep.url.rstrip("/").lower().split("?")[0]
+        if key not in seen_final:
+            seen_final.add(key)
+            deduped.append(ep)
+    all_endpoints = deduped
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
