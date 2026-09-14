@@ -273,7 +273,7 @@ class Crawler:
         scope:        ScopeChecker,
         max_depth:    int  = 2,
         max_pages:    int  = 100,
-        max_js_files: int  = 500,
+        max_js_files: int  = 1000,
         common_paths: bool = False,
     ):
         self.target_url   = target_url
@@ -317,6 +317,9 @@ class Crawler:
         queue.append((self.target_url, 0))
         self.visited_pages.add(self.target_url)
 
+        # Feed sitemap URLs into queue so every page gets crawled
+        self._feed_sitemap_to_queue(base, queue)
+
         while queue and self.pages_crawled < self.max_pages:
             url, depth = queue.popleft()
             self._crawl_page(url, depth, queue)
@@ -336,6 +339,19 @@ class Crawler:
             return
 
         ct_lower = content_type.lower()
+
+        # Handle JSON responses — extract any JS URLs referenced
+        if "json" in ct_lower:
+            import re
+            for m in re.finditer(r'["\'`]([^"\'`]*\.js)["\'`]', content):
+                raw = m.group(1)
+                if raw.startswith("/") or raw.startswith("http"):
+                    from urllib.parse import urljoin
+                    js_url = urljoin(url, raw)
+                    if self.scope.in_scope(js_url) and _is_js_url(js_url):
+                        self._fetch_js(js_url, url)
+            return
+
         if "html" not in ct_lower and "text" not in ct_lower:
             return
 
@@ -424,6 +440,36 @@ class Crawler:
                 pass
 
         return result
+
+    def _feed_sitemap_to_queue(self, base: str, queue: deque) -> None:
+        """
+        Parse sitemap.xml and add all discovered HTML pages to the crawl queue.
+        This ensures every page in the sitemap gets crawled for JS files.
+        """
+        sitemap_paths = [
+            "/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml",
+            "/wp-sitemap.xml", "/sitemaps/sitemap.xml",
+        ]
+        import xml.etree.ElementTree as ET2
+        for path in sitemap_paths:
+            url = base + path
+            content, status, _, _ = self.fetcher.get(url)
+            if not content or status != 200:
+                continue
+            try:
+                root = ET2.fromstring(content)
+                ns   = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+                for loc in root.findall(".//sm:url/sm:loc", ns):
+                    if loc.text:
+                        page_url = loc.text.strip()
+                        if page_url not in self.visited_pages and self.scope.in_scope(page_url):
+                            self.visited_pages.add(page_url)
+                            queue.append((page_url, 1))
+                if queue:
+                    logger.info("Sitemap: added %d URLs to crawl queue", len(queue))
+                    return
+            except Exception:
+                pass
 
     def _discover_from_manifests(self, base: str) -> None:
         """
