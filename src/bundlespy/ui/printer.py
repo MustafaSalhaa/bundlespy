@@ -409,6 +409,62 @@ def _print_finding(f, verbose=False):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+def print_attack_surface(surface):
+    if not surface or surface.get("total_items", 0) == 0:
+        # Still show state-change / auth / admin if present
+        if not (surface.get("state_change") or surface.get("auth_surface")
+                or surface.get("admin_surface")):
+            return
+
+    total = surface.get("total_items", 0)
+    _section("ATTACK SURFACE", str(total), A.RED)
+
+    # Summary bar
+    parts = []
+    for key, label, color in [
+        ("idor", "IDOR", A.RED),
+        ("injection", "Injection", A.ORANGE),
+        ("file_ops", "LFI/Path", A.ORANGE),
+        ("ssrf", "SSRF", A.YELLOW),
+        ("open_redirect", "Open Redirect", A.YELLOW),
+    ]:
+        n = len(surface.get(key, []))
+        if n:
+            parts.append(f"{color}{n} {label}{A.RESET}")
+    if parts:
+        _p("  " + "   ".join(parts))
+        _p()
+
+    def _print_group(items, title, color):
+        if not items:
+            return
+        _p(f"  {color}{A.BOLD}{title}{A.RESET}  {A.GREY}({len(items)}){A.RESET}")
+        for it in items[:15]:
+            path = it.endpoint_url[:_w()-30]
+            _p(f"  {A.GREY}  {it.method:<6}{A.RESET} {path}")
+            _p(f"  {A.GREY}         param: {A.RESET}{color}{it.param_name}{A.RESET}  {A.GREY}{it.reason}{A.RESET}")
+        if len(items) > 15:
+            _p(f"  {A.GREY}  ... and {len(items)-15} more{A.RESET}")
+        _p()
+
+    _print_group(surface.get("idor", []), "IDOR CANDIDATES", A.RED)
+    _print_group(surface.get("injection", []), "INJECTION CANDIDATES", A.ORANGE)
+    _print_group(surface.get("file_ops", []), "PATH TRAVERSAL / LFI", A.ORANGE)
+    _print_group(surface.get("ssrf", []), "SSRF CANDIDATES", A.YELLOW)
+    _print_group(surface.get("open_redirect", []), "OPEN REDIRECT", A.YELLOW)
+
+    # State-changing endpoints
+    sc = surface.get("state_change", [])
+    if sc:
+        _p(f"  {A.PURPLE}{A.BOLD}STATE-CHANGING ENDPOINTS{A.RESET}  {A.GREY}({len(sc)}){A.RESET}")
+        for ep in sc[:15]:
+            mc = A.RED if ep.method in ("DELETE", "PUT") else A.ORANGE
+            _p(f"  {mc}  {ep.method:<6}{A.RESET} {ep.url[:_w()-14]}")
+        if len(sc) > 15:
+            _p(f"  {A.GREY}  ... and {len(sc)-15} more{A.RESET}")
+        _p()
+
+
 def print_endpoints(endpoints, validation_results=None, verbose=False):
     if not endpoints:
         return
@@ -688,6 +744,11 @@ def print_report(
     print_secret_analysis(result.findings)
     print_findings(result.findings, verbose=verbose)
     print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
+
+    # Attack surface analysis
+    surface = extras.get("attack_surface")
+    if surface:
+        print_attack_surface(surface)
 
     if validation_results:
         print_validation_results(validation_results)
