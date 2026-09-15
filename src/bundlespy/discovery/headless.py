@@ -270,47 +270,113 @@ EXTRACT_API_CALLS_JS = """
 })()
 """
 
-# Inject request interceptor early
+# Destructive button text — never click these
+DESTRUCTIVE_KEYWORDS = {
+    "delete", "remove", "cancel", "purchase", "pay now", "pay",
+    "checkout", "submit order", "confirm order", "place order",
+    "unsubscribe", "deactivate", "reset", "destroy", "wipe",
+    "clear data", "close account", "terminate", "disable",
+    "send payment", "transfer", "withdraw", "confirm delete",
+}
+
+# Inject request interceptor early — captures fetch, XHR, WebSocket, WebWorker
 INTERCEPT_JS = """
 window.__bundlespy_requests = [];
-window.__bundlespy_ws = [];
+window.__bundlespy_ws       = [];
+window.__bundlespy_workers  = [];
+window.__bundlespy_iframes  = [];
 
+// Intercept fetch
 const origFetch = window.fetch;
 window.fetch = function(...args) {
-    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-    const opts = args[1] || {};
-    window.__bundlespy_requests.push({
-        url: url,
-        method: opts.method || 'GET',
-        headers: JSON.stringify(opts.headers || {}),
-        body: typeof opts.body === 'string' ? opts.body.substring(0, 500) : null,
-        type: 'fetch'
-    });
+    try {
+        const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
+        const opts = args[1] || {};
+        if (url) {
+            window.__bundlespy_requests.push({
+                url: url,
+                method: (opts.method || 'GET').toUpperCase(),
+                headers: JSON.stringify(opts.headers || {}),
+                body: typeof opts.body === 'string' ? opts.body.substring(0, 500) : null,
+                type: 'fetch'
+            });
+        }
+    } catch(e) {}
     return origFetch.apply(this, args);
 };
 
+// Intercept XMLHttpRequest
 const origXHR = window.XMLHttpRequest;
 window.XMLHttpRequest = function() {
     const xhr = new origXHR();
     const origOpen = xhr.open;
     xhr.open = function(method, url) {
-        window.__bundlespy_requests.push({
-            url: url,
-            method: method,
-            type: 'xhr'
-        });
+        try {
+            if (url) {
+                window.__bundlespy_requests.push({
+                    url: String(url),
+                    method: String(method).toUpperCase(),
+                    type: 'xhr'
+                });
+            }
+        } catch(e) {}
         return origOpen.apply(this, arguments);
     };
     return xhr;
 };
 
+// Intercept WebSocket
 const origWS = window.WebSocket;
 if (origWS) {
     window.WebSocket = function(url, ...args) {
-        window.__bundlespy_ws.push({url: url});
+        try {
+            window.__bundlespy_ws.push({url: String(url)});
+        } catch(e) {}
         return new origWS(url, ...args);
     };
+    window.WebSocket.prototype = origWS.prototype;
 }
+
+// Intercept WebWorker — captures worker JS file URLs
+const origWorker = window.Worker;
+if (origWorker) {
+    window.Worker = function(url, ...args) {
+        try {
+            window.__bundlespy_workers.push({url: String(url)});
+        } catch(e) {}
+        return new origWorker(url, ...args);
+    };
+}
+
+// Intercept SharedWorker
+const origSharedWorker = window.SharedWorker;
+if (origSharedWorker) {
+    window.SharedWorker = function(url, ...args) {
+        try {
+            window.__bundlespy_workers.push({url: String(url), shared: true});
+        } catch(e) {}
+        return new origSharedWorker(url, ...args);
+    };
+}
+
+// Observe iframes added dynamically
+const origCreateElement = document.createElement.bind(document);
+document.createElement = function(tag, ...args) {
+    const el = origCreateElement(tag, ...args);
+    if (tag && tag.toLowerCase() === 'iframe') {
+        const origSrcSet = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+        if (origSrcSet) {
+            Object.defineProperty(el, 'src', {
+                set: function(val) {
+                    try { window.__bundlespy_iframes.push({url: String(val)}); } catch(e) {}
+                    return origSrcSet.set.call(this, val);
+                },
+                get: function() { return origSrcSet.get.call(this); }
+            });
+        }
+    }
+    return el;
+};
 """
 
 
@@ -442,79 +508,308 @@ class HeadlessEngine:
         except Exception:
             return []
 
-    def _interact_with_page(self, page) -> None:
-        """Click buttons, fill forms, trigger events to discover more content."""
+    def _extract_worker_urls(self, page) -> List[str]:
+        """Get intercepted WebWorker and SharedWorker URLs."""
         try:
-            # Click navigation items and buttons (non-submit)
-            clickable = page.query_selector_all(
-                "nav a, nav button, [role='tab'], [role='menuitem'], "
-                ".nav-link, .menu-item, button:not([type='submit'])"
-            )
-            for el in clickable[:15]:
+            result = page.evaluate("window.__bundlespy_workers || []")
+            return [r["url"] for r in result if isinstance(r, dict) and "url" in r]
+        except Exception:
+            return []
+
+    def _extract_iframe_urls(self, page) -> List[str]:
+        """Get same-origin iframe src URLs from DOM."""
+        try:
+            parsed = urlparse(self.target_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+
+            # Get from interceptor (dynamically created iframes)
+            dynamic = page.evaluate("window.__bundlespy_iframes || []")
+            dynamic_urls = [r["url"] for r in dynamic if isinstance(r, dict) and "url" in r]
+
+            # Also get from DOM (static iframes)
+            dom_urls = page.evaluate("""
+                Array.from(document.querySelectorAll('iframe[src]'))
+                    .map(f => f.src)
+                    .filter(u => u && u.length > 0);
+            """)
+
+            all_urls = list(set(dynamic_urls + (dom_urls or [])))
+
+            # Only same-origin iframes
+            same_origin = [
+                u for u in all_urls
+                if u.startswith(origin) or u.startswith("/")
+            ]
+            return same_origin
+        except Exception:
+            return []
+
+    def _fetch_worker_js(self, worker_url: str, source_page: str) -> None:
+        """Fetch and store a WebWorker JS file for analysis."""
+        try:
+            # Resolve relative URLs
+            if worker_url.startswith("/"):
+                parsed = urlparse(self.target_url)
+                worker_url = f"{parsed.scheme}://{parsed.netloc}{worker_url}"
+
+            safe, _ = validate_url(worker_url)
+            if not safe or not self.scope.in_scope(worker_url):
+                return
+
+            from urllib.parse import urlparse as _up, urlunparse as _uu
+            _p = _up(worker_url)
+            norm = _uu((_p.scheme, _p.netloc, _p.path, "", "", ""))
+
+            if norm in self.seen_js:
+                return
+            self.seen_js.add(norm)
+
+            # Use requests to fetch (no browser needed for static JS)
+            try:
+                import requests
+                resp = requests.get(
+                    worker_url,
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                )
+                if resp.status_code == 200 and resp.content:
+                    body    = resp.content
+                    content_str = body.decode("utf-8", errors="replace")
+                    js_file = self._make_js_file(worker_url, body, source_page, "webworker")
+                    self.js_files.append(js_file)
+                    logger.info("WebWorker JS captured: %s (%d bytes)", worker_url, len(body))
+            except Exception as e:
+                logger.debug("Failed to fetch worker JS %s: %s", worker_url, e)
+
+        except Exception as e:
+            logger.debug("Worker fetch error: %s", e)
+
+    def _is_destructive(self, text: str) -> bool:
+        """Check if button/link text is potentially destructive."""
+        if not text:
+            return False
+        lower = text.lower().strip()
+        return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
+
+    def _interact_with_page(self, page) -> None:
+        """
+        Advanced safe interaction engine.
+        Clicks every safe interactive element to trigger lazy JS loading.
+        Never clicks destructive buttons.
+        """
+        try:
+            # Phase 1: Scroll to trigger lazy-loading and infinite scroll
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.25);")
+            page.wait_for_timeout(400)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5);")
+            page.wait_for_timeout(400)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.75);")
+            page.wait_for_timeout(400)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            page.wait_for_timeout(600)
+            page.evaluate("window.scrollTo(0, 0);")
+            page.wait_for_timeout(300)
+
+            # Phase 2: Click tabs, accordions, toggles — these load lazy JS
+            tab_selectors = [
+                "[role='tab']",
+                "[role='menuitem']",
+                "[data-toggle='tab']",
+                "[data-bs-toggle='tab']",
+                ".nav-link:not(.active)",
+                ".tab:not(.active)",
+                "[aria-selected='false']",
+                ".accordion-button",
+                "[data-toggle='collapse']",
+                "[data-bs-toggle='collapse']",
+                ".expandable:not(.expanded)",
+                "[aria-expanded='false']",
+            ]
+
+            for selector in tab_selectors:
                 try:
-                    if el.is_visible() and el.is_enabled():
-                        el.click(timeout=2000)
-                        page.wait_for_timeout(500)
+                    elements = page.query_selector_all(selector)
+                    for el in elements[:8]:
+                        try:
+                            if not el.is_visible() or not el.is_enabled():
+                                continue
+                            text = el.inner_text() or ""
+                            if self._is_destructive(text):
+                                continue
+                            el.click(timeout=1500)
+                            page.wait_for_timeout(400)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
-            # Scroll to trigger lazy loading
-            page.evaluate("""
-                window.scrollTo(0, document.body.scrollHeight / 2);
-            """)
-            page.wait_for_timeout(500)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            page.wait_for_timeout(500)
-            page.evaluate("window.scrollTo(0, 0);")
+            # Phase 3: Click navigation links (same-page)
+            try:
+                nav_links = page.query_selector_all(
+                    "nav a[href], .navbar a[href], .menu a[href], "
+                    "[role='navigation'] a[href], .sidebar a[href]"
+                )
+                for el in nav_links[:20]:
+                    try:
+                        if not el.is_visible():
+                            continue
+                        href = el.get_attribute("href") or ""
+                        text = el.inner_text() or ""
+                        # Skip external links and destructive text
+                        if href.startswith("http") and not self.target_url.split("/")[2] in href:
+                            continue
+                        if self._is_destructive(text):
+                            continue
+                        # Only click hash links and same-page nav (avoid full navigation)
+                        if href.startswith("#") or href.startswith("javascript:"):
+                            el.click(timeout=1000)
+                            page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Phase 4: Click safe buttons — dropdowns, toggles, show-more
+            try:
+                safe_buttons = page.query_selector_all(
+                    "button[data-toggle], button[data-bs-toggle], "
+                    "button[aria-expanded], button[aria-controls], "
+                    ".dropdown-toggle, .show-more, .load-more, "
+                    "[role='button']:not([type='submit'])"
+                )
+                for el in safe_buttons[:15]:
+                    try:
+                        if not el.is_visible() or not el.is_enabled():
+                            continue
+                        text = el.inner_text() or ""
+                        if self._is_destructive(text):
+                            continue
+                        el.click(timeout=1500)
+                        page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Phase 5: Hover over menu items to trigger dropdown JS loads
+            try:
+                hover_targets = page.query_selector_all(
+                    ".dropdown, .has-submenu, [data-hover], nav > ul > li"
+                )
+                for el in hover_targets[:10]:
+                    try:
+                        if el.is_visible():
+                            el.hover(timeout=1000)
+                            page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Phase 6: Trigger input events on search boxes (common lazy load trigger)
+            try:
+                search_inputs = page.query_selector_all(
+                    "input[type='search'], input[name='q'], "
+                    "input[name='search'], input[placeholder*='search' i], "
+                    "input[placeholder*='find' i]"
+                )
+                for inp in search_inputs[:3]:
+                    try:
+                        if inp.is_visible() and inp.is_enabled():
+                            inp.click(timeout=1000)
+                            inp.type("test", delay=50)
+                            page.wait_for_timeout(500)
+                            inp.clear()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         except Exception as e:
             logger.debug("Interaction error: %s", e)
 
     def _fill_and_observe_forms(self, page) -> None:
         """
-        Fill forms with safe test values to observe API calls.
-        Never submits — we just fill to trigger autocomplete/validation
-        callbacks which often reveal API endpoints.
+        Safe read-only form observation.
+
+        SAFETY RULES — strictly enforced:
+        - NEVER submits any form under any circumstances
+        - NEVER clicks submit buttons
+        - NEVER triggers form.submit()
+        - Only types in search/query inputs to trigger autocomplete JS loading
+        - Skips any form in a payment/checkout/billing context
+        - Read-only observation only — no state changes on the server
+
+        Purpose: trigger autocomplete and validation JS to load
+        lazy chunks and reveal API endpoints via network interception.
         """
+
+        # Forms containing these words in id/class/action are skipped entirely
+        SKIP_FORM_CONTEXTS = {
+            "payment", "checkout", "billing", "credit", "card",
+            "order", "purchase", "buy", "transaction", "stripe",
+            "paypal", "braintree", "adyen", "square", "invoice",
+        }
+
+        # Only interact with these safe input types
+        SAFE_INPUT_NAMES = {
+            "search", "q", "query", "find", "keyword", "keywords",
+            "filter", "username", "user", "email",
+        }
+
         try:
             forms = page.query_selector_all("form")
-            for form in forms[:5]:
+            for form in forms[:10]:
                 try:
-                    inputs = form.query_selector_all("input, textarea, select")
+                    # Check form context — skip payment/checkout forms
+                    form_id     = (form.get_attribute("id") or "").lower()
+                    form_class  = (form.get_attribute("class") or "").lower()
+                    form_action = (form.get_attribute("action") or "").lower()
+                    form_ctx    = form_id + form_class + form_action
+
+                    if any(kw in form_ctx for kw in SKIP_FORM_CONTEXTS):
+                        logger.debug("Skipping payment/checkout form: %s", form_ctx[:50])
+                        continue
+
+                    # Only type in safe search/query inputs — never submit
+                    inputs = form.query_selector_all("input, textarea")
                     for inp in inputs:
                         try:
-                            input_type = inp.get_attribute("type") or "text"
-                            name       = (inp.get_attribute("name") or
-                                         inp.get_attribute("id") or
-                                         inp.get_attribute("placeholder") or "").lower()
+                            input_type = (inp.get_attribute("type") or "text").lower()
+                            input_name = (
+                                inp.get_attribute("name") or
+                                inp.get_attribute("id") or
+                                inp.get_attribute("placeholder") or
+                                inp.get_attribute("aria-label") or ""
+                            ).lower()
 
-                            if input_type in ("hidden", "submit", "button", "reset", "file"):
+                            # Only interact with safe, non-sensitive inputs
+                            if input_type not in ("text", "search", "email"):
                                 continue
 
-                            # Find the right fill value
-                            fill_val = "test"
-                            for key, val in FORM_FILL_VALUES.items():
-                                if key in name or key in input_type:
-                                    fill_val = val
-                                    break
+                            # Must be a search/query/username input
+                            if not any(safe in input_name for safe in SAFE_INPUT_NAMES):
+                                continue
 
-                            if input_type == "checkbox" or input_type == "radio":
-                                inp.check()
-                            elif inp.tag_name() == "select":
-                                options = inp.query_selector_all("option")
-                                if len(options) > 1:
-                                    options[1].click()
-                            else:
-                                inp.fill(fill_val, timeout=2000)
+                            if not inp.is_visible() or not inp.is_enabled():
+                                continue
 
-                            page.wait_for_timeout(300)
+                            # Type and clear — triggers autocomplete/validation JS
+                            # but leaves no trace
+                            inp.click(timeout=1000)
+                            inp.type("test", delay=30)
+                            page.wait_for_timeout(400)
+                            inp.clear()
+                            page.wait_for_timeout(200)
 
                         except Exception:
                             pass
+
                 except Exception:
                     pass
+
         except Exception as e:
-            logger.debug("Form fill error: %s", e)
+            logger.debug("Form observe error: %s", e)
 
     def _visit_page(self, page, url: str, context_page: str) -> Set[str]:
         """
@@ -558,13 +853,25 @@ class HeadlessEngine:
                 self._fill_and_observe_forms(page)
                 page.wait_for_timeout(1000)
 
-            # Extract routes and API calls
-            routes   = self._extract_routes_from_page(page)
-            api_calls = self._extract_api_calls(page)
-            ws_urls   = self._extract_ws_urls(page)
+            # Extract routes, API calls, WebWorkers, iframes
+            routes      = self._extract_routes_from_page(page)
+            api_calls   = self._extract_api_calls(page)
+            ws_urls     = self._extract_ws_urls(page)
+            worker_urls = self._extract_worker_urls(page)
+            iframe_urls = self._extract_iframe_urls(page)
 
             self.api_calls.extend(api_calls)
             self.ws_urls.extend(ws_urls)
+
+            # Fetch WebWorker JS files for analysis
+            for w_url in worker_urls:
+                self._fetch_worker_js(w_url, url)
+
+            # Add same-origin iframes to visit queue
+            for iframe_url in iframe_urls:
+                if iframe_url not in self.seen_urls:
+                    routes.add(urlparse(iframe_url).path or "/")
+                    logger.info("Iframe discovered: %s", iframe_url)
 
             return routes
 
@@ -734,6 +1041,7 @@ class HeadlessEngine:
             context.close()
             browser.close()
 
+        workers = [js for js in self.js_files if js.technology == "webworker"]
         stats = {
             "pages":     self.pages_visited,
             "js":        len(self.js_files),
@@ -742,6 +1050,7 @@ class HeadlessEngine:
             "ws":        len(self.ws_urls),
             "routes":    len(self.routes),
             "endpoints": len(self.endpoints),
+            "workers":   len(workers),
         }
 
         logger.info(
