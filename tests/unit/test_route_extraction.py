@@ -10,7 +10,9 @@ import re
 import pytest
 sys.path.insert(0, "/home/claude/bundlespy/src")
 
-from tests.fixtures.js_fixtures import (
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from fixtures.js_fixtures import (
     ANGULAR_IVY_ROUTES, ANGULAR_NESTED_ROUTES, ANGULAR_LAZY_ROUTES,
     REACT_ROUTER_V6, REACT_ROUTER_V5,
     VUE_ROUTER_V4, VUE_ROUTER_V3,
