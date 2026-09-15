@@ -18,6 +18,7 @@ from .crawler.crawler import Crawler
 from .analysis.secrets import SecretScanner
 from .analysis.endpoints import extract_endpoints
 from .analysis.ast_endpoints import extract_all_endpoints
+from .analysis.endpoint_intel import extract_endpoint_intelligence
 from .analysis.infrastructure import extract_infrastructure
 from .analysis.jwt import find_jwts
 from .storage.models import ScanResult, Finding, Endpoint, InfrastructureItem, JSFile
