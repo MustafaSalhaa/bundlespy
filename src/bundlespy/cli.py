@@ -1,5 +1,5 @@
 """
-BundleSpy CLI - clean, automation-friendly, no interactive prompts.
+BundleSpy CLI — clean, automation-friendly, no interactive prompts.
 """
 
 import sys
@@ -336,15 +336,40 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase("Launching advanced headless browser")
         from .discovery.headless import collect_headless_full
-        # Pass crawler's already-seen JS URLs and visited pages to headless
+        # Extract routes from already-collected JS files
+        # so headless visits every Angular/React/Vue route
+        from .analysis.ast_endpoints import extract_all_endpoints as _extract_eps
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(target)
+        _base   = f"{_parsed.scheme}://{_parsed.netloc}"
+        _static_routes = set()
+        for _js in all_js:
+            if not _js.content:
+                continue
+            for _ep in _extract_eps(_js.content, _js.url):
+                # Only relative paths — these are frontend routes
+                if _ep.url.startswith("/") and not _ep.url.startswith("//"):
+                    # Skip API paths — we want page routes not API endpoints
+                    if not any(k in _ep.url.lower() for k in [
+                        "/api/", "/rest/", "/graphql", "/v1/", "/v2/",
+                        "/upload", "/download", "/socket",
+                    ]):
+                        _static_routes.add(_base + _ep.url.split("?")[0])
+
+        # Combine crawler pages + statically discovered routes
         crawler_seen  = getattr(crawler if not args.passive else None, "visited_js", set()) or set()
         crawler_pages = list(getattr(crawler if not args.passive else None, "visited_pages", set()) or set())
+        all_seed_urls = list(set(crawler_pages) | _static_routes)
+
+        if _static_routes and not args.quiet and not getattr(args, "silent", False):
+            phase(f"Headless will visit {len(all_seed_urls)} pages ({len(_static_routes)} from JS routes)")
+
         headless_result = collect_headless_full(target, scope,
                                                 stealth=args.stealth,
                                                 timeout=args.timeout,
                                                 max_pages=args.max_pages,
                                                 external_seen=crawler_seen,
-                                                seed_urls=crawler_pages)
+                                                seed_urls=all_seed_urls)
         headless_files    = headless_result.get("js_files", [])
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats    = headless_result.get("stats", {})
