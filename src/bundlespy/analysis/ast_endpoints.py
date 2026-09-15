@@ -220,8 +220,21 @@ def _is_valid_path(path: str) -> bool:
 
     # Skip documentation URLs embedded in code
     skip_domains = ["reactjs.org", "w3.org", "github.com", "mdn.io",
-                    "developer.mozilla", "nodejs.org"]
+                    "developer.mozilla", "nodejs.org",
+                    "google-analytics.com", "google.com/g/collect",
+                    "googletagmanager.com",
+                    "facebook.com", "twitter.com", "linkedin.com",
+                    "doubleclick.net", "hotjar.com", "mixpanel.com",
+                    "opensea.io", "bsky.app", "mastodon", "freeprivacypolicy",
+                    "angular.dev", "pwning.owasp", "cookiesandyou",
+                    "testnets.opensea"]
     if any(d in lower for d in skip_domains):
+        return False
+
+    # Filter socket.io polling requests
+    if "socket.io" in lower and ("eio=" in lower or "transport=polling" in lower):
+        return False
+    if "engine.io" in lower and "transport=polling" in lower:
         return False
 
     # Skip full HTTP URLs that are not API-like
