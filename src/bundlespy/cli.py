@@ -77,6 +77,7 @@ examples:
     scan.add_argument("--validate-secrets", action="store_true")
     scan.add_argument("--stealth",        action="store_true")
     scan.add_argument("--interact",       action="store_true", help="Enable full page interaction in headless mode (slower but finds more lazy JS)")
+    scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
                       help="Extra header to include in all requests (can use multiple times)")
@@ -371,7 +372,8 @@ def run_scan(args) -> int:
                                                 max_pages=args.max_pages,
                                                 external_seen=crawler_seen,
                                                 seed_urls=all_seed_urls,
-                                                interact=getattr(args, "interact", False))
+                                                interact=getattr(args, "interact", False),
+                                                workers=getattr(args, "workers", 3))
         headless_files    = headless_result.get("js_files", [])
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats    = headless_result.get("stats", {})
@@ -392,6 +394,8 @@ def run_scan(args) -> int:
             "ws":        headless_stats.get("ws", 0),
             "routes":    headless_stats.get("routes", 0),
             "endpoints": headless_stats.get("endpoints", 0),
+            "workers":   headless_stats.get("workers", 0),
+            "timings":   headless_stats.get("timings", {}),
         }
         if not args.quiet:
             phase_done("Browser discovery",
