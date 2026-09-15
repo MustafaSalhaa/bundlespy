@@ -1,5 +1,5 @@
 """
-BundleSpy CLI — clean, automation-friendly, no interactive prompts.
+BundleSpy CLI - clean, automation-friendly, no interactive prompts.
 """
 
 import sys
