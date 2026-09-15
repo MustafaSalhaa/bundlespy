@@ -4,6 +4,7 @@ BundleSpy CLI — clean, automation-friendly, no interactive prompts.
 
 import sys
 import os
+import re
 import argparse
 import logging
 from datetime import datetime
@@ -223,7 +224,13 @@ def run_scan(args) -> int:
     if args.no_color or os.environ.get("NO_COLOR"):
         os.environ["NO_COLOR"] = "1"
 
-    target = args.target
+    target = args.target.strip()
+
+    # Normalize URL — fix common input mistakes
+    # Collapse duplicate schemes: https://https://x -> https://x
+    while re.match(r'^https?://https?://', target):
+        target = re.sub(r'^https?://(https?://)', r'\1', target)
+    # Add scheme if completely missing
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
