@@ -231,34 +231,57 @@ def _print_libraries(lib_findings):
     if not lib_findings:
         return
 
+    # Group CVEs by library+version
+    by_lib: dict = {}
+    for lf in lib_findings:
+        key = f"{lf.library}::{lf.version}"
+        by_lib.setdefault(key, []).append(lf)
+
+    unique_libs = len(by_lib)
+    total_cves  = len(lib_findings)
+
     counts: dict = {}
     for lf in lib_findings:
         counts[lf.severity] = counts.get(lf.severity, 0) + 1
 
-    _section("VULNERABLE LIBRARIES", str(len(lib_findings)), A.RED)
+    _section("VULNERABLE LIBRARIES",
+             f"{total_cves} in {unique_libs}", A.RED)
 
+    # Severity summary bar
+    parts = []
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
         if counts.get(sev):
             c = SEV_COLOR.get(sev, "")
-            _p(f"  {c}{sev:<10}{A.RESET}  {counts[sev]}")
+            parts.append(f"{c}{counts[sev]} {sev.lower()}{A.RESET}")
+    if parts:
+        _p("  " + "   ".join(parts))
     _p()
 
-    shown = set()
-    for lf in sorted(lib_findings, key=lambda x: -x.cvss):
-        c       = SEV_COLOR.get(lf.severity, "")
-        lib_key = f"{lf.library}:{lf.version}"
-        is_new  = lib_key not in shown
-        shown.add(lib_key)
+    # One block per library, showing all its CVEs together
+    for lib_key in sorted(by_lib.keys(),
+                          key=lambda k: -max(c.cvss for c in by_lib[k])):
+        cves    = sorted(by_lib[lib_key], key=lambda x: -x.cvss)
+        library = cves[0].library
+        version = cves[0].version
+        fname   = cves[0].source_file.split("/")[-1] if "/" in cves[0].source_file else cves[0].source_file
 
-        if is_new:
-            _p(f"  {c}{lf.severity:<8}{A.RESET}  {A.WHITE}{A.BOLD}{lf.library} v{lf.version}{A.RESET}")
-            fname = lf.source_file.split("/")[-1] if "/" in lf.source_file else lf.source_file
-            _p(f"  {_label('File')}{fname}")
+        # Highest severity determines header color
+        top_sev = cves[0].severity
+        hc      = SEV_COLOR.get(top_sev, "")
 
-        _p(f"  {_label('CVE')}{c}{lf.cve_id}{A.RESET}  {A.GREY}CVSS {lf.cvss}{A.RESET}")
-        _p(f"  {_label('Issue')}{lf.description}")
-        _p(f"  {_label('Fix')}{lf.remediation}")
-        _p(f"  {A.GREY}{'─' * 60}{A.RESET}")
+        # Library header
+        _p(f"  {hc}{A.BOLD}{library} {version}{A.RESET}  {A.GREY}·  {fname}{A.RESET}")
+        _p(f"  {A.GREY}{'─' * min(_w()-4, 70)}{A.RESET}")
+
+        # Each CVE as a clean row
+        for cve in cves:
+            c        = SEV_COLOR.get(cve.severity, "")
+            sev_tag  = f"{c}{cve.severity:<8}{A.RESET}"
+            cvss_tag = f"{A.GREY}CVSS {cve.cvss}{A.RESET}"
+            _p(f"  {sev_tag} {A.CYAN}{cve.cve_id}{A.RESET}  {cvss_tag}")
+            _p(f"           {cve.description}")
+            _p(f"           {A.GREY}Fix: {cve.remediation}{A.RESET}")
+            _p()
         _p()
 
 
