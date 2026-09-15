@@ -180,26 +180,26 @@ class TestSourceMapDetection:
 
     def test_sourcemapping_url_at_end(self):
         """Most common case — comment at very end of minified file."""
-        from tests.fixtures.js_fixtures import MINIFIED_WITH_MAP
+        from bundlespy_test_fixtures import MINIFIED_WITH_MAP
         result = self.detect(MINIFIED_WITH_MAP, "https://example.com/app.js")
         assert result == "https://example.com/app.js.map", f"Got: {result}"
 
     def test_inline_base64_sourcemap(self):
         """Inline base64 encoded source map."""
-        from tests.fixtures.js_fixtures import MINIFIED_WITH_INLINE_MAP
+        from bundlespy_test_fixtures import MINIFIED_WITH_INLINE_MAP
         result = self.detect(MINIFIED_WITH_INLINE_MAP, "https://example.com/app.js")
         assert result is not None
         assert result.startswith("data:application/json;base64,")
 
     def test_legacy_x_sourcemap_comment(self):
         """Older //@ format still used by some tools."""
-        from tests.fixtures.js_fixtures import MINIFIED_WITH_X_SOURCEMAP
+        from bundlespy_test_fixtures import MINIFIED_WITH_X_SOURCEMAP
         result = self.detect(MINIFIED_WITH_X_SOURCEMAP, "https://example.com/legacy.js")
         assert result == "https://example.com/legacy.js.map", f"Got: {result}"
 
     def test_no_sourcemap_returns_none(self):
         """JS with no source map reference must return None."""
-        from tests.fixtures.js_fixtures import MINIFIED_NO_MAP_COMMENT
+        from bundlespy_test_fixtures import MINIFIED_NO_MAP_COMMENT
         result = self.detect(MINIFIED_NO_MAP_COMMENT, "https://example.com/app.js")
         assert result is None
 
@@ -230,7 +230,7 @@ class TestSourceMapDetection:
 
     def test_source_map_parse(self):
         """Valid source map JSON must parse correctly."""
-        from tests.fixtures.js_fixtures import SOURCE_MAP_VALID
+        from bundlespy_test_fixtures import SOURCE_MAP_VALID
         from bundlespy.discovery.source_maps import parse_source_map
         result = parse_source_map(SOURCE_MAP_VALID)
         assert result is not None
@@ -240,7 +240,7 @@ class TestSourceMapDetection:
 
     def test_source_map_recover_content(self):
         """sourcesContent must be recovered as individual files."""
-        from tests.fixtures.js_fixtures import SOURCE_MAP_VALID
+        from bundlespy_test_fixtures import SOURCE_MAP_VALID
         from bundlespy.discovery.source_maps import parse_source_map, recover_sources
         map_data = parse_source_map(SOURCE_MAP_VALID)
         recovered = recover_sources(map_data, "https://example.com/app.js.map", "https://example.com/app.js")
@@ -358,7 +358,7 @@ class TestFalsePositiveSuppression:
 
     def test_angular_material_not_gitlab_token(self):
         """MAT_PROGRESS_BAR_DEFAULT_OPTIONS must not be a GitLab token."""
-        from tests.fixtures.js_fixtures import ANGULAR_MATERIAL_FP
+        from bundlespy_test_fixtures import ANGULAR_MATERIAL_FP
         findings = self.scanner.scan(ANGULAR_MATERIAL_FP, "https://example.com/main.js", "")
         gitlab_findings = [f for f in findings if f.rule_id == "GITLAB_RUNNER_TOKEN"]
         # Either no finding, or confidence must be low
@@ -368,7 +368,7 @@ class TestFalsePositiveSuppression:
 
     def test_html_input_name_not_password(self):
         """inputs: {{password: 'password'}} must not be a high-severity finding."""
-        from tests.fixtures.js_fixtures import HTML_INPUT_FP
+        from bundlespy_test_fixtures import HTML_INPUT_FP
         findings = self.scanner.scan(HTML_INPUT_FP, "https://example.com/main.js", "")
         password_findings = [f for f in findings
                             if f.rule_id == "GENERIC_PASSWORD" and f.matched_value == "password"]
@@ -378,7 +378,7 @@ class TestFalsePositiveSuppression:
 
     def test_test_credential_downgraded(self):
         """IamUsedForTesting must not be CRITICAL or HIGH confidence."""
-        from tests.fixtures.js_fixtures import TEST_CREDENTIAL_FP
+        from bundlespy_test_fixtures import TEST_CREDENTIAL_FP
         findings = self.scanner.scan(TEST_CREDENTIAL_FP, "https://example.com/main.js", "")
         test_findings = [f for f in findings if "IamUsedForTesting" in f.matched_value]
         for f in test_findings:
@@ -387,7 +387,7 @@ class TestFalsePositiveSuppression:
 
     def test_oauth_client_id_is_medium_not_high(self):
         """Public OAuth client IDs are not secrets — must not be HIGH or CRITICAL."""
-        from tests.fixtures.js_fixtures import OAUTH_CLIENT_ID_FP
+        from bundlespy_test_fixtures import OAUTH_CLIENT_ID_FP
         findings = self.scanner.scan(OAUTH_CLIENT_ID_FP, "https://example.com/main.js", "")
         oauth_findings = [f for f in findings if "googleusercontent" in f.matched_value.lower()]
         for f in oauth_findings:
