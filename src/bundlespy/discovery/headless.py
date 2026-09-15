@@ -1,19 +1,16 @@
 """
-Advanced Headless Browser Engine for BundleSpy.
+BundleSpy Advanced Headless Engine - optimized for speed and coverage.
 
-Goes beyond Katana by combining:
-- Full multi-page crawling with JS execution
-- Form detection and intelligent filling
-- Button/interaction event triggering
-- XHR/fetch/WebSocket interception at network level
-- JS Router extraction (React Router, Vue Router, Angular)
-- Dynamic chunk and lazy-load capture
-- Shadow DOM traversal
-- Service Worker interception
-- API parameter extraction from network requests
-- Authentication flow detection
-- Infinite scroll handling
-- Event-driven content discovery
+Optimization principles:
+- Adaptive waits instead of fixed sleeps
+- DOM stability detection instead of networkidle
+- Concurrent page processing with worker pool
+- Event-driven pipeline — react to actual activity
+- Central deduplication registry — never analyze same asset twice
+- Priority queue — high-value routes first
+- Resource blocking — skip images/fonts/ads, keep JS/XHR/WS
+- Shared page stabilization helper
+- Phase timing metrics
 """
 
 import re
@@ -21,256 +18,57 @@ import json
 import time
 import hashlib
 import logging
+import threading
+import queue
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from ..storage.models import JSFile, Endpoint
 from ..safety.network import validate_url
 
 logger = logging.getLogger("bundlespy.discovery.headless")
 
-# JS Router patterns
-RE_REACT_ROUTES   = re.compile(r'path:\s*["\']([/][^"\']+)["\']', re.IGNORECASE)
-RE_VUE_ROUTES     = re.compile(r'path:\s*["\']([/][^"\'*]+)["\']', re.IGNORECASE)
-RE_ANGULAR_ROUTES = re.compile(r'loadChildren|component.*path.*["\']([/][^"\']+)["\']', re.IGNORECASE)
-RE_NEXT_ROUTES    = re.compile(r'["\']/((?:api|app|pages)/[^"\']+)["\']', re.IGNORECASE)
 
-# Form field types to fill intelligently
-FORM_FILL_VALUES = {
-    "email":    "test@example.com",
-    "password": "TestPassword123!",
-    "username": "testuser",
-    "name":     "Test User",
-    "phone":    "+1234567890",
-    "search":   "test",
-    "query":    "test",
-    "q":        "test",
-    "text":     "test input",
-    "url":      "https://example.com",
-    "number":   "42",
-    "date":     "2024-01-01",
+# ── Route priority — high-value routes processed first ───────────────────────
+
+ROUTE_PRIORITY = {
+    "admin": 0, "administration": 0, "dashboard": 0,
+    "login": 1, "signin": 1, "auth": 1,
+    "account": 2, "profile": 2, "settings": 2,
+    "api": 3, "graphql": 3, "upload": 3, "download": 3,
+    "users": 4, "orders": 4, "products": 4,
 }
 
-# Comprehensive SPA route extraction JS
-# Handles Angular, React Router, Vue Router, Next.js, and generic patterns
-EXTRACT_ROUTES_JS = """
-(function() {
-    const routes = new Set();
-    const MAX_ROUTES = 500;
+def _route_priority(url: str) -> int:
+    lower = url.lower()
+    for key, pri in ROUTE_PRIORITY.items():
+        if key in lower:
+            return pri
+    return 99
 
-    function addRoute(r) {
-        if (!r || typeof r !== 'string') return;
-        r = r.trim();
-        if (r.length < 2) return;
-        if (!r.startsWith('/')) r = '/' + r;
-        // Skip wildcard-only and param-only routes
-        if (r === '/**' || r === '/*' || r === '/') return;
-        routes.add(r);
-    }
 
-    // ── Angular Router (most important for Juice Shop) ──────────────────────
-    try {
-        // Method 1: Angular injector via root element
-        const rootEls = document.querySelectorAll('[ng-version], [_nghost-], ng-component');
-        for (const el of rootEls) {
-            try {
-                // Angular Ivy context
-                const ctx = el.__ngContext__ || el[Object.keys(el).find(k => k.startsWith('__ngContext'))];
-                if (ctx) {
-                    const lView = Array.isArray(ctx) ? ctx : null;
-                    if (lView) {
-                        for (let i = 0; i < lView.length; i++) {
-                            const item = lView[i];
-                            if (item && item.config && Array.isArray(item.config)) {
-                                item.config.forEach(function walk(r) {
-                                    if (!r) return;
-                                    if (r.path !== undefined) addRoute('/' + r.path);
-                                    if (r.children) r.children.forEach(walk);
-                                    if (r._loadedRoutes) r._loadedRoutes.forEach(walk);
-                                });
-                            }
-                        }
-                    }
-                }
-            } catch(e) {}
-        }
+# ── Resource types to block (no JS intelligence value) ───────────────────────
 
-        // Method 2: Angular global ng object
-        if (window.ng) {
-            try {
-                const probe = window.ng.probe || window.ng.getComponent;
-                const rootEl = document.querySelector('app-root') || document.querySelector('[ng-version]');
-                if (rootEl && window.ng.getContext) {
-                    const ctx = window.ng.getContext(rootEl);
-                    if (ctx && ctx.router && ctx.router.config) {
-                        ctx.router.config.forEach(function walk(r) {
-                            if (r.path !== undefined) addRoute('/' + r.path);
-                            if (r.children) r.children.forEach(walk);
-                        });
-                    }
-                }
-            } catch(e) {}
-        }
+BLOCK_RESOURCE_TYPES = {
+    "image", "media", "font", "texttrack",
+    "eventsource", "manifest",
+}
 
-        // Method 3: Angular router in window
-        const ngRouters = [];
-        try {
-            if (window.getAllAngularRootElements) {
-                window.getAllAngularRootElements().forEach(el => {
-                    try {
-                        const injector = el.__ngContext__ && el.__ngContext__[8];
-                        if (injector && injector.get) {
-                            ['Router', 'ROUTER_CONFIGURATION'].forEach(token => {
-                                try {
-                                    const r = injector.get(token);
-                                    if (r && r.config) ngRouters.push(r);
-                                } catch(e) {}
-                            });
-                        }
-                    } catch(e) {}
-                });
-            }
-        } catch(e) {}
-        ngRouters.forEach(router => {
-            try {
-                router.config.forEach(function walk(r) {
-                    if (r.path !== undefined) addRoute('/' + r.path);
-                    if (r.children) r.children.forEach(walk);
-                    if (r._loadedRoutes) r._loadedRoutes.forEach(walk);
-                });
-            } catch(e) {}
-        });
+# Analytics/ad domains to block
+BLOCK_DOMAINS = {
+    "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+    "facebook.net", "twitter.com", "linkedin.com", "hotjar.com",
+    "mixpanel.com", "segment.io", "amplitude.com", "fullstory.com",
+    "intercom.io", "zendesk.com", "hubspot.com",
+}
 
-    } catch(e) {}
 
-    // ── React Router ─────────────────────────────────────────────────────────
-    try {
-        // React Router v6 - __reactRouterRoutes
-        if (window.__reactRouterRoutes) {
-            window.__reactRouterRoutes.forEach(r => r.path && addRoute(r.path));
-        }
-        // React Router via fiber nodes
-        const reactRoots = document.querySelectorAll('#root, #app, [data-reactroot]');
-        reactRoots.forEach(el => {
-            try {
-                const key = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-                if (!key) return;
-                let fiber = el[key];
-                let depth = 0;
-                while (fiber && depth < 100) {
-                    if (fiber.memoizedProps && fiber.memoizedProps.path) {
-                        addRoute(fiber.memoizedProps.path);
-                    }
-                    fiber = fiber.child || fiber.sibling || (fiber.return && fiber.return.sibling);
-                    depth++;
-                }
-            } catch(e) {}
-        });
-    } catch(e) {}
+# ── Destructive keywords — never click these ─────────────────────────────────
 
-    // ── Vue Router ───────────────────────────────────────────────────────────
-    try {
-        const vueApps = [];
-        if (window.__vue_router__) vueApps.push({router: window.__vue_router__});
-        if (window.$vm && window.$vm.$router) vueApps.push({router: window.$vm.$router});
-        // Vue 3 app instances
-        document.querySelectorAll('[data-v-app]').forEach(el => {
-            try {
-                if (el._vei || el.__vue_app__) {
-                    const app = el.__vue_app__;
-                    if (app && app.config && app.config.globalProperties.$router) {
-                        vueApps.push({router: app.config.globalProperties.$router});
-                    }
-                }
-            } catch(e) {}
-        });
-        vueApps.forEach(({router}) => {
-            try {
-                const opts = router.options || {};
-                (opts.routes || []).forEach(function walk(r) {
-                    if (r.path) addRoute(r.path);
-                    if (r.children) r.children.forEach(walk);
-                });
-                // Vue Router 4 getRoutes()
-                if (router.getRoutes) {
-                    router.getRoutes().forEach(r => r.path && addRoute(r.path));
-                }
-            } catch(e) {}
-        });
-    } catch(e) {}
-
-    // ── Next.js ──────────────────────────────────────────────────────────────
-    try {
-        const nextData = window.__NEXT_DATA__;
-        if (nextData) {
-            if (nextData.page) addRoute(nextData.page);
-            if (nextData.buildManifest) {
-                Object.keys(nextData.buildManifest.pages || {}).forEach(p => addRoute(p));
-            }
-        }
-        if (window.__NEXT_ROUTER_BASEPATH !== undefined) {
-            // Next.js 13+ app router
-            if (window.next && window.next.router && window.next.router.routes) {
-                Object.keys(window.next.router.routes).forEach(r => addRoute(r));
-            }
-        }
-    } catch(e) {}
-
-    // ── Generic: Anchor links ────────────────────────────────────────────────
-    document.querySelectorAll('a[href], [routerLink], [ng-href]').forEach(el => {
-        try {
-            const href = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
-            if (href && href.startsWith('/') && !href.startsWith('//')) {
-                addRoute(href.split('?')[0].split('#')[0]);
-            }
-        } catch(e) {}
-    });
-
-    // ── Generic: data-route attributes ──────────────────────────────────────
-    document.querySelectorAll('[data-route],[data-url],[data-href],[data-path],[routerLink]').forEach(el => {
-        ['data-route','data-url','data-href','data-path','routerLink'].forEach(attr => {
-            try {
-                const val = el.getAttribute(attr);
-                if (val && val.startsWith('/')) addRoute(val.split('?')[0]);
-            } catch(e) {}
-        });
-    });
-
-    // ── Window location-based navigation patterns ────────────────────────────
-    try {
-        // Check if router is registered in common global namespaces
-        ['__router__', '_router', 'router', 'app', 'App'].forEach(key => {
-            try {
-                const r = window[key];
-                if (r && r.options && r.options.routes) {
-                    r.options.routes.forEach(function walk(route) {
-                        if (route.path) addRoute(route.path);
-                        if (route.children) route.children.forEach(walk);
-                    });
-                }
-            } catch(e) {}
-        });
-    } catch(e) {}
-
-    return Array.from(routes).filter(r => r && r.length > 1).slice(0, MAX_ROUTES);
-})()
-"""
-
-# JS to extract all network-relevant data
-EXTRACT_API_CALLS_JS = """
-(function() {
-    const apiCalls = [];
-    
-    // Intercept fetch (already done via route, but get any already-made calls)
-    if (window.__bundlespy_requests) {
-        return window.__bundlespy_requests;
-    }
-    return apiCalls;
-})()
-"""
-
-# Destructive button text — never click these
 DESTRUCTIVE_KEYWORDS = {
     "delete", "remove", "cancel", "purchase", "pay now", "pay",
     "checkout", "submit order", "confirm order", "place order",
@@ -279,129 +77,469 @@ DESTRUCTIVE_KEYWORDS = {
     "send payment", "transfer", "withdraw", "confirm delete",
 }
 
-# Inject request interceptor early — captures fetch, XHR, WebSocket, WebWorker
+SKIP_FORM_CONTEXTS = {
+    "payment", "checkout", "billing", "credit", "card",
+    "order", "purchase", "buy", "transaction", "stripe",
+    "paypal", "braintree", "adyen", "square", "invoice",
+}
+
+
+# ── Form fill values ──────────────────────────────────────────────────────────
+
+FORM_FILL_VALUES = {
+    "email": "test@example.com",
+    "search": "test", "q": "test", "query": "test",
+    "find": "test", "keyword": "test", "filter": "test",
+    "username": "testuser", "user": "testuser",
+}
+
+SAFE_INPUT_NAMES = {
+    "search", "q", "query", "find", "keyword", "keywords",
+    "filter", "username", "user", "email",
+}
+
+
+# ── DOM stability detection JS ────────────────────────────────────────────────
+
+STABILITY_INIT_JS = """
+window.__bspy_mutations   = 0;
+window.__bspy_requests    = 0;
+window.__bspy_last_active = Date.now();
+
+const obs = new MutationObserver(muts => {
+    const meaningful = muts.filter(m =>
+        m.addedNodes.length > 0 ||
+        m.type === 'attributes' ||
+        m.type === 'childList'
+    ).length;
+    if (meaningful > 0) {
+        window.__bspy_mutations  += meaningful;
+        window.__bspy_last_active = Date.now();
+    }
+});
+obs.observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true
+});
+
+const origFetch = window.fetch;
+window.fetch = function(...args) {
+    window.__bspy_requests++;
+    window.__bspy_last_active = Date.now();
+    const p = origFetch.apply(this, args);
+    p.then(() => { window.__bspy_last_active = Date.now(); }).catch(() => {});
+    return p;
+};
+const origXHR = window.XMLHttpRequest.prototype.send;
+window.XMLHttpRequest.prototype.send = function(...args) {
+    window.__bspy_requests++;
+    window.__bspy_last_active = Date.now();
+    return origXHR.apply(this, args);
+};
+
+window.__bspy_stable = function(quietMs) {
+    return (Date.now() - window.__bspy_last_active) >= quietMs;
+};
+"""
+
+
+# ── Main intercept JS ─────────────────────────────────────────────────────────
+
 INTERCEPT_JS = """
 window.__bundlespy_requests = [];
 window.__bundlespy_ws       = [];
 window.__bundlespy_workers  = [];
 window.__bundlespy_iframes  = [];
 
-// Intercept fetch
-const origFetch = window.fetch;
+// Fetch interception
+const _origFetch = window.fetch;
 window.fetch = function(...args) {
     try {
         const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
         const opts = args[1] || {};
-        if (url) {
-            window.__bundlespy_requests.push({
-                url: url,
-                method: (opts.method || 'GET').toUpperCase(),
-                headers: JSON.stringify(opts.headers || {}),
-                body: typeof opts.body === 'string' ? opts.body.substring(0, 500) : null,
-                type: 'fetch'
-            });
-        }
+        if (url) window.__bundlespy_requests.push({
+            url, method: (opts.method || 'GET').toUpperCase(),
+            body: typeof opts.body === 'string' ? opts.body.substring(0, 500) : null,
+            type: 'fetch'
+        });
     } catch(e) {}
-    return origFetch.apply(this, args);
+    return _origFetch.apply(this, args);
 };
 
-// Intercept XMLHttpRequest
-const origXHR = window.XMLHttpRequest;
+// XHR interception
+const _origXHR = window.XMLHttpRequest;
 window.XMLHttpRequest = function() {
-    const xhr = new origXHR();
-    const origOpen = xhr.open;
+    const xhr = new _origXHR();
+    const _open = xhr.open;
     xhr.open = function(method, url) {
         try {
-            if (url) {
-                window.__bundlespy_requests.push({
-                    url: String(url),
-                    method: String(method).toUpperCase(),
-                    type: 'xhr'
-                });
-            }
+            if (url) window.__bundlespy_requests.push({
+                url: String(url), method: String(method).toUpperCase(), type: 'xhr'
+            });
         } catch(e) {}
-        return origOpen.apply(this, arguments);
+        return _open.apply(this, arguments);
     };
     return xhr;
 };
 
-// Intercept WebSocket
-const origWS = window.WebSocket;
-if (origWS) {
-    window.WebSocket = function(url, ...args) {
-        try {
-            window.__bundlespy_ws.push({url: String(url)});
-        } catch(e) {}
-        return new origWS(url, ...args);
+// WebSocket
+const _origWS = window.WebSocket;
+if (_origWS) {
+    window.WebSocket = function(url, ...a) {
+        try { window.__bundlespy_ws.push({url: String(url)}); } catch(e) {}
+        const ws = new _origWS(url, ...a);
+        return ws;
     };
-    window.WebSocket.prototype = origWS.prototype;
+    window.WebSocket.prototype = _origWS.prototype;
 }
 
-// Intercept WebWorker — captures worker JS file URLs
-const origWorker = window.Worker;
-if (origWorker) {
-    window.Worker = function(url, ...args) {
-        try {
-            window.__bundlespy_workers.push({url: String(url)});
-        } catch(e) {}
-        return new origWorker(url, ...args);
+// WebWorker
+const _origWorker = window.Worker;
+if (_origWorker) {
+    window.Worker = function(url, ...a) {
+        try { window.__bundlespy_workers.push({url: String(url)}); } catch(e) {}
+        return new _origWorker(url, ...a);
     };
 }
 
-// Intercept SharedWorker
-const origSharedWorker = window.SharedWorker;
-if (origSharedWorker) {
-    window.SharedWorker = function(url, ...args) {
-        try {
-            window.__bundlespy_workers.push({url: String(url), shared: true});
-        } catch(e) {}
-        return new origSharedWorker(url, ...args);
+// SharedWorker
+const _origSW = window.SharedWorker;
+if (_origSW) {
+    window.SharedWorker = function(url, ...a) {
+        try { window.__bundlespy_workers.push({url: String(url), shared: true}); } catch(e) {}
+        return new _origSW(url, ...a);
     };
 }
 
-// Observe iframes added dynamically
-const origCreateElement = document.createElement.bind(document);
-document.createElement = function(tag, ...args) {
-    const el = origCreateElement(tag, ...args);
+// Dynamic iframe tracking
+const _origCE = document.createElement.bind(document);
+document.createElement = function(tag, ...a) {
+    const el = _origCE(tag, ...a);
     if (tag && tag.toLowerCase() === 'iframe') {
-        const origSrcSet = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
-        if (origSrcSet) {
-            Object.defineProperty(el, 'src', {
-                set: function(val) {
-                    try { window.__bundlespy_iframes.push({url: String(val)}); } catch(e) {}
-                    return origSrcSet.set.call(this, val);
-                },
-                get: function() { return origSrcSet.get.call(this); }
-            });
-        }
+        try {
+            const desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+            if (desc && desc.set) {
+                Object.defineProperty(el, 'src', {
+                    set(v) { try { window.__bundlespy_iframes.push({url: String(v)}); } catch(e) {} return desc.set.call(this, v); },
+                    get() { return desc.get.call(this); }
+                });
+            }
+        } catch(e) {}
     }
     return el;
 };
+""" + STABILITY_INIT_JS
+
+
+# ── SPA route extraction JS ───────────────────────────────────────────────────
+
+EXTRACT_ROUTES_JS = """
+(function() {
+    const routes = new Set();
+    const MAX = 300;
+
+    function add(r) {
+        if (!r || typeof r !== 'string') return;
+        r = r.trim();
+        if (!r || r === '**' || r === '*') return;
+        if (!r.startsWith('/')) r = '/' + r;
+        if (r.length > 1) routes.add(r);
+    }
+
+    // Angular Ivy
+    try {
+        document.querySelectorAll('[ng-version],[_nghost-],ng-component,app-root').forEach(el => {
+            try {
+                const ctx = el.__ngContext__ || el[Object.keys(el).find(k => k.startsWith('__ngContext')) || ''];
+                if (Array.isArray(ctx)) {
+                    ctx.forEach(item => {
+                        if (item && item.config && Array.isArray(item.config)) {
+                            item.config.forEach(function w(r) {
+                                if (!r) return;
+                                if (r.path !== undefined) add('/' + r.path);
+                                if (r.children) r.children.forEach(w);
+                                if (r._loadedRoutes) r._loadedRoutes.forEach(w);
+                            });
+                        }
+                    });
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // React Router (fiber)
+    try {
+        if (window.__reactRouterRoutes) {
+            window.__reactRouterRoutes.forEach(r => r.path && add(r.path));
+        }
+        document.querySelectorAll('#root,#app,[data-reactroot]').forEach(el => {
+            try {
+                const k = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                if (!k) return;
+                let f = el[k], d = 0;
+                while (f && d++ < 80) {
+                    if (f.memoizedProps && f.memoizedProps.path) add(f.memoizedProps.path);
+                    f = f.child || f.sibling || (f.return && f.return.sibling);
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // Vue Router
+    try {
+        ['__vue_router__', '$vm', '_vm'].forEach(k => {
+            try {
+                const r = window[k] && (window[k].$router || window[k]);
+                if (r && r.options && r.options.routes) {
+                    r.options.routes.forEach(function w(route) {
+                        if (route.path) add(route.path);
+                        if (route.children) route.children.forEach(w);
+                    });
+                }
+                if (r && r.getRoutes) r.getRoutes().forEach(r => r.path && add(r.path));
+            } catch(e) {}
+        });
+        document.querySelectorAll('[data-v-app]').forEach(el => {
+            try {
+                const app = el.__vue_app__;
+                if (app) {
+                    const r = app.config.globalProperties.$router;
+                    if (r && r.getRoutes) r.getRoutes().forEach(r => r.path && add(r.path));
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // Next.js
+    try {
+        const nd = window.__NEXT_DATA__;
+        if (nd) {
+            if (nd.page) add(nd.page);
+            Object.keys((nd.buildManifest || {}).pages || {}).forEach(p => add(p));
+        }
+    } catch(e) {}
+
+    // Anchor links
+    document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
+        try {
+            const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
+            if (h && h.startsWith('/') && !h.startsWith('//')) add(h.split('?')[0].split('#')[0]);
+        } catch(e) {}
+    });
+
+    // data-route attrs
+    document.querySelectorAll('[data-route],[data-path],[routerLink]').forEach(el => {
+        ['data-route','data-path','routerLink'].forEach(attr => {
+            try {
+                const v = el.getAttribute(attr);
+                if (v && v.startsWith('/')) add(v.split('?')[0]);
+            } catch(e) {}
+        });
+    });
+
+    return Array.from(routes).filter(r => r.length > 1).slice(0, MAX);
+})()
 """
 
 
-def _playwright_available() -> bool:
-    try:
-        import playwright
-        return True
-    except ImportError:
-        return False
+# ── Asset registry — central dedup ───────────────────────────────────────────
 
+class AssetRegistry:
+    """
+    Central deduplication registry for all discovered assets.
+    Thread-safe. Tracks by normalized URL and content hash.
+    """
+    def __init__(self, external_seen: Set[str] = None):
+        self._lock      = threading.Lock()
+        self._urls:     Set[str] = set(external_seen or set())
+        self._hashes:   Set[str] = set()
+        self._routes:   Set[str] = set()
+        self._pending:  Set[str] = set()
+
+    def seen_url(self, url: str) -> bool:
+        norm = self._normalize(url)
+        with self._lock:
+            return norm in self._urls
+
+    def register_url(self, url: str) -> bool:
+        """Returns True if new, False if already seen."""
+        norm = self._normalize(url)
+        with self._lock:
+            if norm in self._urls:
+                return False
+            self._urls.add(norm)
+            return True
+
+    def seen_hash(self, h: str) -> bool:
+        with self._lock:
+            return h in self._hashes
+
+    def register_hash(self, h: str) -> bool:
+        with self._lock:
+            if h in self._hashes:
+                return False
+            self._hashes.add(h)
+            return True
+
+    def seen_route(self, route: str) -> bool:
+        with self._lock:
+            return route in self._routes
+
+    def register_route(self, route: str) -> bool:
+        with self._lock:
+            if route in self._routes:
+                return False
+            self._routes.add(route)
+            return True
+
+    @staticmethod
+    def _normalize(url: str) -> str:
+        try:
+            p = urlparse(url)
+            return urlunparse((p.scheme, p.netloc, p.path, "", "", "")).lower()
+        except Exception:
+            return url.lower()
+
+
+# ── Phase timer ───────────────────────────────────────────────────────────────
+
+class PhaseTimer:
+    def __init__(self):
+        self._phases: Dict[str, float] = {}
+        self._start:  Dict[str, float] = {}
+        self._total = time.monotonic()
+
+    def start(self, phase: str) -> None:
+        self._start[phase] = time.monotonic()
+
+    def stop(self, phase: str) -> float:
+        elapsed = time.monotonic() - self._start.get(phase, time.monotonic())
+        self._phases[phase] = self._phases.get(phase, 0) + elapsed
+        return elapsed
+
+    def summary(self) -> Dict[str, float]:
+        result = dict(self._phases)
+        result["total"] = time.monotonic() - self._total
+        return result
+
+
+# ── Page stabilizer ───────────────────────────────────────────────────────────
+
+class PageStabilizer:
+    """
+    Adaptive page stabilization — waits for actual quiet, not a fixed delay.
+    Replaces all hardcoded wait_for_timeout calls.
+    """
+
+    QUIET_THRESHOLD_MS = 150   # ms of inactivity = stable
+    POLL_INTERVAL_MS   = 80    # check every 80ms
+    MAX_WAIT_MS        = 4000  # never wait more than 4s
+
+    def __init__(self, page):
+        self.page = page
+
+    def wait(self, max_ms: int = None, quiet_ms: int = None) -> None:
+        """
+        Wait until page is stable — DOM mutations and network quiet.
+        Returns as soon as quiet_threshold is reached.
+        """
+        max_ms   = max_ms   or self.MAX_WAIT_MS
+        quiet_ms = quiet_ms or self.QUIET_THRESHOLD_MS
+
+        start    = time.monotonic()
+        deadline = start + max_ms / 1000
+
+        while time.monotonic() < deadline:
+            try:
+                stable = self.page.evaluate(
+                    f"window.__bspy_stable ? window.__bspy_stable({quiet_ms}) : true"
+                )
+                if stable:
+                    return
+            except Exception:
+                return
+            self.page.wait_for_timeout(self.POLL_INTERVAL_MS)
+
+    def wait_for_load(self, max_ms: int = 8000) -> None:
+        """
+        Wait for initial page load — uses DOMContentLoaded + network quiet
+        instead of networkidle which can hang on SPAs with polling.
+        """
+        start = time.monotonic()
+        try:
+            self.page.wait_for_load_state("domcontentloaded",
+                                          timeout=min(max_ms, 5000))
+        except Exception:
+            pass
+
+        # Then wait for actual stability
+        remaining_ms = max_ms - int((time.monotonic() - start) * 1000)
+        self.wait(max_ms=max(remaining_ms, 500), quiet_ms=200)
+
+    def wait_after_interaction(self, max_ms: int = 1500) -> None:
+        """Short adaptive wait after a click/hover/scroll."""
+        self.wait(max_ms=max_ms, quiet_ms=100)
+
+    def wait_for_framework(self, max_ms: int = 3000) -> None:
+        """
+        Wait for SPA framework to mount — Angular/React/Vue.
+        Detects actual framework readiness, not a fixed delay.
+        """
+        start = time.monotonic()
+        deadline = start + max_ms / 1000
+        framework_ready = False
+
+        while time.monotonic() < deadline:
+            try:
+                ready = self.page.evaluate("""
+                    (function() {
+                        // Angular
+                        if (document.querySelector('[ng-version]') ||
+                            document.querySelector('app-root') ||
+                            document.querySelector('router-outlet')) return true;
+                        // React
+                        if (document.querySelector('#root > *') ||
+                            document.querySelector('[data-reactroot] > *')) return true;
+                        // Vue
+                        if (document.querySelector('[data-v-app] > *')) return true;
+                        // Generic — any meaningful content loaded
+                        if (document.body && document.body.children.length > 2) return true;
+                        return false;
+                    })()
+                """)
+                if ready:
+                    framework_ready = True
+                    break
+            except Exception:
+                break
+            self.page.wait_for_timeout(100)
+
+        if framework_ready:
+            # Brief stability wait after framework mounts
+            self.wait(max_ms=1000, quiet_ms=150)
+
+
+# ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 class HeadlessEngine:
     """
-    Advanced headless browser engine.
-    Multi-page, interaction-aware, network-intercepting.
+    Optimized headless engine.
+    - Concurrent page processing
+    - Adaptive waits
+    - Central asset registry
+    - Resource blocking
+    - Priority queue
     """
 
     def __init__(
         self,
-        target_url: str,
+        target_url:    str,
         scope,
-        timeout:     int  = 30,
-        stealth:     bool = False,
-        max_pages:   int  = 20,
-        interact:    bool = True,
+        timeout:       int   = 30,
+        stealth:       bool  = False,
+        max_pages:     int   = 100,
+        interact:      bool  = False,
+        workers:       int   = 3,
+        external_seen: Set[str] = None,
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -409,478 +547,345 @@ class HeadlessEngine:
         self.stealth     = stealth
         self.max_pages   = max_pages
         self.interact    = interact
+        self.num_workers = max(1, min(workers, 5))
 
-        self.js_files:    List[JSFile]  = []
-        self.endpoints:   List[Endpoint] = []
-        self.api_calls:   List[dict]    = []
-        self.ws_urls:     List[str]     = []
-        self.routes:      Set[str]      = set()
-        self.seen_js:     Set[str]      = set()
-        self.seen_urls:   Set[str]      = set()
-        self.external_seen: Set[str]   = set()  # URLs already fetched by crawler
-        self.pages_visited: int         = 0
+        self.registry    = AssetRegistry(external_seen)
+        self.timer       = PhaseTimer()
 
-    def _make_js_file(self, url: str, body: bytes, source_page: str, tech: str = "") -> JSFile:
+        self._lock       = threading.Lock()
+        self.js_files:   List[JSFile]  = []
+        self.endpoints:  List[Endpoint] = []
+        self.api_calls:  List[dict]    = []
+        self.ws_urls:    List[str]     = []
+        self.routes:     Set[str]      = set()
+        self.pages_visited: int        = 0
+
+        # Seed urls provided externally (from crawler/static analysis)
+        self.seed_urls:  List[str]     = []
+        self.external_seen = external_seen or set()
+
+    def _add_js_file(self, js_file: JSFile) -> bool:
+        """Thread-safe JS file registration."""
+        if not self.registry.register_hash(js_file.sha256):
+            return False
+        with self._lock:
+            self.js_files.append(js_file)
+        return True
+
+    def _add_route(self, route: str) -> bool:
+        """Thread-safe route registration. Returns True if new."""
+        if self.registry.register_route(route):
+            with self._lock:
+                self.routes.add(route)
+            return True
+        return False
+
+    def _make_js_file(self, url: str, body: bytes,
+                      source_page: str, tech: str = "") -> JSFile:
         content = body.decode("utf-8", errors="replace")
         return JSFile(
-            url           = url,
-            source_page   = source_page,
-            status_code   = 200,
-            content_type  = "application/javascript",
-            size_bytes    = len(body),
-            sha256        = hashlib.sha256(body).hexdigest(),
-            content       = content,
-            discovered_at = datetime.utcnow(),
-            technology    = tech or "headless-captured",
+            url=url, source_page=source_page, status_code=200,
+            content_type="application/javascript",
+            size_bytes=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+            content=content, discovered_at=datetime.utcnow(),
+            technology=tech or "headless-captured",
         )
 
+    def _should_block(self, url: str, resource_type: str) -> bool:
+        """Decide whether to block a resource request."""
+        if resource_type in BLOCK_RESOURCE_TYPES:
+            return True
+        lower = url.lower()
+        return any(domain in lower for domain in BLOCK_DOMAINS)
+
     def _handle_response(self, response, source_page: str) -> None:
-        """Capture JS files from network responses."""
+        """Capture JS files from network responses. Non-blocking."""
         try:
             url = response.url
             ct  = response.headers.get("content-type", "")
-
             is_js = (
                 any(t in ct.lower() for t in ["javascript", "text/plain"])
-                or url.endswith((".js", ".mjs", ".ts"))
+                or url.split("?")[0].endswith((".js", ".mjs", ".cjs"))
             )
-
             if not is_js:
                 return
 
-            # Normalize URL for dedup (strip query string)
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(url)
-            norm_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-
-            if norm_url in self.seen_js:
-                return
-            # Also check against externally provided seen set (from crawler)
-            if norm_url in self.external_seen:
+            norm = self.registry._normalize(url)
+            if not self.registry.register_url(norm):
                 return
 
             safe, _ = validate_url(url)
-            if not safe:
+            if not safe or not self.scope.in_scope(url):
                 return
-
-            if not self.scope.in_scope(url):
-                return
-
-            self.seen_js.add(norm_url)
 
             try:
-                body    = response.body()
+                body = response.body()
+                if not body:
+                    return
+                h = hashlib.sha256(body).hexdigest()
+                if self.registry.seen_hash(h):
+                    return
                 js_file = self._make_js_file(url, body, source_page)
-                self.js_files.append(js_file)
-                logger.debug("Captured JS: %s (%d bytes)", url, len(body))
-            except Exception as e:
-                logger.debug("Failed to capture body for %s: %s", url, e)
+                self._add_js_file(js_file)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
-        except Exception as e:
-            logger.debug("Response handler error: %s", e)
+    def _is_destructive(self, text: str) -> bool:
+        lower = (text or "").lower().strip()
+        return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
 
-    def _extract_routes_from_page(self, page) -> Set[str]:
-        """Extract routes from JS frameworks running on the page."""
-        routes = set()
+    def _extract_routes(self, page) -> Set[str]:
         try:
             result = page.evaluate(EXTRACT_ROUTES_JS)
             if isinstance(result, list):
-                for r in result:
-                    if r and isinstance(r, str) and r.startswith("/"):
-                        routes.add(r)
-        except Exception as e:
-            logger.debug("Route extraction error: %s", e)
-        return routes
+                return {r for r in result if r and isinstance(r, str) and len(r) > 1}
+        except Exception:
+            pass
+        return set()
 
     def _extract_api_calls(self, page) -> List[dict]:
-        """Get intercepted fetch/XHR calls."""
         try:
-            result = page.evaluate("window.__bundlespy_requests || []")
-            return result if isinstance(result, list) else []
+            r = page.evaluate("window.__bundlespy_requests || []")
+            return r if isinstance(r, list) else []
         except Exception:
             return []
 
     def _extract_ws_urls(self, page) -> List[str]:
-        """Get intercepted WebSocket URLs."""
         try:
-            result = page.evaluate("window.__bundlespy_ws || []")
-            return [r["url"] for r in result if isinstance(r, dict) and "url" in r]
+            r = page.evaluate("window.__bundlespy_ws || []")
+            return [x["url"] for x in r if isinstance(x, dict) and "url" in x]
         except Exception:
             return []
 
     def _extract_worker_urls(self, page) -> List[str]:
-        """Get intercepted WebWorker and SharedWorker URLs."""
         try:
-            result = page.evaluate("window.__bundlespy_workers || []")
-            return [r["url"] for r in result if isinstance(r, dict) and "url" in r]
+            r = page.evaluate("window.__bundlespy_workers || []")
+            return [x["url"] for x in r if isinstance(x, dict) and "url" in x]
         except Exception:
             return []
 
     def _extract_iframe_urls(self, page) -> List[str]:
-        """Get same-origin iframe src URLs from DOM."""
         try:
             parsed = urlparse(self.target_url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
-
-            # Get from interceptor (dynamically created iframes)
             dynamic = page.evaluate("window.__bundlespy_iframes || []")
-            dynamic_urls = [r["url"] for r in dynamic if isinstance(r, dict) and "url" in r]
-
-            # Also get from DOM (static iframes)
+            dynamic_urls = [x["url"] for x in dynamic if isinstance(x, dict)]
             dom_urls = page.evaluate("""
                 Array.from(document.querySelectorAll('iframe[src]'))
-                    .map(f => f.src)
-                    .filter(u => u && u.length > 0);
-            """)
-
-            all_urls = list(set(dynamic_urls + (dom_urls or [])))
-
-            # Only same-origin iframes
-            same_origin = [
-                u for u in all_urls
-                if u.startswith(origin) or u.startswith("/")
-            ]
-            return same_origin
+                    .map(f => f.src).filter(u => u && u.length > 0);
+            """) or []
+            all_urls = list(set(dynamic_urls + dom_urls))
+            return [u for u in all_urls
+                    if u.startswith(origin) or u.startswith("/")]
         except Exception:
             return []
 
     def _fetch_worker_js(self, worker_url: str, source_page: str) -> None:
-        """Fetch and store a WebWorker JS file for analysis."""
+        """Fetch WebWorker JS file. Thread-safe."""
         try:
-            # Resolve relative URLs
             if worker_url.startswith("/"):
                 parsed = urlparse(self.target_url)
                 worker_url = f"{parsed.scheme}://{parsed.netloc}{worker_url}"
+
+            if not self.registry.register_url(worker_url):
+                return
 
             safe, _ = validate_url(worker_url)
             if not safe or not self.scope.in_scope(worker_url):
                 return
 
-            from urllib.parse import urlparse as _up, urlunparse as _uu
-            _p = _up(worker_url)
-            norm = _uu((_p.scheme, _p.netloc, _p.path, "", "", ""))
-
-            if norm in self.seen_js:
-                return
-            self.seen_js.add(norm)
-
-            # Use requests to fetch (no browser needed for static JS)
-            try:
-                import requests
-                resp = requests.get(
-                    worker_url,
-                    timeout=10,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                )
-                if resp.status_code == 200 and resp.content:
-                    body    = resp.content
-                    content_str = body.decode("utf-8", errors="replace")
-                    js_file = self._make_js_file(worker_url, body, source_page, "webworker")
-                    self.js_files.append(js_file)
-                    logger.info("WebWorker JS captured: %s (%d bytes)", worker_url, len(body))
-            except Exception as e:
-                logger.debug("Failed to fetch worker JS %s: %s", worker_url, e)
-
+            import requests as _req
+            resp = _req.get(worker_url, timeout=8,
+                           headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"})
+            if resp.status_code == 200 and resp.content:
+                h = hashlib.sha256(resp.content).hexdigest()
+                if self.registry.register_hash(h):
+                    js_file = self._make_js_file(worker_url, resp.content, source_page, "webworker")
+                    self._add_js_file(js_file)
+                    logger.info("WebWorker captured: %s", worker_url)
         except Exception as e:
-            logger.debug("Worker fetch error: %s", e)
+            logger.debug("Worker fetch failed %s: %s", worker_url, e)
 
-    def _is_destructive(self, text: str) -> bool:
-        """Check if button/link text is potentially destructive."""
-        if not text:
-            return False
-        lower = text.lower().strip()
-        return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
-
-    def _interact_with_page(self, page) -> None:
+    def _interact(self, page, stabilizer: PageStabilizer) -> None:
         """
-        Advanced safe interaction engine.
-        Clicks every safe interactive element to trigger lazy JS loading.
-        Never clicks destructive buttons.
+        Safe interaction engine. Adaptive waits after each action.
         """
+        # Phase 1: Adaptive scroll
         try:
-            # Phase 1: Scroll to trigger lazy-loading and infinite scroll
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.25);")
-            page.wait_for_timeout(200)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5);")
-            page.wait_for_timeout(200)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.75);")
-            page.wait_for_timeout(200)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            page.wait_for_timeout(300)
-            page.evaluate("window.scrollTo(0, 0);")
-            page.wait_for_timeout(300)
+            heights = [0.25, 0.5, 0.75, 1.0, 0]
+            for frac in heights:
+                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {frac});")
+                stabilizer.wait_after_interaction(max_ms=500)
+        except Exception:
+            pass
 
-            # Phase 2: Click tabs, accordions, toggles — these load lazy JS
-            tab_selectors = [
-                "[role='tab']",
-                "[role='menuitem']",
-                "[data-toggle='tab']",
-                "[data-bs-toggle='tab']",
-                ".nav-link:not(.active)",
-                ".tab:not(.active)",
-                "[aria-selected='false']",
-                ".accordion-button",
-                "[data-toggle='collapse']",
-                "[data-bs-toggle='collapse']",
-                ".expandable:not(.expanded)",
-                "[aria-expanded='false']",
-            ]
-
-            for selector in tab_selectors:
-                try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements[:8]:
-                        try:
-                            if not el.is_visible() or not el.is_enabled():
-                                continue
-                            text = el.inner_text() or ""
-                            if self._is_destructive(text):
-                                continue
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(400)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            # Phase 3: Click navigation links (same-page)
+        # Phase 2: Tabs, accordions, toggles
+        tab_selectors = [
+            "[role='tab']", "[role='menuitem']",
+            "[data-toggle='tab']", "[data-bs-toggle='tab']",
+            ".nav-link:not(.active)", "[aria-selected='false']",
+            ".accordion-button", "[aria-expanded='false']",
+        ]
+        for sel in tab_selectors:
             try:
-                nav_links = page.query_selector_all(
-                    "nav a[href], .navbar a[href], .menu a[href], "
-                    "[role='navigation'] a[href], .sidebar a[href]"
-                )
-                for el in nav_links[:20]:
-                    try:
-                        if not el.is_visible():
-                            continue
-                        href = el.get_attribute("href") or ""
-                        text = el.inner_text() or ""
-                        # Skip external links and destructive text
-                        if href.startswith("http") and not self.target_url.split("/")[2] in href:
-                            continue
-                        if self._is_destructive(text):
-                            continue
-                        # Only click hash links and same-page nav (avoid full navigation)
-                        if href.startswith("#") or href.startswith("javascript:"):
-                            el.click(timeout=1000)
-                            page.wait_for_timeout(300)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # Phase 4: Click safe buttons — dropdowns, toggles, show-more
-            try:
-                safe_buttons = page.query_selector_all(
-                    "button[data-toggle], button[data-bs-toggle], "
-                    "button[aria-expanded], button[aria-controls], "
-                    ".dropdown-toggle, .show-more, .load-more, "
-                    "[role='button']:not([type='submit'])"
-                )
-                for el in safe_buttons[:15]:
+                for el in page.query_selector_all(sel)[:6]:
                     try:
                         if not el.is_visible() or not el.is_enabled():
                             continue
-                        text = el.inner_text() or ""
-                        if self._is_destructive(text):
+                        if self._is_destructive(el.inner_text()):
                             continue
-                        el.click(timeout=1000)
-                        page.wait_for_timeout(200)
+                        el.click(timeout=800)
+                        stabilizer.wait_after_interaction(max_ms=800)
                     except Exception:
                         pass
             except Exception:
                 pass
 
-            # Phase 5: Hover over menu items to trigger dropdown JS loads
-            try:
-                hover_targets = page.query_selector_all(
-                    ".dropdown, .has-submenu, [data-hover], nav > ul > li"
-                )
-                for el in hover_targets[:10]:
-                    try:
-                        if el.is_visible():
-                            el.hover(timeout=1000)
-                            page.wait_for_timeout(300)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # Phase 6: Trigger input events on search boxes (common lazy load trigger)
-            try:
-                search_inputs = page.query_selector_all(
-                    "input[type='search'], input[name='q'], "
-                    "input[name='search'], input[placeholder*='search' i], "
-                    "input[placeholder*='find' i]"
-                )
-                for inp in search_inputs[:3]:
-                    try:
-                        if inp.is_visible() and inp.is_enabled():
-                            inp.click(timeout=1000)
-                            inp.type("test", delay=50)
-                            page.wait_for_timeout(500)
-                            inp.clear()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        except Exception as e:
-            logger.debug("Interaction error: %s", e)
-
-    def _fill_and_observe_forms(self, page) -> None:
-        """
-        Safe read-only form observation.
-
-        SAFETY RULES — strictly enforced:
-        - NEVER submits any form under any circumstances
-        - NEVER clicks submit buttons
-        - NEVER triggers form.submit()
-        - Only types in search/query inputs to trigger autocomplete JS loading
-        - Skips any form in a payment/checkout/billing context
-        - Read-only observation only — no state changes on the server
-
-        Purpose: trigger autocomplete and validation JS to load
-        lazy chunks and reveal API endpoints via network interception.
-        """
-
-        # Forms containing these words in id/class/action are skipped entirely
-        SKIP_FORM_CONTEXTS = {
-            "payment", "checkout", "billing", "credit", "card",
-            "order", "purchase", "buy", "transaction", "stripe",
-            "paypal", "braintree", "adyen", "square", "invoice",
-        }
-
-        # Only interact with these safe input types
-        SAFE_INPUT_NAMES = {
-            "search", "q", "query", "find", "keyword", "keywords",
-            "filter", "username", "user", "email",
-        }
-
+        # Phase 3: Dropdown toggles
         try:
-            forms = page.query_selector_all("form")
-            for form in forms[:10]:
+            for el in page.query_selector_all(
+                "button[data-toggle],button[data-bs-toggle],"
+                "button[aria-expanded],.dropdown-toggle"
+            )[:8]:
                 try:
-                    # Check form context — skip payment/checkout forms
-                    form_id     = (form.get_attribute("id") or "").lower()
-                    form_class  = (form.get_attribute("class") or "").lower()
-                    form_action = (form.get_attribute("action") or "").lower()
-                    form_ctx    = form_id + form_class + form_action
-
-                    if any(kw in form_ctx for kw in SKIP_FORM_CONTEXTS):
-                        logger.debug("Skipping payment/checkout form: %s", form_ctx[:50])
+                    if not el.is_visible() or not el.is_enabled():
                         continue
-
-                    # Only type in safe search/query inputs — never submit
-                    inputs = form.query_selector_all("input, textarea")
-                    for inp in inputs:
-                        try:
-                            input_type = (inp.get_attribute("type") or "text").lower()
-                            input_name = (
-                                inp.get_attribute("name") or
-                                inp.get_attribute("id") or
-                                inp.get_attribute("placeholder") or
-                                inp.get_attribute("aria-label") or ""
-                            ).lower()
-
-                            # Only interact with safe, non-sensitive inputs
-                            if input_type not in ("text", "search", "email"):
-                                continue
-
-                            # Must be a search/query/username input
-                            if not any(safe in input_name for safe in SAFE_INPUT_NAMES):
-                                continue
-
-                            if not inp.is_visible() or not inp.is_enabled():
-                                continue
-
-                            # Type and clear — triggers autocomplete/validation JS
-                            # but leaves no trace
-                            inp.click(timeout=1000)
-                            inp.type("test", delay=30)
-                            page.wait_for_timeout(400)
-                            inp.clear()
-                            page.wait_for_timeout(200)
-
-                        except Exception:
-                            pass
-
+                    if self._is_destructive(el.inner_text()):
+                        continue
+                    el.click(timeout=800)
+                    stabilizer.wait_after_interaction(max_ms=600)
                 except Exception:
                     pass
+        except Exception:
+            pass
 
-        except Exception as e:
-            logger.debug("Form observe error: %s", e)
+        # Phase 4: Hover over nav items
+        try:
+            for el in page.query_selector_all(
+                ".dropdown,.has-submenu,nav > ul > li"
+            )[:6]:
+                try:
+                    if el.is_visible():
+                        el.hover(timeout=600)
+                        stabilizer.wait_after_interaction(max_ms=400)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
+        """
+        Safe read-only form observation.
+        NEVER submits. Only types in search boxes then clears.
+        """
+        try:
+            for form in page.query_selector_all("form")[:8]:
+                try:
+                    ctx = (
+                        (form.get_attribute("id") or "") +
+                        (form.get_attribute("class") or "") +
+                        (form.get_attribute("action") or "")
+                    ).lower()
+                    if any(kw in ctx for kw in SKIP_FORM_CONTEXTS):
+                        continue
+
+                    for inp in form.query_selector_all("input,textarea")[:5]:
+                        try:
+                            itype = (inp.get_attribute("type") or "text").lower()
+                            iname = (
+                                inp.get_attribute("name") or
+                                inp.get_attribute("id") or
+                                inp.get_attribute("placeholder") or ""
+                            ).lower()
+                            if itype not in ("text", "search", "email"):
+                                continue
+                            if not any(s in iname for s in SAFE_INPUT_NAMES):
+                                continue
+                            if not inp.is_visible() or not inp.is_enabled():
+                                continue
+                            inp.click(timeout=800)
+                            inp.type("test", delay=20)
+                            stabilizer.wait_after_interaction(max_ms=400)
+                            inp.clear()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _visit_page(self, page, url: str, context_page: str) -> Set[str]:
-        """
-        Visit a single URL, interact with it, and return discovered routes.
-        """
-        if url in self.seen_urls:
+        """Visit a single page and extract all intelligence."""
+
+        if not self.registry.register_url(url):
             return set()
-        self.seen_urls.add(url)
 
         safe, _ = validate_url(url)
         if not safe or not self.scope.in_scope(url):
             return set()
 
+        stabilizer = PageStabilizer(page)
+
+        # Attach response handler ONCE per page
+        page.on("response", lambda r: self._handle_response(r, url))
+
         try:
-            # Inject interceptor before page loads
-            page.add_init_script(INTERCEPT_JS)
-
-            page.on("response", lambda r: self._handle_response(r, url))
-
+            # Use DOMContentLoaded + stability instead of networkidle
             page.goto(
                 url,
                 timeout=self.timeout * 1000,
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
             )
-            self.pages_visited += 1
+            with self._lock:
+                self.pages_visited += 1
 
-            # Wait for SPA frameworks to initialize routers
-            # Angular needs time to bootstrap, React Router to mount
-            page.wait_for_timeout(3000)
+            # Adaptive framework wait
+            stabilizer.wait_for_framework(max_ms=3000)
 
-            # Wait for Angular specifically (ng-version attribute)
-            try:
-                page.wait_for_selector("[ng-version], app-root, router-outlet", timeout=3000)
-                page.wait_for_timeout(1000)  # Extra time after Angular mounts
-            except Exception:
-                pass
-
-            # Interact to trigger dynamic content
+            # Interact if enabled
             if self.interact:
-                self._interact_with_page(page)
-                self._fill_and_observe_forms(page)
-                page.wait_for_timeout(1000)
+                self._interact(page, stabilizer)
+                self._observe_forms(page, stabilizer)
 
-            # Extract routes, API calls, WebWorkers, iframes
-            routes      = self._extract_routes_from_page(page)
+            # Extract everything
+            new_routes  = self._extract_routes(page)
             api_calls   = self._extract_api_calls(page)
             ws_urls     = self._extract_ws_urls(page)
             worker_urls = self._extract_worker_urls(page)
             iframe_urls = self._extract_iframe_urls(page)
 
-            self.api_calls.extend(api_calls)
-            self.ws_urls.extend(ws_urls)
+            with self._lock:
+                self.api_calls.extend(api_calls)
+                self.ws_urls.extend(ws_urls)
 
-            # Fetch WebWorker JS files for analysis
+            # WebWorkers — fetch in background
             for w_url in worker_urls:
-                self._fetch_worker_js(w_url, url)
+                threading.Thread(
+                    target=self._fetch_worker_js,
+                    args=(w_url, url),
+                    daemon=True,
+                ).start()
 
-            # Add same-origin iframes to visit queue
+            # Same-origin iframes — add to routes
+            parsed = urlparse(self.target_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
             for iframe_url in iframe_urls:
-                if iframe_url not in self.seen_urls:
-                    routes.add(urlparse(iframe_url).path or "/")
-                    logger.info("Iframe discovered: %s", iframe_url)
+                if iframe_url.startswith(origin):
+                    new_routes.add(urlparse(iframe_url).path or "/")
+                elif iframe_url.startswith("/"):
+                    new_routes.add(iframe_url)
 
-            return routes
+            return new_routes
 
         except Exception as e:
             logger.debug("Error visiting %s: %s", url, e)
             return set()
 
-    def _build_full_urls(self, routes: Set[str]) -> List[str]:
-        """Convert relative routes to full URLs."""
+    def _build_urls(self, routes: Set[str]) -> List[str]:
+        """Convert routes to full URLs, sorted by priority."""
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
         urls   = []
@@ -890,32 +895,24 @@ class HeadlessEngine:
             else:
                 url = base + route
             safe, _ = validate_url(url)
-            if safe and self.scope.in_scope(url) and url not in self.seen_urls:
+            if safe and self.scope.in_scope(url) and not self.registry.seen_url(url):
                 urls.append(url)
-        return urls
+        return sorted(urls, key=_route_priority)
 
     def _api_calls_to_endpoints(self) -> List[Endpoint]:
-        """Convert intercepted API calls to Endpoint objects."""
         endpoints = []
         seen      = set()
-
         for call in self.api_calls:
             url    = call.get("url", "")
             method = call.get("method", "GET").upper()
-
             if not url:
                 continue
-
-            # Skip static assets
             if any(url.endswith(ext) for ext in [".js", ".css", ".png", ".jpg", ".ico", ".woff"]):
                 continue
-
-            key = f"{method}:{url}"
+            key = f"{method}:{url.rstrip('/').lower().split('?')[0]}"
             if key in seen:
                 continue
             seen.add(key)
-
-            # Categorize
             lower = url.lower()
             if any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
                 cat = "AUTH"
@@ -927,167 +924,211 @@ class HeadlessEngine:
                 cat = "API"
             else:
                 cat = "UNKNOWN"
-
             endpoints.append(Endpoint(
-                url         = url,
-                path        = urlparse(url).path,
-                method      = method,
-                category    = cat,
-                source_file = "headless://network-intercept",
-                line_number = 0,
-                confidence  = 0.95,  # High confidence — actually observed in network
+                url=url, path=urlparse(url).path,
+                method=method, category=cat,
+                source_file="headless://network-intercept",
+                line_number=0, confidence=0.95,
             ))
-
-        # Also add WebSocket endpoints
         for ws_url in set(self.ws_urls):
             safe, _ = validate_url(ws_url)
             if safe:
                 endpoints.append(Endpoint(
-                    url         = ws_url,
-                    path        = urlparse(ws_url).path,
-                    method      = "WS",
-                    category    = "WEBSOCKET",
-                    source_file = "headless://websocket",
-                    line_number = 0,
-                    confidence  = 0.99,
+                    url=ws_url, path=urlparse(ws_url).path,
+                    method="WS", category="WEBSOCKET",
+                    source_file="headless://websocket",
+                    line_number=0, confidence=0.99,
                 ))
-
         return endpoints
 
     def run(self) -> dict:
-        """
-        Full headless scan pipeline.
-        Returns dict with js_files, endpoints, routes, api_calls, stats.
-        """
         if not _playwright_available():
-            logger.warning(
-                "Playwright not installed. Run: "
-                "pip install playwright && playwright install chromium"
-            )
-            return {"js_files": [], "endpoints": [], "stats": {}}
+            logger.warning("Playwright not installed.")
+            return {"js_files": [], "endpoints": [], "stats": {}, "timings": {}}
 
-        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+        from playwright.sync_api import sync_playwright
 
-        logger.info("Starting advanced headless engine for: %s", self.target_url)
+        logger.info("Starting headless engine: %s", self.target_url)
+        self.timer.start("total")
 
         with sync_playwright() as pw:
-            launch_args = [
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-web-security",
-                "--disable-features=VizDisplayCompositor",
-            ]
-
+            self.timer.start("browser_start")
             browser = pw.chromium.launch(
                 headless=True,
-                args=launch_args,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor",
+                    "--blink-settings=imagesEnabled=false",  # Disable images
+                    "--disable-background-networking",
+                    "--disable-sync",
+                ],
             )
+            self.timer.stop("browser_start")
 
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/146.0.0.0 Safari/537.36"
-                ) if self.stealth else None,
-                viewport={"width": 1280, "height": 800},
-                ignore_https_errors=True,
-                java_script_enabled=True,
-            )
+            def _new_context():
+                ctx = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/146.0.0.0 Safari/537.36"
+                    ) if self.stealth else None,
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True,
+                    java_script_enabled=True,
+                )
+                ctx.add_init_script(INTERCEPT_JS)
+                # Block images, fonts, media, analytics
+                ctx.route(
+                    "**/*",
+                    lambda route: route.abort()
+                    if self._should_block(route.request.url, route.request.resource_type)
+                    else route.continue_()
+                )
+                return ctx
 
-            page = context.new_page()
+            # Phase 1: Root page
+            self.timer.start("phase1_root")
+            ctx1  = _new_context()
+            page1 = ctx1.new_page()
+            initial_routes = self._visit_page(page1, self.target_url, self.target_url)
+            for r in initial_routes:
+                self._add_route(r)
 
-            # Phase 1: Visit root and discover routes
-            logger.info("Phase 1: Root page + route discovery")
-            initial_routes = self._visit_page(page, self.target_url, self.target_url)
-            self.routes.update(initial_routes)
+            # Add seed URLs from static analysis
+            for seed_url in self.seed_urls:
+                parsed = urlparse(seed_url)
+                self._add_route(parsed.path or "/")
 
-            # If SPA with 0 routes, try navigating to common SPA paths
-            # to trigger lazy-loaded router modules
-            if len(initial_routes) == 0:
-                logger.info("No routes found on root - trying SPA bootstrap paths")
-                spa_probe_paths = ["/#/", "/?", "/app", "/home"]
-                for probe in spa_probe_paths:
+            # SPA probe if 0 routes
+            if not self.routes:
+                for probe in ["/#/", "/app", "/home"]:
                     probe_url = self.target_url.rstrip("/") + probe
                     try:
-                        page.goto(probe_url, timeout=10000, wait_until="networkidle")
-                        page.wait_for_timeout(2000)
-                        extra = self._extract_routes_from_page(page)
+                        page1.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
+                        PageStabilizer(page1).wait(max_ms=2000)
+                        extra = self._extract_routes(page1)
                         if extra:
-                            self.routes.update(extra)
-                            logger.info("Found %d routes via SPA probe: %s", len(extra), probe)
+                            for r in extra:
+                                self._add_route(r)
                             break
                     except Exception:
                         pass
 
-            logger.info("Discovered %d routes from root page", len(self.routes))
+            ctx1.close()
+            self.timer.stop("phase1_root")
+            logger.info("Phase 1 done: %d routes", len(self.routes))
 
-            # Phase 2: Visit all discovered routes
-            urls_to_visit = self._build_full_urls(self.routes)
-            logger.info("Phase 2: Visiting %d discovered routes", len(urls_to_visit))
+            # Phase 2: Visit all routes concurrently
+            self.timer.start("phase2_routes")
+            urls_to_visit = self._build_urls(self.routes)
 
-            for url in urls_to_visit[:self.max_pages - 1]:
-                if self.pages_visited >= self.max_pages:
-                    break
-                new_routes = self._visit_page(page, url, self.target_url)
-                self.routes.update(new_routes)
-                # Add any newly discovered routes
-                new_urls = self._build_full_urls(new_routes - self.routes)
-                urls_to_visit.extend(new_urls[:5])
+            # Sort by priority — admin/auth/api first
+            urls_to_visit = sorted(urls_to_visit, key=_route_priority)
 
-            # Phase 3: Convert API calls to endpoints
-            self.endpoints = self._api_calls_to_endpoints()
+            # Limit to max_pages
+            remaining = self.max_pages - self.pages_visited
+            urls_to_visit = urls_to_visit[:max(0, remaining)]
 
-            context.close()
+            if urls_to_visit:
+                # Use thread pool for concurrent page visits
+                # Each worker gets its own browser context
+                workers = min(self.num_workers, len(urls_to_visit))
+                logger.info("Phase 2: %d routes with %d workers", len(urls_to_visit), workers)
+
+                url_queue = queue.Queue()
+                for u in urls_to_visit:
+                    url_queue.put(u)
+
+                new_routes_found = set()
+                nrf_lock = threading.Lock()
+
+                def worker_fn():
+                    ctx  = _new_context()
+                    page = ctx.new_page()
+                    try:
+                        while True:
+                            try:
+                                url = url_queue.get_nowait()
+                            except queue.Empty:
+                                break
+                            if self.pages_visited >= self.max_pages:
+                                break
+                            new_routes = self._visit_page(page, url, self.target_url)
+                            with nrf_lock:
+                                new_routes_found.update(new_routes)
+                            url_queue.task_done()
+                    finally:
+                        try:
+                            ctx.close()
+                        except Exception:
+                            pass
+
+                threads = [threading.Thread(target=worker_fn, daemon=True)
+                           for _ in range(workers)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=self.timeout * self.max_pages)
+
+                # Add newly discovered routes
+                for r in new_routes_found:
+                    self._add_route(r)
+
+            self.timer.stop("phase2_routes")
             browser.close()
 
-        workers = [js for js in self.js_files if js.technology == "webworker"]
+        # Phase 3: Build endpoints
+        self.timer.start("endpoint_build")
+        self.endpoints = self._api_calls_to_endpoints()
+        self.timer.stop("endpoint_build")
+        self.timer.stop("total")
+
+        timings = self.timer.summary()
+        workers_found = [js for js in self.js_files if js.technology == "webworker"]
+
         stats = {
             "pages":     self.pages_visited,
             "js":        len(self.js_files),
-            "xhr":       len([c for c in self.api_calls if c.get("type") == "xhr"]),
-            "fetch":     len([c for c in self.api_calls if c.get("type") == "fetch"]),
+            "xhr":       sum(1 for c in self.api_calls if c.get("type") == "xhr"),
+            "fetch":     sum(1 for c in self.api_calls if c.get("type") == "fetch"),
             "ws":        len(self.ws_urls),
             "routes":    len(self.routes),
             "endpoints": len(self.endpoints),
-            "workers":   len(workers),
+            "workers":   len(workers_found),
+            "timings":   timings,
         }
 
         logger.info(
-            "Headless complete: %d pages, %d JS, %d API calls, %d WS, %d routes",
-            stats["pages"], stats["js"],
-            len(self.api_calls), len(self.ws_urls), len(self.routes),
+            "Headless done: %d pages, %d JS, %d routes, %.1fs total",
+            self.pages_visited, len(self.js_files),
+            len(self.routes), timings.get("total", 0),
         )
-
         return {
             "js_files":  self.js_files,
             "endpoints": self.endpoints,
             "routes":    list(self.routes),
             "api_calls": self.api_calls,
             "stats":     stats,
+            "timings":   timings,
         }
 
 
-def collect_headless_js(
-    url:      str,
-    scope,
-    timeout:  int  = 30,
-    stealth:  bool = False,
-) -> List[JSFile]:
-    """
-    Simple interface for backward compatibility.
-    Returns JS files collected by headless engine.
-    """
-    engine = HeadlessEngine(
-        target_url = url,
-        scope      = scope,
-        timeout    = timeout,
-        stealth    = stealth,
-        max_pages  = 15,
-        interact   = True,
-    )
-    result = engine.run()
-    return result.get("js_files", [])
+def _playwright_available() -> bool:
+    try:
+        import playwright
+        return True
+    except ImportError:
+        return False
+
+
+def collect_headless_js(url: str, scope, timeout: int = 30,
+                        stealth: bool = False) -> List[JSFile]:
+    """Backward-compatible interface."""
+    engine = HeadlessEngine(url, scope, timeout=timeout, stealth=stealth, max_pages=15)
+    return engine.run().get("js_files", [])
 
 
 def collect_headless_full(
@@ -1095,29 +1136,28 @@ def collect_headless_full(
     scope,
     timeout:       int   = 30,
     stealth:       bool  = False,
-    max_pages:     int   = 500,
+    max_pages:     int   = 100,
     external_seen: set   = None,
     seed_urls:     list  = None,
     interact:      bool  = False,
+    workers:       int   = 3,
 ) -> dict:
     """
-    Full interface returning JS files, endpoints, routes, and stats.
-    seed_urls: additional pages to visit (from crawler, sitemap, etc.)
-    external_seen: URLs already fetched by crawler (avoids re-fetching).
+    Full headless scan.
+    seed_urls: routes from static analysis to pre-seed the engine.
+    workers: concurrent page processing (default 3).
+    interact: enable tab/dropdown interaction (slower, more coverage).
     """
     engine = HeadlessEngine(
-        target_url = url,
-        scope      = scope,
-        timeout    = timeout,
-        stealth    = stealth,
-        max_pages  = max_pages,
-        interact   = interact,
+        target_url    = url,
+        scope         = scope,
+        timeout       = timeout,
+        stealth       = stealth,
+        max_pages     = max_pages,
+        interact      = interact,
+        workers       = workers,
+        external_seen = external_seen or set(),
     )
-    if external_seen:
-        engine.external_seen = external_seen
-    # Pre-seed with pages already discovered by the static crawler
     if seed_urls:
-        for seed_url in seed_urls:
-            if seed_url not in engine.seen_urls:
-                engine.routes.add(urlparse(seed_url).path or "/")
+        engine.seed_urls = list(seed_urls)
     return engine.run()
