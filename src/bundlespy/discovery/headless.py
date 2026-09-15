@@ -907,7 +907,13 @@ class HeadlessEngine:
             method = call.get("method", "GET").upper()
             if not url:
                 continue
+            # Skip static assets
             if any(url.endswith(ext) for ext in [".js", ".css", ".png", ".jpg", ".ico", ".woff"]):
+                continue
+            # Skip socket.io polling
+            if "socket.io" in url.lower() and ("eio=" in url.lower() or "transport=polling" in url.lower()):
+                continue
+            if "engine.io" in url.lower() and "transport=polling" in url.lower():
                 continue
             key = f"{method}:{url.rstrip('/').lower().split('?')[0]}"
             if key in seen:
