@@ -169,13 +169,39 @@ def _write_reports(
 
 
 def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
-    findings   = []
-    endpoints  = []
-    infra      = []
+    findings:   list = []
+    endpoints:  list = []
+    infra:      list = []
+    seen_finds: set  = set()
+    seen_eps:   set  = set()
+
     for js in js_files:
-        findings.extend(scanner.scan(js.content, js.url, js.source_page))
-        endpoints.extend(extract_endpoints(js.content, js.url))
+        if not js.content:
+            continue
+
+        # Secret detection
+        for f in scanner.scan(js.content, js.url, js.source_page):
+            if f.sha256 not in seen_finds:
+                seen_finds.add(f.sha256)
+                findings.append(f)
+
+        # Advanced endpoint extraction (AST-aware)
+        for ep in extract_all_endpoints(js.content, js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                endpoints.append(ep)
+
+        # Legacy endpoint extractor (catches additional patterns)
+        for ep in extract_endpoints(js.content, js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                endpoints.append(ep)
+
+        # Infrastructure detection
         infra.extend(extract_infrastructure(js.content, js.url))
+
     return findings, endpoints, infra
 
 
