@@ -58,28 +58,62 @@ def detect_source_map_url(js_content: str, js_url: str) -> Optional[str]:
     """
     Extract the source map URL from a JS file.
     Returns absolute URL or None.
+
+    Scans the ENTIRE file but prioritizes the last 2000 bytes
+    where sourceMappingURL always appears in minified bundles.
+    Also checks X-SourceMap and SourceMap HTTP header conventions
+    encoded in the file.
     """
-    # Check for inline base64 first
+    if not js_content:
+        return None
+
+    # Strategy 1: Check last 2000 chars — this is where it always is in minified code
+    tail = js_content[-2000:]
+    inline = RE_INLINE_MAP.search(tail)
+    if inline:
+        return f"data:application/json;base64,{inline.group(1)}"
+
+    match = RE_SOURCE_MAP_URL.search(tail)
+    if match:
+        raw = match.group(1).strip()
+        if raw.startswith(("http://", "https://")):
+            return raw
+        try:
+            return urljoin(js_url, raw)
+        except Exception:
+            pass
+
+    # Strategy 2: Full file scan (catches non-standard placements)
     inline = RE_INLINE_MAP.search(js_content)
     if inline:
         return f"data:application/json;base64,{inline.group(1)}"
 
-    # Check for URL reference
     match = RE_SOURCE_MAP_URL.search(js_content)
-    if not match:
-        return None
+    if match:
+        raw = match.group(1).strip()
+        if raw.startswith(("http://", "https://")):
+            return raw
+        try:
+            return urljoin(js_url, raw)
+        except Exception:
+            pass
 
-    raw = match.group(1).strip()
+    # Strategy 3: Look for X-SourceMap or SourceMap embedded as comment
+    header_pattern = re.compile(
+        r'//\s*(?:X-SourceMap|SourceMap)\s*:\s*([^\s"\x27]+)',
+        re.IGNORECASE,
+    )
+    m = header_pattern.search(js_content)
+    if m:
+        raw = m.group(1).strip()
+        if raw.startswith(("http://", "https://")):
+            return raw
+        try:
+            return urljoin(js_url, raw)
+        except Exception:
+            pass
 
-    # Already absolute
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-
-    # Relative - resolve against JS file URL
-    try:
-        return urljoin(js_url, raw)
-    except Exception:
-        return None
+    return None
 
 
 def fetch_source_map(map_url: str, fetcher) -> Optional[str]:
@@ -181,6 +215,9 @@ def process_js_file(js_file: JSFile, fetcher, scope) -> Optional[SourceMapResult
     5. Return as JSFile objects for analysis
     """
     map_url = detect_source_map_url(js_file.content, js_file.url)
+    if not map_url:
+        # Try predictable map paths even when no sourceMappingURL comment
+        map_url = try_predictable_map_paths(js_file.url, fetcher, scope)
     if not map_url:
         return None
 
