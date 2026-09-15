@@ -1,6 +1,7 @@
 """
 Advanced Headless Browser Engine for BundleSpy.
 
+Goes beyond Katana by combining:
 - Full multi-page crawling with JS execution
 - Form detection and intelligent filling
 - Button/interaction event triggering
@@ -599,13 +600,13 @@ class HeadlessEngine:
         try:
             # Phase 1: Scroll to trigger lazy-loading and infinite scroll
             page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.25);")
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(200)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5);")
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(200)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.75);")
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(200)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(300)
             page.evaluate("window.scrollTo(0, 0);")
             page.wait_for_timeout(300)
 
@@ -683,8 +684,8 @@ class HeadlessEngine:
                         text = el.inner_text() or ""
                         if self._is_destructive(text):
                             continue
-                        el.click(timeout=1500)
-                        page.wait_for_timeout(400)
+                        el.click(timeout=1000)
+                        page.wait_for_timeout(200)
                     except Exception:
                         pass
             except Exception:
@@ -1097,6 +1098,7 @@ def collect_headless_full(
     max_pages:     int   = 500,
     external_seen: set   = None,
     seed_urls:     list  = None,
+    interact:      bool  = False,
 ) -> dict:
     """
     Full interface returning JS files, endpoints, routes, and stats.
@@ -1109,7 +1111,7 @@ def collect_headless_full(
         timeout    = timeout,
         stealth    = stealth,
         max_pages  = max_pages,
-        interact   = True,
+        interact   = interact,
     )
     if external_seen:
         engine.external_seen = external_seen
