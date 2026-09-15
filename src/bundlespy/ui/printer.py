@@ -191,7 +191,8 @@ def print_passive(source, urls, js, unique, new, errors=None):
     _p()
 
 
-def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0):
+def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
+                   workers=0, timings=None):
     _section("BROWSER DISCOVERY", "", A.CYAN)
     rows = [("Engine", "Chromium"), ("Pages", str(pages)), ("JS captured", str(js))]
     if xhr or fetch:
@@ -202,8 +203,27 @@ def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0):
         rows.append(("Routes", str(routes)))
     if endpoints:
         rows.append(("Endpoints", str(endpoints)))
+    if workers:
+        rows.append(("Workers", str(workers)))
     for label, val in rows:
         _p(f"  {_label(label)}{val}")
+
+    # Phase timings
+    if timings:
+        _p()
+        _p(f"  {A.GREY}Phase timings:{A.RESET}")
+        phase_labels = {
+            "browser_start": "Browser start",
+            "phase1_root":   "Root page",
+            "phase2_routes": "Route crawl",
+            "endpoint_build":"Endpoint build",
+            "total":         "Total",
+        }
+        for key, label in phase_labels.items():
+            if key in timings:
+                secs = timings[key]
+                color = A.RED if key == "total" else A.GREY
+                _p(f"  {A.GREY}  {label:<16}{color}{secs:.1f}s{A.RESET}")
     _p()
 
 
