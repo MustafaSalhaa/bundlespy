@@ -32,6 +32,22 @@ from ..analysis.html_scanner import scan_html
 logger = logging.getLogger("bundlespy.crawler")
 
 
+# Common application page paths to probe (not just JS)
+COMMON_PAGE_PATHS = [
+    "/login", "/signin", "/sign-in", "/log-in",
+    "/register", "/signup", "/sign-up", "/join",
+    "/logout", "/account", "/my-account", "/profile",
+    "/admin", "/administrator", "/dashboard", "/panel",
+    "/search", "/contact", "/about", "/help", "/faq",
+    "/cart", "/checkout", "/orders", "/settings",
+    "/password-reset", "/forgot-password", "/reset-password",
+    "/api", "/api/docs", "/swagger", "/graphql",
+    "/blog", "/news", "/products", "/catalog",
+    "/user", "/users", "/home", "/index",
+    "/upload", "/download", "/files", "/media",
+    "/.well-known/security.txt", "/robots.txt", "/sitemap.xml",
+]
+
 # Common JS paths to probe
 COMMON_JS_PATHS = [
     "/app.js", "/main.js", "/bundle.js", "/runtime.js", "/vendor.js",
@@ -312,6 +328,9 @@ class Crawler:
             for path in COMMON_JS_PATHS:
                 self._fetch_js(base + path, self.target_url)
 
+        # Phase 3b: collect common page paths to probe after main crawl setup
+        self._common_pages_to_probe = [base + p for p in COMMON_PAGE_PATHS]
+
         # Phase 4: main crawl
         queue: deque = deque()
         queue.append((self.target_url, 0))
@@ -319,6 +338,17 @@ class Crawler:
 
         # Feed sitemap URLs into queue so every page gets crawled
         self._feed_sitemap_to_queue(base, queue)
+
+        # Probe common page paths and queue the ones that exist
+        for probe_url in getattr(self, "_common_pages_to_probe", []):
+            if probe_url in self.visited_pages:
+                continue
+            c_probe, s_probe, ct_probe, _ = self.fetcher.get(probe_url)
+            if c_probe and s_probe in range(200, 300):
+                ct_low = (ct_probe or "").lower()
+                if "html" in ct_low or "text" in ct_low:
+                    self.visited_pages.add(probe_url)
+                    queue.append((probe_url, 1))
 
         while queue and self.pages_crawled < self.max_pages:
             url, depth = queue.popleft()
