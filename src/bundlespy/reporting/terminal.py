@@ -66,6 +66,8 @@ def print_report(
             ws=h.get("ws", 0),
             routes=h.get("routes", 0),
             endpoints=h.get("endpoints", 0),
+            workers=h.get("workers", 0),
+            timings=h.get("timings"),
         )
 
     print_secret_analysis(result.findings)
