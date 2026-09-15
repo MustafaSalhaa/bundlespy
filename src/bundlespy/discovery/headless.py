@@ -52,66 +52,208 @@ FORM_FILL_VALUES = {
     "date":     "2024-01-01",
 }
 
-# JS to extract routes from common frameworks
+# Comprehensive SPA route extraction JS
+# Handles Angular, React Router, Vue Router, Next.js, and generic patterns
 EXTRACT_ROUTES_JS = """
 (function() {
     const routes = new Set();
-    
-    // React Router v6
+    const MAX_ROUTES = 500;
+
+    function addRoute(r) {
+        if (!r || typeof r !== 'string') return;
+        r = r.trim();
+        if (r.length < 2) return;
+        if (!r.startsWith('/')) r = '/' + r;
+        // Skip wildcard-only and param-only routes
+        if (r === '/**' || r === '/*' || r === '/') return;
+        routes.add(r);
+    }
+
+    // ── Angular Router (most important for Juice Shop) ──────────────────────
     try {
-        const reactRoutes = window.__reactRouterRoutes || [];
-        reactRoutes.forEach(r => r.path && routes.add(r.path));
+        // Method 1: Angular injector via root element
+        const rootEls = document.querySelectorAll('[ng-version], [_nghost-], ng-component');
+        for (const el of rootEls) {
+            try {
+                // Angular Ivy context
+                const ctx = el.__ngContext__ || el[Object.keys(el).find(k => k.startsWith('__ngContext'))];
+                if (ctx) {
+                    const lView = Array.isArray(ctx) ? ctx : null;
+                    if (lView) {
+                        for (let i = 0; i < lView.length; i++) {
+                            const item = lView[i];
+                            if (item && item.config && Array.isArray(item.config)) {
+                                item.config.forEach(function walk(r) {
+                                    if (!r) return;
+                                    if (r.path !== undefined) addRoute('/' + r.path);
+                                    if (r.children) r.children.forEach(walk);
+                                    if (r._loadedRoutes) r._loadedRoutes.forEach(walk);
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch(e) {}
+        }
+
+        // Method 2: Angular global ng object
+        if (window.ng) {
+            try {
+                const probe = window.ng.probe || window.ng.getComponent;
+                const rootEl = document.querySelector('app-root') || document.querySelector('[ng-version]');
+                if (rootEl && window.ng.getContext) {
+                    const ctx = window.ng.getContext(rootEl);
+                    if (ctx && ctx.router && ctx.router.config) {
+                        ctx.router.config.forEach(function walk(r) {
+                            if (r.path !== undefined) addRoute('/' + r.path);
+                            if (r.children) r.children.forEach(walk);
+                        });
+                    }
+                }
+            } catch(e) {}
+        }
+
+        // Method 3: Angular router in window
+        const ngRouters = [];
+        try {
+            if (window.getAllAngularRootElements) {
+                window.getAllAngularRootElements().forEach(el => {
+                    try {
+                        const injector = el.__ngContext__ && el.__ngContext__[8];
+                        if (injector && injector.get) {
+                            ['Router', 'ROUTER_CONFIGURATION'].forEach(token => {
+                                try {
+                                    const r = injector.get(token);
+                                    if (r && r.config) ngRouters.push(r);
+                                } catch(e) {}
+                            });
+                        }
+                    } catch(e) {}
+                });
+            }
+        } catch(e) {}
+        ngRouters.forEach(router => {
+            try {
+                router.config.forEach(function walk(r) {
+                    if (r.path !== undefined) addRoute('/' + r.path);
+                    if (r.children) r.children.forEach(walk);
+                    if (r._loadedRoutes) r._loadedRoutes.forEach(walk);
+                });
+            } catch(e) {}
+        });
+
     } catch(e) {}
-    
-    // Next.js
+
+    // ── React Router ─────────────────────────────────────────────────────────
+    try {
+        // React Router v6 - __reactRouterRoutes
+        if (window.__reactRouterRoutes) {
+            window.__reactRouterRoutes.forEach(r => r.path && addRoute(r.path));
+        }
+        // React Router via fiber nodes
+        const reactRoots = document.querySelectorAll('#root, #app, [data-reactroot]');
+        reactRoots.forEach(el => {
+            try {
+                const key = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                if (!key) return;
+                let fiber = el[key];
+                let depth = 0;
+                while (fiber && depth < 100) {
+                    if (fiber.memoizedProps && fiber.memoizedProps.path) {
+                        addRoute(fiber.memoizedProps.path);
+                    }
+                    fiber = fiber.child || fiber.sibling || (fiber.return && fiber.return.sibling);
+                    depth++;
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // ── Vue Router ───────────────────────────────────────────────────────────
+    try {
+        const vueApps = [];
+        if (window.__vue_router__) vueApps.push({router: window.__vue_router__});
+        if (window.$vm && window.$vm.$router) vueApps.push({router: window.$vm.$router});
+        // Vue 3 app instances
+        document.querySelectorAll('[data-v-app]').forEach(el => {
+            try {
+                if (el._vei || el.__vue_app__) {
+                    const app = el.__vue_app__;
+                    if (app && app.config && app.config.globalProperties.$router) {
+                        vueApps.push({router: app.config.globalProperties.$router});
+                    }
+                }
+            } catch(e) {}
+        });
+        vueApps.forEach(({router}) => {
+            try {
+                const opts = router.options || {};
+                (opts.routes || []).forEach(function walk(r) {
+                    if (r.path) addRoute(r.path);
+                    if (r.children) r.children.forEach(walk);
+                });
+                // Vue Router 4 getRoutes()
+                if (router.getRoutes) {
+                    router.getRoutes().forEach(r => r.path && addRoute(r.path));
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // ── Next.js ──────────────────────────────────────────────────────────────
     try {
         const nextData = window.__NEXT_DATA__;
-        if (nextData && nextData.page) routes.add(nextData.page);
-        if (nextData && nextData.buildManifest) {
-            Object.keys(nextData.buildManifest.pages || {}).forEach(p => routes.add(p));
+        if (nextData) {
+            if (nextData.page) addRoute(nextData.page);
+            if (nextData.buildManifest) {
+                Object.keys(nextData.buildManifest.pages || {}).forEach(p => addRoute(p));
+            }
         }
-    } catch(e) {}
-    
-    // Vue Router
-    try {
-        const vueRouter = window.__vue_router__ || 
-                          (window.$vm && window.$vm.$router);
-        if (vueRouter && vueRouter.options && vueRouter.options.routes) {
-            vueRouter.options.routes.forEach(r => r.path && routes.add(r.path));
-        }
-    } catch(e) {}
-    
-    // Angular Router
-    try {
-        const ng = window.getAllAngularRootElements && window.getAllAngularRootElements()[0];
-        if (ng) {
-            const injector = ng.__ngContext__[8];
-            const router = injector.get(window.ng.core.Router);
-            if (router && router.config) {
-                router.config.forEach(r => r.path && routes.add('/' + r.path));
+        if (window.__NEXT_ROUTER_BASEPATH !== undefined) {
+            // Next.js 13+ app router
+            if (window.next && window.next.router && window.next.router.routes) {
+                Object.keys(window.next.router.routes).forEach(r => addRoute(r));
             }
         }
     } catch(e) {}
 
-    // Extract from anchor tags
-    document.querySelectorAll('a[href]').forEach(a => {
+    // ── Generic: Anchor links ────────────────────────────────────────────────
+    document.querySelectorAll('a[href], [routerLink], [ng-href]').forEach(el => {
         try {
-            const url = new URL(a.href);
-            if (url.hostname === window.location.hostname) {
-                routes.add(url.pathname);
+            const href = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
+            if (href && href.startsWith('/') && !href.startsWith('//')) {
+                addRoute(href.split('?')[0].split('#')[0]);
             }
         } catch(e) {}
     });
 
-    // Extract from data attributes
-    document.querySelectorAll('[data-route],[data-url],[data-href],[data-path]').forEach(el => {
-        ['data-route','data-url','data-href','data-path'].forEach(attr => {
-            const val = el.getAttribute(attr);
-            if (val && val.startsWith('/')) routes.add(val);
+    // ── Generic: data-route attributes ──────────────────────────────────────
+    document.querySelectorAll('[data-route],[data-url],[data-href],[data-path],[routerLink]').forEach(el => {
+        ['data-route','data-url','data-href','data-path','routerLink'].forEach(attr => {
+            try {
+                const val = el.getAttribute(attr);
+                if (val && val.startsWith('/')) addRoute(val.split('?')[0]);
+            } catch(e) {}
         });
     });
 
-    return Array.from(routes).filter(r => r && r.length > 1);
+    // ── Window location-based navigation patterns ────────────────────────────
+    try {
+        // Check if router is registered in common global namespaces
+        ['__router__', '_router', 'router', 'app', 'App'].forEach(key => {
+            try {
+                const r = window[key];
+                if (r && r.options && r.options.routes) {
+                    r.options.routes.forEach(function walk(route) {
+                        if (route.path) addRoute(route.path);
+                        if (route.children) route.children.forEach(walk);
+                    });
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    return Array.from(routes).filter(r => r && r.length > 1).slice(0, MAX_ROUTES);
 })()
 """
 
@@ -399,8 +541,16 @@ class HeadlessEngine:
             )
             self.pages_visited += 1
 
-            # Extra wait for heavy SPAs
-            page.wait_for_timeout(2000)
+            # Wait for SPA frameworks to initialize routers
+            # Angular needs time to bootstrap, React Router to mount
+            page.wait_for_timeout(3000)
+
+            # Wait for Angular specifically (ng-version attribute)
+            try:
+                page.wait_for_selector("[ng-version], app-root, router-outlet", timeout=3000)
+                page.wait_for_timeout(1000)  # Extra time after Angular mounts
+            except Exception:
+                pass
 
             # Interact to trigger dynamic content
             if self.interact:
@@ -545,7 +695,25 @@ class HeadlessEngine:
             initial_routes = self._visit_page(page, self.target_url, self.target_url)
             self.routes.update(initial_routes)
 
-            logger.info("Discovered %d routes from root page", len(initial_routes))
+            # If SPA with 0 routes, try navigating to common SPA paths
+            # to trigger lazy-loaded router modules
+            if len(initial_routes) == 0:
+                logger.info("No routes found on root - trying SPA bootstrap paths")
+                spa_probe_paths = ["/#/", "/?", "/app", "/home"]
+                for probe in spa_probe_paths:
+                    probe_url = self.target_url.rstrip("/") + probe
+                    try:
+                        page.goto(probe_url, timeout=10000, wait_until="networkidle")
+                        page.wait_for_timeout(2000)
+                        extra = self._extract_routes_from_page(page)
+                        if extra:
+                            self.routes.update(extra)
+                            logger.info("Found %d routes via SPA probe: %s", len(extra), probe)
+                            break
+                    except Exception:
+                        pass
+
+            logger.info("Discovered %d routes from root page", len(self.routes))
 
             # Phase 2: Visit all discovered routes
             urls_to_visit = self._build_full_urls(self.routes)
