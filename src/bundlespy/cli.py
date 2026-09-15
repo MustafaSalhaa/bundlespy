@@ -514,9 +514,15 @@ def run_scan(args) -> int:
     extras["lib_findings"] = lib_findings
     if not args.quiet and not getattr(args, "silent", False):
         if lib_findings:
+            # Count unique libraries vs total CVEs
+            unique_libs = len(set(f"{l.library}:{l.version}" for l in lib_findings))
+            total_cves  = len(lib_findings)
             crit = sum(1 for l in lib_findings if l.severity == "CRITICAL")
             high = sum(1 for l in lib_findings if l.severity == "HIGH")
-            detail = f"{len(lib_findings)} vulnerable {'library' if len(lib_findings)==1 else 'libraries'}"
+
+            lib_word = "library" if unique_libs == 1 else "libraries"
+            cve_word = "vulnerability" if total_cves == 1 else "vulnerabilities"
+            detail = f"{total_cves} {cve_word} in {unique_libs} {lib_word}"
             if crit: detail += f"  {crit} critical"
             if high: detail += f"  {high} high"
             phase_done("Library scan", detail)
