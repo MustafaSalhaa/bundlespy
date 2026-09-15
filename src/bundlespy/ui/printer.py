@@ -386,7 +386,11 @@ def _print_finding(f, verbose=False):
     _p()
 
     url = f.file_url[:_w()-6]
-    _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}")
+    occ = getattr(f, "occurrences", None) or []
+    if len(occ) > 1:
+        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}  {A.YELLOW}(+{len(occ)-1} more pages){A.RESET}")
+    else:
+        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}")
     _p(f"  {_label('Type')}{f.category}")
 
     sc2 = {"likely_secret": A.RED, "validated": A.RED+A.BOLD,
