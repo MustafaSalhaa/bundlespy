@@ -469,6 +469,48 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
+    # Add every crawled page as a discovered route endpoint
+    # These are real pages the crawler actually visited
+    if not args.passive:
+        from urllib.parse import urlparse as _up
+        from .storage.models import Endpoint as _Endpoint
+        _crawled_pages = getattr(crawler, "visited_pages", set()) or set()
+        _seen_ep = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
+        for _page_url in _crawled_pages:
+            _pp   = _up(_page_url)
+            _path = _pp.path or "/"
+            _key  = _page_url.rstrip("/").lower().split("?")[0]
+            if _key in _seen_ep:
+                continue
+            _seen_ep.add(_key)
+            # Categorize the page route
+            _lower = _path.lower()
+            if any(k in _lower for k in ["/login", "/logout", "/auth", "/register", "/signin", "/signup"]):
+                _cat = "AUTH"
+            elif any(k in _lower for k in ["/admin", "/administration", "/manage"]):
+                _cat = "ADMIN"
+            elif "/graphql" in _lower:
+                _cat = "GRAPHQL"
+            elif any(k in _lower for k in ["/api/", "/rest/", "/v1/", "/v2/"]):
+                _cat = "API"
+            else:
+                _cat = "ROUTE"
+            # Query params from the page URL
+            _qp = []
+            if _pp.query:
+                for _pair in _pp.query.split("&"):
+                    _n = _pair.split("=")[0]
+                    if _n:
+                        _qp.append({"name": _n})
+            all_endpoints.append(_Endpoint(
+                url=_page_url, path=_path, method="GET",
+                category=_cat, source_file="crawler://page",
+                line_number=0, confidence=0.99,
+                host=_pp.netloc, query_params=_qp,
+                path_params=[], body_fields=[], request_headers={},
+                auth_context="", evidence="Crawled page", kind="route",
+            ))
+
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
