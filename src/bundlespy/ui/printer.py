@@ -425,9 +425,9 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
     _section("ENDPOINTS", str(len(endpoints)), A.BLUE)
 
     cat_colors = {"AUTH": A.RED, "ADMIN": A.ORANGE, "GRAPHQL": A.PURPLE,
-                  "API": A.BLUE, "WEBSOCKET": A.CYAN}
+                  "API": A.BLUE, "WEBSOCKET": A.CYAN, "ROUTE": A.GREEN}
 
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "UNKNOWN"]:
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
@@ -438,7 +438,7 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
     shown = 0
     limit = 9999 if verbose else 40
 
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "UNKNOWN"]:
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
