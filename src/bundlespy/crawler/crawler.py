@@ -43,7 +43,7 @@ COMMON_PAGE_PATHS = [
     "/password-reset", "/forgot-password", "/reset-password",
     "/api", "/api/docs", "/swagger", "/graphql",
     "/blog", "/news", "/products", "/catalog",
-    "/user", "/users", "/home", "/index",
+    "/user", "/users", "/home",
     "/upload", "/download", "/files", "/media",
     "/.well-known/security.txt", "/robots.txt", "/sitemap.xml",
 ]
