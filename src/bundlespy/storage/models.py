@@ -62,13 +62,22 @@ class Finding:
 
 @dataclass
 class Endpoint:
-    url: str
-    path: str
-    method: str
-    category: str           # AUTH / ADMIN / DATA / UPLOAD / GRAPHQL / WEBSOCKET / UNKNOWN
-    source_file: str
-    line_number: int
-    confidence: float
+    url:             str
+    path:            str
+    method:          str
+    category:        str   # AUTH / ADMIN / API / GRAPHQL / WEBSOCKET / ROUTE / EXTERNAL / UNKNOWN
+    source_file:     str
+    line_number:     int
+    confidence:      float
+    # Extended intelligence fields
+    host:            str   = ""
+    query_params:    list  = None   # [{"name": "q", "example": "test"}]
+    path_params:     list  = None   # [{"name": "id", "position": 2}]
+    body_fields:     list  = None   # [{"name": "email"}, {"name": "password"}]
+    request_headers: dict  = None   # {"Content-Type": "application/json"}
+    auth_context:    str   = ""     # "Bearer", "Cookie", "ApiKey", "None"
+    evidence:        str   = ""     # Raw JS snippet that revealed this endpoint
+    kind:            str   = "api"  # api / route / external / websocket / graphql
 
 
 @dataclass
