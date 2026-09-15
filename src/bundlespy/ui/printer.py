@@ -423,17 +423,44 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
         for ep in eps:
             if shown >= limit:
                 break
-            method = (ep.method or "?").ljust(5)
+            method = (ep.method or "?").ljust(6)
             url    = ep.url[:_w()-20]
             vr     = val_map.get(ep.url)
+
+            # Color method by type
+            mc = (A.RED if ep.method in ("DELETE", "PUT") else
+                  A.ORANGE if ep.method == "POST" else
+                  A.GREY)
+
             if vr:
                 sc = (A.GREEN if vr.status_code == 200 else
                       A.YELLOW if vr.status_code in (301,302,307) else
                       A.RED if vr.status_code in (401,403) else A.GREY)
                 ct = vr.content_type.split(";")[0][:20] if vr.content_type else ""
-                _p(f"  {A.GREY}{method}{A.RESET}  {c}{url}{A.RESET}  {sc}{vr.status_code}{A.RESET}  {A.GREY}{ct}{A.RESET}")
+                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}  {sc}{vr.status_code}{A.RESET}  {A.GREY}{ct}{A.RESET}")
             else:
-                _p(f"  {A.GREY}{method}{A.RESET}  {c}{url}{A.RESET}")
+                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}")
+
+            # Show intelligence in verbose mode
+            if verbose:
+                intel_parts = []
+                bf = getattr(ep, "body_fields", None) or []
+                qp = getattr(ep, "query_params", None) or []
+                pp = getattr(ep, "path_params", None) or []
+                auth = getattr(ep, "auth_context", "") or ""
+
+                if bf:
+                    names = ", ".join(f["name"] for f in bf[:6])
+                    _p(f"  {A.GREY}         body: {names}{A.RESET}")
+                if qp:
+                    names = ", ".join(f["name"] for f in qp[:6])
+                    _p(f"  {A.GREY}         query: {names}{A.RESET}")
+                if pp:
+                    names = ", ".join(f["name"] for f in pp[:6])
+                    _p(f"  {A.GREY}         path params: {names}{A.RESET}")
+                if auth:
+                    _p(f"  {A.YELLOW}         auth: {auth}{A.RESET}")
+
             shown += 1
 
     if shown >= limit and not verbose:
