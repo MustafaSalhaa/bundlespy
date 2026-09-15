@@ -80,7 +80,7 @@ RE_TEMPLATE = re.compile(
 
 # Route definitions: { path: "/admin/users" }
 RE_ROUTE_PATH = re.compile(
-    r'\bpath\s*:\s*["\x27`](/[A-Za-z0-9/_\-.:?=&%#{}*]+)["\x27`]',
+    r'\bpath\s*:\s*["\x27`](/?[A-Za-z0-9/_\-.:?=&%#{}*][A-Za-z0-9/_\-.:?=&%#{}*]*)["\x27`]',
     re.IGNORECASE,
 )
 
@@ -116,9 +116,9 @@ RE_GRAPHQL_PATH = re.compile(
     re.IGNORECASE,
 )
 
-# WebSocket paths
+# WebSocket paths — use explicit quote chars to avoid escape issues
 RE_WEBSOCKET = re.compile(
-    r'new\s+WebSocket\s*\(\s*["\x27`](wss?://[^\s"\x27`]+)["\x27`]',
+    "new\\s+WebSocket\\s*\\(\\s*[\"'`](wss?://[^\\s\"'`]+)[\"'`]",
     re.IGNORECASE,
 )
 
@@ -199,6 +199,10 @@ def _is_valid_path(path: str) -> bool:
     """Filter out obvious non-API paths."""
     lower = path.lower()
 
+    # WebSocket URLs are always valid — never filter them
+    if lower.startswith("ws://") or lower.startswith("wss://"):
+        return True
+
     # Skip static assets
     skip_exts = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
                  ".css", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip",
@@ -216,9 +220,16 @@ def _is_valid_path(path: str) -> bool:
 
     # Skip documentation URLs embedded in code
     skip_domains = ["reactjs.org", "w3.org", "github.com", "mdn.io",
-                    "developer.mozilla", "nodejs.org", "example.com"]
+                    "developer.mozilla", "nodejs.org"]
     if any(d in lower for d in skip_domains):
         return False
+
+    # Skip full HTTP URLs that are not API-like
+    if path.startswith("http"):
+        if not any(k in lower for k in ["/api/", "/auth", "/admin", "/graphql",
+                                         "/upload", "/download", "/v1/", "/v2/",
+                                         "/v3/", "/rest/", "/gql", "/socket"]):
+            return False
 
     return True
 
