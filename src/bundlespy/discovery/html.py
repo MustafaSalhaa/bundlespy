@@ -45,17 +45,50 @@ def extract_js_urls(html: str, base_url: str) -> List[str]:
     return list(urls)
 
 
+# Additional link sources
+RE_FORM_ACTION = re.compile(r'<form[^>]+action=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_ONCLICK_LOC = re.compile(r'(?:location\.href|window\.location)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+RE_DATA_HREF   = re.compile(r'data-(?:href|url|link|target)=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_META_REFRESH = re.compile(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^;]+;\s*url=([^"\']+)["\']', re.IGNORECASE)
+
+
 def extract_links(html: str, base_url: str) -> List[str]:
-    """Extract all href links from HTML for crawling."""
+    """
+    Extract all links from HTML for crawling.
+    Covers href, form actions, onclick navigation, data attributes,
+    and meta refresh redirects.
+    """
     links: Set[str] = set()
-    for match in RE_HREF.finditer(html):
-        raw = match.group(1).strip()
-        if raw.startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
-            continue
+
+    def _add(raw: str) -> None:
+        raw = raw.strip()
+        if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
+            return
         absolute = _make_absolute(raw, base_url)
         if absolute:
             url_no_fragment, _ = urldefrag(absolute)
             links.add(url_no_fragment)
+
+    # Standard anchor links
+    for match in RE_HREF.finditer(html):
+        _add(match.group(1))
+
+    # Form actions — often login/search/contact forms
+    for match in RE_FORM_ACTION.finditer(html):
+        _add(match.group(1))
+
+    # onclick navigation
+    for match in RE_ONCLICK_LOC.finditer(html):
+        _add(match.group(1))
+
+    # data-href / data-url attributes
+    for match in RE_DATA_HREF.finditer(html):
+        _add(match.group(1))
+
+    # meta refresh
+    for match in RE_META_REFRESH.finditer(html):
+        _add(match.group(1))
+
     return list(links)
 
 
