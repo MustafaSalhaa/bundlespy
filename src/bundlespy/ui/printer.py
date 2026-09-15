@@ -92,34 +92,54 @@ def print_js_inventory(js_files, verbose=False):
     if not js_files:
         return
 
-    show = js_files if verbose else js_files[:15]
+    # Count by source type
+    headless_count  = sum(1 for j in js_files if "headless-captured" in j.technology)
+    inline_count    = sum(1 for j in js_files if j.url.startswith("inline:"))
+    recovered_count = sum(1 for j in js_files if j.url.startswith("sourcemap://"))
+    static_count    = len(js_files) - headless_count - inline_count - recovered_count
+    total_size      = sum(j.size_bytes for j in js_files if j.size_bytes)
+
     _section("JAVASCRIPT ASSETS", str(len(js_files)), A.CYAN)
 
+    # Summary line
+    summary_parts = []
+    if static_count:   summary_parts.append(f"{static_count} static")
+    if headless_count: summary_parts.append(f"{headless_count} browser-captured")
+    if inline_count:   summary_parts.append(f"{inline_count} inline")
+    if recovered_count: summary_parts.append(f"{recovered_count} recovered")
+    if summary_parts:
+        _p(f"  {A.GREY}{' · '.join(summary_parts)} · {total_size/1024:.0f} KB total{A.RESET}")
+    _p()
+
+    show = js_files if verbose else js_files[:15]
+
     for js in show:
-        size  = f"{js.size_bytes:,}b" if js.size_bytes else "?"
-        tech  = f"  {A.GREY}[{js.technology}]{A.RESET}" if js.technology else ""
-        smap  = f"  {A.YELLOW}map{A.RESET}" if js.has_source_map else ""
+        size  = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
+        tech  = f" {A.GREY}[{js.technology.replace('headless-captured','')}]{A.RESET}" if js.technology and js.technology != "headless-captured" else ""
+        smap  = f" {A.YELLOW}[map]{A.RESET}" if js.has_source_map else ""
         url   = js.url
-        prefix = ""
+        tag   = ""
 
         if url.startswith("sourcemap://"):
             url = url.replace("sourcemap://", "")
-            prefix = f"{A.GREEN}recovered  {A.RESET}"
+            tag = f" {A.GREEN}[recovered]{A.RESET}"
         elif url.startswith("local://"):
             url = url.replace("local://", "")
-            prefix = f"{A.YELLOW}local      {A.RESET}"
+            tag = f" {A.YELLOW}[local]{A.RESET}"
         elif url.startswith("inline:"):
-            prefix = f"{A.GREY}inline     {A.RESET}"
             url = url.replace("inline:", "")
+            tag = f" {A.GREY}[inline]{A.RESET}"
         elif url.startswith("html:"):
-            prefix = f"{A.BLUE}html       {A.RESET}"
             url = url.replace("html:", "")
+            tag = f" {A.BLUE}[html]{A.RESET}"
+        elif "headless-captured" in js.technology:
+            tag = f" {A.CYAN}[browser]{A.RESET}"
 
-        url = url[:_w()-28]
-        _p(f"  {A.GREY}  {prefix}{A.RESET}{url}{tech}{smap}  {A.GREY}{size}{A.RESET}")
+        url = url[:_w()-30]
+        _p(f"  {A.GREY}•{A.RESET} {url}{tag}{tech}{smap}  {A.GREY}{size}{A.RESET}")
 
     if not verbose and len(js_files) > 15:
-        _p(f"  {A.GREY}  ... and {len(js_files)-15} more  (-v to show all){A.RESET}")
+        _p(f"\n  {A.GREY}  ... and {len(js_files)-15} more  (-v to show all){A.RESET}")
     _p()
 
 
@@ -156,11 +176,18 @@ def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0):
     _p()
 
 
-def print_passive(source, urls, js, unique, new):
+def print_passive(source, urls, js, unique, new, errors=None):
     _section("PASSIVE DISCOVERY", "", A.CYAN)
-    for label, val in [("Source", source), ("URLs found", str(urls)),
-                       ("JS assets", str(js)), ("Unique", str(unique)), ("New", str(new))]:
-        _p(f"  {_label(label)}{val}")
+    _p(f"  {_label('Source')}{source}")
+    if urls > 0:
+        _p(f"  {_label('URLs found')}{urls}")
+        _p(f"  {_label('JS assets')}{js}")
+        _p(f"  {_label('New')}{new}")
+    else:
+        _p(f"  {_label('Status')}{A.GREY}No historical assets found{A.RESET}")
+    if errors:
+        for err in errors:
+            _p(f"  {A.YELLOW}  ! {err}{A.RESET}")
     _p()
 
 
@@ -530,8 +557,12 @@ def print_summary(result, extras=None, report_paths=None):
             _p(f"  {A.GREY}  {fmt.upper():<8}{A.RESET}  {path}")
 
     _p()
-    if counts.get("CRITICAL") or counts.get("HIGH") or validated:
+    if counts.get("CRITICAL") or validated:
         _p(f"  {A.RED}{A.BOLD}Critical findings present. Immediate action required.{A.RESET}")
+    elif counts.get("HIGH"):
+        _p(f"  {A.ORANGE}{A.BOLD}High severity findings present. Review required.{A.RESET}")
+    elif counts.get("MEDIUM"):
+        _p(f"  {A.YELLOW}Medium severity findings present.{A.RESET}")
     else:
         _p(f"  {A.GREEN}Scan complete. No critical findings.{A.RESET}")
     _p()
