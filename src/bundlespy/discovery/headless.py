@@ -1,5 +1,5 @@
 """
-BundleSpy Advanced Headless Engine - optimized for speed and coverage.
+BundleSpy Advanced Headless Engine — optimized for speed and coverage.
 
 Optimization principles:
 - Adaptive waits instead of fixed sleeps
@@ -1033,45 +1033,25 @@ class HeadlessEngine:
             urls_to_visit = urls_to_visit[:max(0, remaining)]
 
             if urls_to_visit:
-                # Use thread pool for concurrent page visits
-                # Each worker gets its own browser context
-                workers = min(self.num_workers, len(urls_to_visit))
-                logger.info("Phase 2: %d routes with %d workers", len(urls_to_visit), workers)
+                logger.info("Phase 2: visiting %d routes", len(urls_to_visit))
 
-                url_queue = queue.Queue()
-                for u in urls_to_visit:
-                    url_queue.put(u)
-
+                # Playwright sync API is NOT thread-safe — must run on main thread
+                # Use a single persistent page for all route visits (fast — no context reload)
+                ctx2  = _new_context()
+                page2 = ctx2.new_page()
                 new_routes_found = set()
-                nrf_lock = threading.Lock()
 
-                def worker_fn():
-                    ctx  = _new_context()
-                    page = ctx.new_page()
+                try:
+                    for url in urls_to_visit:
+                        if self.pages_visited >= self.max_pages:
+                            break
+                        new_routes = self._visit_page(page2, url, self.target_url)
+                        new_routes_found.update(new_routes)
+                finally:
                     try:
-                        while True:
-                            try:
-                                url = url_queue.get_nowait()
-                            except queue.Empty:
-                                break
-                            if self.pages_visited >= self.max_pages:
-                                break
-                            new_routes = self._visit_page(page, url, self.target_url)
-                            with nrf_lock:
-                                new_routes_found.update(new_routes)
-                            url_queue.task_done()
-                    finally:
-                        try:
-                            ctx.close()
-                        except Exception:
-                            pass
-
-                threads = [threading.Thread(target=worker_fn, daemon=True)
-                           for _ in range(workers)]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join(timeout=self.timeout * self.max_pages)
+                        ctx2.close()
+                    except Exception:
+                        pass
 
                 # Add newly discovered routes
                 for r in new_routes_found:
