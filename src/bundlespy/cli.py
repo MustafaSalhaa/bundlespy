@@ -482,6 +482,9 @@ def run_scan(args) -> int:
             _key  = _page_url.rstrip("/").lower().split("?")[0]
             if _key in _seen_ep:
                 continue
+            # Skip bare root and /index duplicates
+            if _path in ("/", "/index", "/index.html", "/index.php", ""):
+                continue
             _seen_ep.add(_key)
             # Categorize the page route
             _lower = _path.lower()
@@ -530,6 +533,28 @@ def run_scan(args) -> int:
         if f.sha256 not in seen_html:
             seen_html.add(f.sha256)
             all_findings.append(f)
+
+    # Deduplicate findings by rule + value — same secret on multiple pages
+    # becomes ONE finding with all occurrences listed
+    _finding_map = {}
+    _deduped_findings = []
+    for f in all_findings:
+        dedup_key = f"{f.rule_id}:{f.matched_value}"
+        if dedup_key in _finding_map:
+            # Add this location to the existing finding's occurrences
+            existing = _finding_map[dedup_key]
+            loc = f"{f.file_url}:{f.line_number}"
+            if not existing.occurrences:
+                existing.occurrences = []
+            if loc not in existing.occurrences:
+                existing.occurrences.append(loc)
+        else:
+            _finding_map[dedup_key] = f
+            loc = f"{f.file_url}:{f.line_number}"
+            if not f.occurrences:
+                f.occurrences = [loc]
+            _deduped_findings.append(f)
+    all_findings = _deduped_findings
 
     # Final endpoint dedup — keep parameterized endpoints distinct
     # Dedup by path + sorted param names (not param values)
