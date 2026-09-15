@@ -1,7 +1,6 @@
 """
 Advanced Headless Browser Engine for BundleSpy.
 
-Goes beyond Katana by combining:
 - Full multi-page crawling with JS execution
 - Form detection and intelligent filling
 - Button/interaction event triggering
