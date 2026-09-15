@@ -531,15 +531,30 @@ def run_scan(args) -> int:
             seen_html.add(f.sha256)
             all_findings.append(f)
 
-    # Final endpoint dedup
+    # Final endpoint dedup — keep parameterized endpoints distinct
+    # Dedup by path + sorted param names (not param values)
+    # so /product?productId=1 and /product?productId=2 merge to one,
+    # but /product?productId and /product?category stay separate
     seen_final = set()
     deduped = []
     for ep in all_endpoints:
-        key = ep.url.rstrip("/").lower().split("?")[0]
+        from urllib.parse import urlparse as _upx
+        _p = _upx(ep.url)
+        _path = _p.path.rstrip("/").lower()
+        # Build param signature from query param names
+        _param_names = sorted(qp.get("name", "") for qp in (ep.query_params or []))
+        _param_sig = ",".join(_param_names)
+        # Method + path + param names = unique attack surface
+        key = f"{ep.method}:{_path}?{_param_sig}"
         if key not in seen_final:
             seen_final.add(key)
             deduped.append(ep)
     all_endpoints = deduped
+
+    # ── Attack surface analysis ────────────────────────────────────────────────
+    from .analysis.attack_surface import analyze_attack_surface
+    attack_surface = analyze_attack_surface(all_endpoints)
+    extras["attack_surface"] = attack_surface
 
     # ── Vulnerable library detection ───────────────────────────────────────────
     if not args.quiet and not getattr(args, "silent", False):
