@@ -2,143 +2,185 @@
 Passive JS Discovery via Web Archives.
 
 Collects historical JS URLs from:
-- Wayback Machine CDX API
-- CommonCrawl CDX API
+- Wayback Machine CDX API (HTTPS, correct params)
+- CommonCrawl CDX API (latest index, newline-delimited JSON)
 
-No direct requests to the target. Zero noise.
-Useful for finding old JS files with leaked credentials
-that are no longer on the live site.
+Distinguishes clearly between:
+- success with results
+- success with zero results
+- API failure (HTTP error)
+- timeout
+- malformed response
 """
 
-import re
 import json
-import time
 import logging
+from dataclasses import dataclass
 from typing import List, Set, Optional
-from urllib.parse import urlencode, urlparse, quote
+from urllib.parse import urlparse
 
 import requests
 
 logger = logging.getLogger("bundlespy.discovery.passive")
 
-CDX_WAYBACK     = "http://web.archive.org/cdx/search/cdx"
-CDX_COMMONCRAWL = "http://index.commoncrawl.org/CC-MAIN-2024-10-index"
-
-REQUEST_TIMEOUT = 15
+# Wayback CDX — must use HTTPS, not HTTP
+CDX_WAYBACK     = "https://web.archive.org/cdx/search/cdx"
+REQUEST_TIMEOUT = 20
 MAX_RESULTS     = 1000
 
 
-def _cdx_request(url: str, params: dict) -> Optional[list]:
-    """Make a CDX API request safely."""
-    try:
-        resp = requests.get(
-            url,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": "BundleSpy Security Scanner (authorized assessment)"},
-        )
-        if resp.status_code != 200:
-            logger.warning("CDX API returned %d for %s", resp.status_code, url)
-            return None
-        return resp.json()
-    except requests.exceptions.Timeout:
-        logger.warning("CDX API timed out: %s", url)
-        return None
-    except Exception as e:
-        logger.warning("CDX API error: %s", e)
-        return None
+@dataclass
+class PassiveResult:
+    """Explicit result from a passive source — never conflates failure with empty."""
+    source:    str
+    success:   bool
+    urls:      List[str]
+    error:     Optional[str] = None
+    http_code: Optional[int] = None
 
 
-def wayback_js_urls(domain: str, limit: int = MAX_RESULTS) -> List[str]:
+def _wayback_query(domain: str, limit: int = MAX_RESULTS) -> PassiveResult:
     """
-    Query Wayback Machine CDX API for JS files belonging to a domain.
-    Returns deduplicated list of JS URLs.
+    Query Wayback Machine CDX API for JS files.
+    Uses HTTPS and correct CDX parameters.
     """
     params = {
-        "url":        f"*.{domain}/*.js",
-        "matchType":  "wildcard",
-        "output":     "json",
-        "fl":         "original",
-        "filter":     "statuscode:200",
-        "collapse":   "urlkey",
-        "limit":      str(limit),
+        "url":       f"*.{domain}/*.js",
+        "matchType": "wildcard",
+        "output":    "json",
+        "fl":        "original",
+        "filter":    "statuscode:200",
+        "collapse":  "urlkey",
+        "limit":     str(limit),
     }
 
     logger.info("Querying Wayback Machine for JS URLs: %s", domain)
-    data = _cdx_request(CDX_WAYBACK, params)
 
-    if not data or len(data) < 2:
-        return []
+    try:
+        resp = requests.get(
+            CDX_WAYBACK,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; BundleSpy/1.0)"},
+        )
 
-    # First row is header
-    urls = []
-    for row in data[1:]:
-        if row and len(row) >= 1:
-            url = row[0]
-            if url.endswith(".js") or ".js?" in url:
-                urls.append(url)
+        if resp.status_code != 200:
+            logger.warning("Wayback CDX returned HTTP %d", resp.status_code)
+            return PassiveResult(
+                source="wayback", success=False, urls=[],
+                error=f"HTTP {resp.status_code}", http_code=resp.status_code,
+            )
 
-    logger.info("Wayback Machine returned %d JS URLs for %s", len(urls), domain)
-    return list(set(urls))
+        try:
+            data = resp.json()
+        except ValueError:
+            return PassiveResult(
+                source="wayback", success=False, urls=[],
+                error="Malformed JSON response",
+            )
+
+        if not data or not isinstance(data, list):
+            return PassiveResult(source="wayback", success=True, urls=[])
+
+        # First row is header ["original"]
+        urls = []
+        for row in data[1:]:
+            if row and len(row) >= 1:
+                url = row[0]
+                if isinstance(url, str) and (url.endswith(".js") or ".js?" in url):
+                    urls.append(url)
+
+        urls = list(set(urls))
+        logger.info("Wayback Machine returned %d JS URLs for %s", len(urls), domain)
+        return PassiveResult(source="wayback", success=True, urls=urls)
+
+    except requests.exceptions.Timeout:
+        logger.warning("Wayback Machine timed out for %s", domain)
+        return PassiveResult(source="wayback", success=False, urls=[], error="Timeout")
+
+    except requests.exceptions.ConnectionError as e:
+        logger.warning("Wayback Machine connection error: %s", e)
+        return PassiveResult(source="wayback", success=False, urls=[], error=f"Connection error: {e}")
+
+    except Exception as e:
+        logger.warning("Wayback Machine unexpected error: %s", e)
+        return PassiveResult(source="wayback", success=False, urls=[], error=str(e))
 
 
-def commoncrawl_js_urls(domain: str, limit: int = MAX_RESULTS) -> List[str]:
+def _commoncrawl_query(domain: str, limit: int = MAX_RESULTS) -> PassiveResult:
     """
     Query CommonCrawl CDX API for JS files.
-    Returns deduplicated list of JS URLs.
+    Uses latest available index.
     """
+    # Get latest index
+    index_url = "https://index.commoncrawl.org/collinfo.json"
+    try:
+        idx_resp = requests.get(index_url, timeout=10,
+                                headers={"User-Agent": "Mozilla/5.0"})
+        if idx_resp.status_code == 200:
+            indexes = idx_resp.json()
+            latest  = indexes[0].get("cdx-api", "") if indexes else ""
+        else:
+            latest = "https://index.commoncrawl.org/CC-MAIN-2024-51-index"
+    except Exception:
+        latest = "https://index.commoncrawl.org/CC-MAIN-2024-51-index"
+
     params = {
-        "url":      f"*.{domain}/*.js",
-        "output":   "json",
-        "filter":   "status:200",
-        "fl":       "url",
-        "limit":    str(limit),
+        "url":    f"*.{domain}/*.js",
+        "output": "json",
+        "filter": "status:200",
+        "fl":     "url",
+        "limit":  str(limit),
     }
 
     logger.info("Querying CommonCrawl for JS URLs: %s", domain)
 
     try:
         resp = requests.get(
-            CDX_COMMONCRAWL,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": "BundleSpy Security Scanner (authorized assessment)"},
+            latest, params=params, timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
         )
+
         if resp.status_code != 200:
-            return []
+            logger.warning("CommonCrawl returned HTTP %d", resp.status_code)
+            return PassiveResult(
+                source="commoncrawl", success=False, urls=[],
+                error=f"HTTP {resp.status_code}", http_code=resp.status_code,
+            )
 
         urls = []
         for line in resp.text.strip().splitlines():
+            if not line.strip():
+                continue
             try:
                 obj = json.loads(line)
                 url = obj.get("url", "")
-                if url.endswith(".js") or ".js?" in url:
+                if url and (url.endswith(".js") or ".js?" in url):
                     urls.append(url)
             except Exception:
                 continue
 
+        urls = list(set(urls))
         logger.info("CommonCrawl returned %d JS URLs for %s", len(urls), domain)
-        return list(set(urls))
+        return PassiveResult(source="commoncrawl", success=True, urls=urls)
+
+    except requests.exceptions.Timeout:
+        return PassiveResult(source="commoncrawl", success=False, urls=[], error="Timeout")
 
     except Exception as e:
         logger.warning("CommonCrawl error: %s", e)
-        return []
+        return PassiveResult(source="commoncrawl", success=False, urls=[], error=str(e))
 
 
 def collect_passive_js_urls(
     target_url: str,
-    sources:    List[str] = None,
     limit:      int = MAX_RESULTS,
 ) -> List[str]:
     """
-    Collect JS URLs from all passive sources for a given target.
-
-    sources: list of ["wayback", "commoncrawl"] — defaults to both
-    Returns deduplicated, sorted list of JS URLs.
+    Collect JS URLs from all passive sources.
+    Returns deduplicated list of JS URLs.
+    Logs explicit status for each provider.
     """
-    if sources is None:
-        sources = ["wayback", "commoncrawl"]
-
     parsed = urlparse(target_url)
     domain = parsed.hostname or ""
     if not domain:
@@ -147,25 +189,33 @@ def collect_passive_js_urls(
 
     all_urls: Set[str] = set()
 
-    if "wayback" in sources:
-        wb_urls = wayback_js_urls(domain, limit=limit)
-        all_urls.update(wb_urls)
+    wb  = _wayback_query(domain, limit=limit)
+    if wb.success:
+        all_urls.update(wb.urls)
+        if not wb.urls:
+            logger.info("Wayback Machine: no JS URLs found for %s (API success)", domain)
+    else:
+        logger.warning("Wayback Machine failed for %s: %s", domain, wb.error)
 
-    if "commoncrawl" in sources:
-        cc_urls = commoncrawl_js_urls(domain, limit=limit)
-        all_urls.update(cc_urls)
+    cc = _commoncrawl_query(domain, limit=limit)
+    if cc.success:
+        all_urls.update(cc.urls)
+        if not cc.urls:
+            logger.info("CommonCrawl: no JS URLs found for %s (API success)", domain)
+    else:
+        logger.warning("CommonCrawl failed for %s: %s", domain, cc.error)
 
-    # Filter: only JS files, valid URLs
-    filtered = []
-    for url in all_urls:
-        if not url.startswith(("http://", "https://")):
-            continue
-        if not (url.endswith(".js") or ".js?" in url or ".js#" in url):
-            continue
-        filtered.append(url)
+    # Filter valid JS URLs
+    filtered = [
+        url for url in all_urls
+        if url.startswith(("http://", "https://"))
+        and (url.endswith(".js") or ".js?" in url or ".js#" in url)
+    ]
 
     logger.info(
-        "Passive collection complete: %d unique JS URLs for %s",
-        len(filtered), domain
+        "Passive collection: %d unique JS URLs for %s (wayback:%s cc:%s)",
+        len(filtered), domain,
+        "ok" if wb.success else "fail",
+        "ok" if cc.success else "fail",
     )
     return sorted(set(filtered))
