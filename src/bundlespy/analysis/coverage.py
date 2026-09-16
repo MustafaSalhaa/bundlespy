@@ -112,9 +112,17 @@ def compute_coverage(
 
     all_auth_urls = list(set(auth_required_urls + auth_urls_from_errors))
 
+    # Total pages = crawler pages + headless pages (headless visits additional routes)
+    headless_pages = hs.get("pages", 0)
+    total_visited  = pages_crawled + headless_pages
+    total_discovered = max(
+        len(visited_pages) if visited_pages else pages_crawled,
+        total_visited
+    )
+
     pages = PageStats(
-        discovered    = len(visited_pages) if visited_pages else pages_crawled,
-        visited       = pages_crawled,
+        discovered    = total_discovered,
+        visited       = total_visited,
         failed        = sum(1 for e in (scan_errors or [])
                            if isinstance(e, str) and
                            any(c in e for c in ["500","502","503","timeout","error"])),
