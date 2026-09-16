@@ -220,9 +220,15 @@ def compute_coverage(
     if source_maps_stat.unavailable > 0:
         blind_spots.append(BlindSpot(
             severity    = "MEDIUM",
-            description = f"{source_maps_stat.unavailable} source map(s) referenced but not available",
+            description = f"{source_maps_stat.unavailable} source map(s) referenced in JS but could not be recovered",
             urls        = unavail_urls[:3],
-            mitigation  = "Source maps may be server-side only. Check if they exist on staging.",
+            mitigation  = "The .map file exists in code but the server did not serve it. Check staging or ask the dev team.",
+        ))
+    elif sm_discovered == 0:
+        blind_spots.append(BlindSpot(
+            severity    = "LOW",
+            description = "No source maps referenced in any JS file — original source not recoverable",
+            mitigation  = "Re-run with --source-maps to attempt predictable .map path discovery.",
         ))
 
     # Routes not visited due to max-pages
