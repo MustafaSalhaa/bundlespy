@@ -692,6 +692,24 @@ def run_scan(args) -> int:
         errors         = errors,
     )
 
+    # ── Coverage metrics ──────────────────────────────────────────────────────
+    from .analysis.coverage import compute_coverage
+    coverage = compute_coverage(
+        js_files       = all_js,
+        endpoints      = all_endpoints,
+        findings       = all_findings,
+        pages_crawled  = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
+        headless_used  = args.headless,
+        source_maps    = args.source_maps,
+        chunks_used    = args.chunks,
+        passive_used   = args.passive,
+        has_cookie     = bool(args.cookie),
+        has_headless_routes = extras.get("headless_stats", {}).get("routes", 0),
+        lib_findings   = extras.get("lib_findings", []),
+        scan_errors    = errors,
+    )
+    extras["coverage"] = coverage
+
     # ── Reports ───────────────────────────────────────────────────────────────
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
