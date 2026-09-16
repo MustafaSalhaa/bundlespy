@@ -470,24 +470,39 @@ def run_scan(args) -> int:
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
     # Per-file analysis breakdown — prove every file was analyzed
+    # Build a lookup of findings per source file from already-computed all_findings
+    _findings_by_file = {}
+    for _f in all_findings:
+        _fkey = _f.file_url or ""
+        _findings_by_file.setdefault(_fkey, 0)
+        if _f.status != "likely_false_positive":
+            _findings_by_file[_fkey] += 1
+
+    _endpoints_by_file = {}
+    for _ep in all_endpoints:
+        _ekey = getattr(_ep, "source_file", "") or ""
+        _endpoints_by_file[_ekey] = _endpoints_by_file.get(_ekey, 0) + 1
+
     per_file_stats = []
     for js in all_js:
         if not js.content:
             continue
-        from .analysis.endpoint_intel import extract_endpoint_intelligence
-        from .analysis.ast_endpoints import extract_all_endpoints as _ast_eps
+        _f_infra = extract_infrastructure(js.content, js.url)
 
-        _f_findings   = scanner.scan(js.content, js.url, js.source_page)
-        _f_intel_eps  = extract_endpoint_intelligence(js.content, js.url)
-        _f_ast_eps    = _ast_eps(js.content, js.url)
-        _f_infra      = extract_infrastructure(js.content, js.url)
+        # Match findings to this file by URL
+        _sec_count = (
+            _findings_by_file.get(js.url, 0) +
+            _findings_by_file.get("html:" + js.url, 0) +
+            _findings_by_file.get("inline:" + js.url, 0)
+        )
+        _ep_count = _endpoints_by_file.get(js.url, 0)
 
         per_file_stats.append({
             "url":        js.url,
             "size":       js.size_bytes,
             "sha256":     js.sha256[:8] if js.sha256 else "",
-            "secrets":    len([f for f in _f_findings if f.status != "likely_false_positive"]),
-            "endpoints":  len(_f_intel_eps) + len(_f_ast_eps),
+            "secrets":    _sec_count,
+            "endpoints":  _ep_count,
             "infra":      len(_f_infra),
             "technology": getattr(js, "technology", ""),
         })
