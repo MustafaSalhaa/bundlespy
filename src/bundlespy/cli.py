@@ -496,46 +496,55 @@ def run_scan(args) -> int:
     from .analysis.endpoint_intel import extract_endpoint_intelligence as _ep_intel
     from .analysis.ast_endpoints import extract_all_endpoints as _ast_ep
 
+    # Per-file stats — map already-computed findings/endpoints back to each file
+    # This is accurate because it uses the SAME findings already verified correct
+    # Re-running the scanner would get different results due to env/path differences
+
+    # Build lookup: file_url (stripped) -> secret count
+    _sec_by_file = {}
+    for _f in all_findings:
+        if _f.status == "likely_false_positive":
+            continue
+        _furl = _f.file_url or ""
+        _fkey = _strip_url_prefix(_furl)
+        _sec_by_file[_fkey] = _sec_by_file.get(_fkey, 0) + 1
+
+    # Build lookup: source_file (stripped) -> endpoint count
+    _ep_by_file = {}
+    for _ep in all_endpoints:
+        _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
+        _ep_by_file[_ekey] = _ep_by_file.get(_ekey, 0) + 1
+
+    # Build lookup: source_file (stripped) -> infra count
+    _infra_by_file = {}
+    for _inf in all_infra:
+        _ikey = _strip_url_prefix(getattr(_inf, "source_file", "") or "")
+        _infra_by_file[_ikey] = _infra_by_file.get(_ikey, 0) + 1
+
     per_file_stats = []
     for js in all_js:
         if not js.content:
             continue
-
-        # Run secret scanner on THIS file's content only
-        _file_findings = scanner.scan(js.content, js.url, js.source_page or "")
-        _file_secrets  = len([f for f in _file_findings
-                              if f.status != "likely_false_positive"])
-
-        # Run endpoint extractors on THIS file's content only
-        _ep_set = set()
-        for _ep in _ep_intel(js.content, js.url):
-            _ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
-        for _ep in _ast_ep(js.content, js.url):
-            _ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
-
-        # Run infra detection on THIS file's content only
-        _f_infra = extract_infrastructure(js.content, js.url)
-
+        _js_key = _strip_url_prefix(js.url)
         per_file_stats.append({
             "url":        js.url,
             "size":       js.size_bytes,
             "sha256":     js.sha256[:8] if js.sha256 else "",
-            "secrets":    _file_secrets,
-            "endpoints":  len(_ep_set),
-            "infra":      len(_f_infra),
+            "secrets":    _sec_by_file.get(_js_key, 0),
+            "endpoints":  _ep_by_file.get(_js_key, 0),
+            "infra":      _infra_by_file.get(_js_key, 0),
             "technology": getattr(js, "technology", ""),
             "note":       "",
         })
 
-    # HTML attribute findings live on the PAGE not in a JS file
-    # Add a synthetic page entry for each page that has html: findings
+    # HTML attribute findings — shown as page-level entries
     _html_pages = {}
     for _f in all_findings:
         if _f.status == "likely_false_positive":
             continue
         _furl = _f.file_url or ""
         if _furl.startswith("html:"):
-            _page = _furl[5:]  # strip html:
+            _page = _furl[5:]
             _html_pages[_page] = _html_pages.get(_page, 0) + 1
 
     for _page_url, _count in _html_pages.items():
