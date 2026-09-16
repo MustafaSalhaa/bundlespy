@@ -413,56 +413,90 @@ def _print_finding(f, verbose=False):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-def _score_bar(score: int, width: int = 20) -> str:
-    """Render a simple ASCII progress bar for a score."""
-    filled = int(width * score / 100)
-    bar    = "█" * filled + "░" * (width - filled)
-    color  = A.GREEN if score >= 75 else A.YELLOW if score >= 50 else A.RED
-    return f"{color}{bar}{A.RESET} {score}%"
-
-
 def print_coverage(coverage) -> None:
-    """Print coverage metrics and blind-spot report."""
+    """Print observed coverage data and blind spots — real counts only."""
     if not coverage:
         return
 
     _section("COVERAGE & BLIND SPOTS", "", A.CYAN)
 
-    # Overall score
-    _p(f"  {_label('Overall coverage')}  {_score_bar(coverage.overall)}")
+    def _row(label: str, val, color=""):
+        _p(f"  {A.GREY}{label:<18}{A.RESET}  {color}{val}{A.RESET}")
+
+    # Pages
+    p = coverage.pages
+    _p(f"  {A.WHITE}{A.BOLD}Pages{A.RESET}")
+    _row("Discovered",   p.discovered)
+    _row("Visited",      p.visited,
+         A.GREEN if p.visited == p.discovered else A.YELLOW)
+    if p.failed:
+        _row("Failed", p.failed, A.RED)
+    if p.auth_required:
+        _row("Auth-required", p.auth_required, A.YELLOW)
+        for u in p.auth_urls[:3]:
+            _p(f"  {A.GREY}    {u}{A.RESET}")
     _p()
 
-    # Per-category scores
-    cats = [
-        ("JS discovery",       coverage.js_coverage),
-        ("Page discovery",     coverage.page_coverage),
-        ("Secret precision",   coverage.secret_precision),
-        ("Endpoint coverage",  coverage.endpoint_coverage),
-    ]
-    for label, score in cats:
-        _p(f"  {_label(label)}{_score_bar(score, 15)}")
+    # JavaScript
+    j = coverage.js
+    _p(f"  {A.WHITE}{A.BOLD}JavaScript{A.RESET}")
+    _row("Discovered", j.discovered)
+    _row("Analyzed",   j.analyzed,
+         A.GREEN if j.analyzed == j.discovered else A.YELLOW)
+    if j.failed:
+        _row("Failed", j.failed, A.RED)
+        for u in j.failed_urls[:2]:
+            _p(f"  {A.GREY}    {u}{A.RESET}")
     _p()
 
-    # Summary line
-    _p(f"  {A.GREY}{coverage.summary}{A.RESET}")
-    _p()
+    # Routes
+    r = coverage.routes
+    if r.discovered > 0:
+        _p(f"  {A.WHITE}{A.BOLD}Routes{A.RESET}")
+        _row("Discovered", r.discovered)
+        _row("Visited",    r.visited,
+             A.GREEN if r.visited >= r.discovered else A.YELLOW)
+        if r.unvisited:
+            _row("Unvisited", r.unvisited, A.YELLOW)
+        _p()
 
-    # Blind spots — always show, this is the honest part
+    # Runtime
+    rt = coverage.runtime
+    has_runtime = any([rt.api_requests, rt.websockets, rt.workers, rt.iframes])
+    if has_runtime:
+        _p(f"  {A.WHITE}{A.BOLD}Runtime{A.RESET}")
+        if rt.api_requests: _row("API requests",  rt.api_requests, A.GREEN)
+        if rt.websockets:   _row("WebSockets",    rt.websockets,   A.GREEN)
+        if rt.workers:      _row("Workers",       rt.workers,      A.GREEN)
+        if rt.iframes:      _row("Iframes",       rt.iframes,      A.GREEN)
+        _p()
+
+    # Source maps
+    sm = coverage.source_maps
+    if sm.discovered > 0:
+        _p(f"  {A.WHITE}{A.BOLD}Source Maps{A.RESET}")
+        _row("Discovered",  sm.discovered)
+        _row("Recovered",   sm.recovered,
+             A.GREEN if sm.recovered == sm.discovered else A.YELLOW)
+        if sm.unavailable:
+            _row("Unavailable", sm.unavailable, A.YELLOW)
+            for u in sm.unavailable_urls[:2]:
+                _p(f"  {A.GREY}    {u}{A.RESET}")
+        _p()
+
+    # Blind spots
     if coverage.blind_spots:
-        _p(f"  {A.YELLOW}{A.BOLD}BLIND SPOTS{A.RESET}  {A.GREY}(what BundleSpy cannot see){A.RESET}")
+        _p(f"  {A.ORANGE}{A.BOLD}BLIND SPOTS{A.RESET}")
         _p()
         for bs in coverage.blind_spots:
-            sev_color = A.RED if bs.severity == "HIGH" else A.YELLOW if bs.severity == "MEDIUM" else A.GREY
-            _p(f"  {sev_color}▸ [{bs.severity}]{A.RESET}  {bs.description}")
-            _p(f"  {A.GREY}    Fix: {bs.mitigation}{A.RESET}")
+            sc = (A.RED    if bs.severity == "HIGH"   else
+                  A.YELLOW if bs.severity == "MEDIUM" else A.GREY)
+            _p(f"  {sc}[{bs.severity}]{A.RESET}  {bs.description}")
+            for u in (bs.urls or [])[:3]:
+                _p(f"  {A.GREY}         {u}{A.RESET}")
+            if bs.mitigation:
+                _p(f"  {A.GREY}         → {bs.mitigation}{A.RESET}")
             _p()
-
-    # Recommendations
-    if coverage.recommendations:
-        _p(f"  {A.CYAN}{A.BOLD}RECOMMENDED NEXT STEPS{A.RESET}")
-        for i, rec in enumerate(coverage.recommendations, 1):
-            _p(f"  {A.GREY}  {i}. {rec}{A.RESET}")
-        _p()
 
 
 def print_attack_surface(surface):
