@@ -695,18 +695,21 @@ def run_scan(args) -> int:
     # ── Coverage metrics ──────────────────────────────────────────────────────
     from .analysis.coverage import compute_coverage
     coverage = compute_coverage(
-        js_files       = all_js,
-        endpoints      = all_endpoints,
-        findings       = all_findings,
-        pages_crawled  = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
-        headless_used  = args.headless,
-        source_maps    = args.source_maps,
-        chunks_used    = args.chunks,
-        passive_used   = args.passive,
-        has_cookie     = bool(args.cookie),
+        js_files            = all_js,
+        endpoints           = all_endpoints,
+        findings            = all_findings,
+        pages_crawled       = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
+        headless_used       = args.headless,
+        source_maps         = args.source_maps,
+        chunks_used         = args.chunks,
+        passive_used        = args.passive,
+        has_cookie          = bool(args.cookie),
         has_headless_routes = extras.get("headless_stats", {}).get("routes", 0),
-        lib_findings   = extras.get("lib_findings", []),
-        scan_errors    = errors,
+        lib_findings        = extras.get("lib_findings", []),
+        scan_errors         = errors,
+        headless_stats      = extras.get("headless_stats", {}),
+        sm_details          = extras.get("source_map_details", {}),
+        visited_pages       = getattr(crawler if not args.passive else None, "visited_pages", set()) or set(),
     )
     extras["coverage"] = coverage
 
