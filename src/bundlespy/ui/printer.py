@@ -132,9 +132,19 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
         elif "webworker" in (js.technology or ""):
             tag = f" {A.PURPLE}[worker]{A.RESET}"
 
-        # Filename for display
-        fname = url.split("/")[-1].split("?")[0] or url
-        fname = fname[:35].ljust(36)
+        # Display: show the full path, not just filename
+        # Strip scheme+host for cleaner display
+        import re as _re
+        _display = url
+        # Remove scheme://host prefix to show just the path
+        _display = _re.sub(r'^https?://[^/]+', '', _display) or url
+        # If empty after strip (root page), show the original filename
+        if not _display:
+            _display = url.split("/")[-1].split("?")[0] or url
+        # For inline scripts from page roots, show the page path
+        if _display == "" or _display == "/":
+            _display = "/" + url.rstrip("/").split("/")[-1]
+        fname = _display[:40].ljust(41)
 
         # Analysis stats for this file
         st = stats_map.get(js.url)
