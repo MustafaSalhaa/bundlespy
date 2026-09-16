@@ -279,7 +279,13 @@ def run_scan(args) -> int:
     errors: list = []
 
     # ── Active crawl ──────────────────────────────────────────────────────────
-    if not args.passive:
+    # Skip crawler when headless + credentials are supplied.
+    # The unauthenticated crawler would only hit the login page and waste time.
+    # Headless handles full discovery with the authenticated session instead.
+    _skip_crawler = args.headless and bool(args.cookie or args.header)
+    crawler = None  # may stay None if skipped or passive
+
+    if not args.passive and not _skip_crawler:
         if not args.quiet:
             phase("Crawling target")
         crawler = Crawler(
