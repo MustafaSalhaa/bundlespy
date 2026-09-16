@@ -490,75 +490,66 @@ def run_scan(args) -> int:
         _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
         _endpoints_by_stripped[_ekey] = _endpoints_by_stripped.get(_ekey, 0) + 1
 
-    # Per-file stats — accurate counts per individual file
-    # Use content hash to match findings to specific inline scripts
+    # Per-file stats — run each extractor on each file individually
+    # HTML attribute findings (html: prefix) are PAGE-level, not script-level
+    # They are shown separately — we do NOT assign them to inline scripts
     from .analysis.endpoint_intel import extract_endpoint_intelligence as _ep_intel
     from .analysis.ast_endpoints import extract_all_endpoints as _ast_ep
-
-    # Build finding lookup by content sha256 (most precise for inline scripts)
-    # and by file_url stripped (for external JS files)
-    _findings_by_sha = {}     # sha256 -> count
-    _findings_by_url = {}     # stripped url -> count
-    _findings_by_page = {}    # page url -> count (for HTML attribute findings)
-
-    for _f in all_findings:
-        if _f.status == "likely_false_positive":
-            continue
-        # HTML attribute findings: file_url is html:PAGE_URL
-        _furl = _f.file_url or ""
-        _fstripped = _strip_url_prefix(_furl)
-        _findings_by_url[_fstripped] = _findings_by_url.get(_fstripped, 0) + 1
 
     per_file_stats = []
     for js in all_js:
         if not js.content:
             continue
 
-        # Run extractors on THIS specific file content
-        _file_ep_set = set()
-        for _ep in _ep_intel(js.content, js.url):
-            _file_ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
-        for _ep in _ast_ep(js.content, js.url):
-            _file_ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
-
-        # Run secret scanner on THIS specific file content
+        # Run secret scanner on THIS file's content only
         _file_findings = scanner.scan(js.content, js.url, js.source_page or "")
         _file_secrets  = len([f for f in _file_findings
                               if f.status != "likely_false_positive"])
 
-        # For HTML-sourced findings, match to the source PAGE of this script
-        # html:https://odehfin.com/admin matches inline scripts from /admin
-        _source_page = _strip_url_prefix(js.source_page or js.url)
-        _js_stripped  = _strip_url_prefix(js.url)
-        _html_secrets_page = _findings_by_url.get(_source_page, 0)
-        _html_secrets_url  = _findings_by_url.get(_js_stripped, 0)
+        # Run endpoint extractors on THIS file's content only
+        _ep_set = set()
+        for _ep in _ep_intel(js.content, js.url):
+            _ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
+        for _ep in _ast_ep(js.content, js.url):
+            _ep_set.add(_ep.url.rstrip("/").lower().split("?")[0])
 
-        # Only assign page-level HTML findings to the LARGEST inline script
-        # to avoid showing the same count on every inline script from the page
-        _is_largest_on_page = True
-        if js.url.startswith("inline:") or js.url.startswith("html:"):
-            _same_page = [
-                j for j in all_js
-                if _strip_url_prefix(j.source_page or j.url) == _source_page
-                and j.size_bytes > (js.size_bytes or 0)
-            ]
-            if _same_page:
-                _is_largest_on_page = False
-
-        _html_secrets = (_html_secrets_page + _html_secrets_url) if _is_largest_on_page else 0
-        _total_secrets = _file_secrets + _html_secrets
-
+        # Run infra detection on THIS file's content only
         _f_infra = extract_infrastructure(js.content, js.url)
 
         per_file_stats.append({
             "url":        js.url,
             "size":       js.size_bytes,
             "sha256":     js.sha256[:8] if js.sha256 else "",
-            "secrets":    _total_secrets,
-            "endpoints":  len(_file_ep_set),
+            "secrets":    _file_secrets,
+            "endpoints":  len(_ep_set),
             "infra":      len(_f_infra),
             "technology": getattr(js, "technology", ""),
+            "note":       "",
         })
+
+    # HTML attribute findings live on the PAGE not in a JS file
+    # Add a synthetic page entry for each page that has html: findings
+    _html_pages = {}
+    for _f in all_findings:
+        if _f.status == "likely_false_positive":
+            continue
+        _furl = _f.file_url or ""
+        if _furl.startswith("html:"):
+            _page = _furl[5:]  # strip html:
+            _html_pages[_page] = _html_pages.get(_page, 0) + 1
+
+    for _page_url, _count in _html_pages.items():
+        per_file_stats.append({
+            "url":        "html:" + _page_url,
+            "size":       0,
+            "sha256":     "",
+            "secrets":    _count,
+            "endpoints":  0,
+            "infra":      0,
+            "technology": "html-attrs",
+            "note":       "HTML attributes",
+        })
+
     extras["per_file_stats"] = per_file_stats
 
     # Add every crawled page as a discovered route endpoint
