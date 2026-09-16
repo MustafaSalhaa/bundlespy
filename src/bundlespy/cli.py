@@ -568,11 +568,7 @@ def run_scan(args) -> int:
             # For inline scripts: show secrets only on the FIRST inline script
             # of each page (avoid showing same count on all 4 scripts)
             _page_key = _strip_url_prefix(js.source_page or js.url)
-            if _page_key not in _inline_page_shown:
-                _inline_page_shown.add(_page_key)
-                _sec_count = _sec_by_file.get(_js_key, 0)
-            else:
-                _sec_count = 0
+            _sec_count = _sec_by_file.get(_js_key, 0)
         else:
             _sec_count = _sec_by_file.get(_js_key, 0)
 
