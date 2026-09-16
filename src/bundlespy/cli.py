@@ -249,7 +249,7 @@ def run_scan(args) -> int:
         if args.stealth:
             mode += " + Stealth"
         if args.cookie or args.header:
-            mode += " + Authenticated"
+            mode += " + Credentials supplied"
         scope_label = "Subdomains included" if args.subdomains else "Strict"
         print_header(target, mode=mode, scope=scope_label, version=PROJECT_VERSION, author=AUTHOR_NAME)
 
@@ -345,7 +345,7 @@ def run_scan(args) -> int:
     if args.headless:
         if not args.quiet:
             phase("Launching advanced headless browser")
-        from .discovery.headless import collect_headless_full
+        from .discovery.headless import collect_headless_full, _parse_cookie_string
         # Extract routes from already-collected JS files
         # so headless visits every Angular/React/Vue route
         from .analysis.ast_endpoints import extract_all_endpoints as _extract_eps
@@ -374,17 +374,42 @@ def run_scan(args) -> int:
         if _static_routes and not args.quiet and not getattr(args, "silent", False):
             phase(f"Headless will visit {len(all_seed_urls)} pages ({len(_static_routes)} from JS routes)")
 
-        headless_result = collect_headless_full(target, scope,
-                                                stealth=args.stealth,
-                                                timeout=args.timeout,
-                                                max_pages=args.max_pages,
-                                                external_seen=crawler_seen,
-                                                seed_urls=all_seed_urls,
-                                                interact=getattr(args, "interact", False),
-                                                workers=getattr(args, "workers", 3))
-        headless_files    = headless_result.get("js_files", [])
+        # Parse cookie string into Playwright cookie dicts
+        _parsed_domain = _urlparse(target).netloc.split(":")[0]
+        _playwright_cookies = _parse_cookie_string(args.cookie, _parsed_domain) if args.cookie else []
+
+        # Pre-seed headless dedup with content hashes from crawler JS files.
+        # This prevents headless from counting a file it sees again (same content,
+        # possibly same or different URL) as a new unique JS asset.
+        _crawler_js_hashes = {js.sha256 for js in all_js if js.sha256}
+
+        headless_result = collect_headless_full(
+            target, scope,
+            stealth       = args.stealth,
+            timeout       = args.timeout,
+            max_pages     = args.max_pages,
+            external_seen = crawler_seen,
+            seed_urls     = all_seed_urls,
+            interact      = getattr(args, "interact", False),
+            workers       = getattr(args, "workers", 3),
+            cookies       = _playwright_cookies,
+            extra_headers = extra_headers,
+            seen_hashes   = _crawler_js_hashes,
+        )
+        headless_files     = headless_result.get("js_files", [])
         headless_endpoints = headless_result.get("endpoints", [])
-        headless_stats    = headless_result.get("stats", {})
+        headless_stats     = headless_result.get("stats", {})
+
+        # Store auth result — used for mode label correction and report
+        _auth_result = headless_result.get("auth_result")
+        if _auth_result:
+            extras["auth_result"] = _auth_result
+            # Correct the mode label based on actual verification
+            if _auth_result["credentials_supplied"]:
+                if _auth_result["authenticated"]:
+                    extras["auth_verified"] = True
+                else:
+                    extras["auth_verified"] = False
 
         all_js.extend(headless_files)
 
