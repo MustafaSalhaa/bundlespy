@@ -548,13 +548,22 @@ def run_scan(args) -> int:
     if not args.quiet:
         phase("Analyzing JavaScript")
     import time as _time
+    import logging as _logging
+    _logger = _logging.getLogger("bundlespy.cli")
     _t_analysis = _time.monotonic()
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
-    import logging as _logging
-    _logger = _logging.getLogger("bundlespy.cli")
     _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
+
+    # Re-categorize UNKNOWN endpoints using full classifier
+    from .analysis.endpoints import _categorize_path as _recat
+    from urllib.parse import urlparse as _uprc
+    for _ep in all_endpoints:
+        if _ep.category in ("UNKNOWN", ""):
+            _ep_path = _uprc(_ep.url).path or _ep.url
+            _ep.category = _recat(_ep_path)
+
     # Merge HTML attribute findings BEFORE building per-file stats
     # so html: findings are visible to the stats builder
     html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
@@ -719,11 +728,17 @@ def run_scan(args) -> int:
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
+        from .analysis.endpoints import _categorize_path as _cat_path
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
         for ep in all_endpoints_extra:
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_ep_keys:
                 seen_ep_keys.add(key)
+                # Re-categorize UNKNOWN endpoints using full classifier
+                if ep.category in ("UNKNOWN", ""):
+                    from urllib.parse import urlparse as _upep
+                    _ep_path = _upep(ep.url).path or ep.url
+                    ep.category = _cat_path(_ep_path)
                 all_endpoints.append(ep)
     if not args.quiet:
         phase_done("Analysis complete",
