@@ -45,6 +45,7 @@ class Finding:
     remediation: str
     false_positive_notes: str
     status: str             # candidate / likely_secret / likely_false_positive
+    classification: str = ""  # PUBLIC_IDENTIFIER / SECRET / CREDENTIAL / TOKEN / CONFIG
     first_seen: datetime = field(default_factory=datetime.utcnow)
     occurrences: List[str] = field(default_factory=list)
 
