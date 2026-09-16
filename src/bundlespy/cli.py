@@ -521,16 +521,35 @@ def run_scan(args) -> int:
         _ikey = _strip_url_prefix(getattr(_inf, "source_file", "") or "")
         _infra_by_file[_ikey] = _infra_by_file.get(_ikey, 0) + 1
 
+    # Track which inline pages already showed their secret count
+    # to avoid repeating it on every inline script from the same page
+    _inline_page_shown = set()
+
     per_file_stats = []
     for js in all_js:
         if not js.content:
             continue
+
         _js_key = _strip_url_prefix(js.url)
+        _is_inline = js.url.startswith("inline:") or js.url.startswith("html:")
+
+        if _is_inline:
+            # For inline scripts: show secrets only on the FIRST inline script
+            # of each page (avoid showing same count on all 4 scripts)
+            _page_key = _strip_url_prefix(js.source_page or js.url)
+            if _page_key not in _inline_page_shown:
+                _inline_page_shown.add(_page_key)
+                _sec_count = _sec_by_file.get(_js_key, 0)
+            else:
+                _sec_count = 0
+        else:
+            _sec_count = _sec_by_file.get(_js_key, 0)
+
         per_file_stats.append({
             "url":        js.url,
             "size":       js.size_bytes,
             "sha256":     js.sha256[:8] if js.sha256 else "",
-            "secrets":    _sec_by_file.get(_js_key, 0),
+            "secrets":    _sec_count,
             "endpoints":  _ep_by_file.get(_js_key, 0),
             "infra":      _infra_by_file.get(_js_key, 0),
             "technology": getattr(js, "technology", ""),
