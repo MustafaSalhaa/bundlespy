@@ -232,11 +232,17 @@ def compute_coverage(
             urls        = unavail_urls[:3],
             mitigation  = "The .map file exists in code but the server did not serve it. Check staging or ask the dev team.",
         ))
-    elif sm_discovered == 0:
+    elif source_maps and sm_discovered == 0:
         blind_spots.append(BlindSpot(
             severity    = "LOW",
-            description = "No source maps referenced in any JS file — original source not recoverable",
-            mitigation  = "Re-run with --source-maps to attempt predictable .map path discovery.",
+            description = "Source maps scanned but none found — no .map references in JS and predictable paths returned nothing",
+            mitigation  = "Source maps may be disabled in production. Check if staging exposes them.",
+        ))
+    elif not source_maps:
+        blind_spots.append(BlindSpot(
+            severity    = "LOW",
+            description = "Source map recovery not attempted",
+            mitigation  = "Re-run with --source-maps to attempt recovery of original pre-minification source.",
         ))
 
     # Routes not visited due to max-pages
