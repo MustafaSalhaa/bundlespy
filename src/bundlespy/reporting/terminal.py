@@ -9,6 +9,7 @@ from ..ui.printer import (
     print_infrastructure, print_subdomains, print_summary,
     print_source_maps, print_webpack, print_passive,
     print_headless, print_graphql, print_secret_analysis,
+    print_attack_surface, print_coverage, _print_libraries,
 )
 
 
@@ -82,5 +83,19 @@ def print_report(
 
     if subdomains:
         print_subdomains(subdomains)
+
+    # Vulnerable libraries
+    if extras.get("lib_findings"):
+        _print_libraries(extras["lib_findings"])
+
+    # Attack surface
+    surface = extras.get("attack_surface")
+    if surface:
+        print_attack_surface(surface)
+
+    # Coverage and blind spots
+    coverage = extras.get("coverage")
+    if coverage:
+        print_coverage(coverage)
 
     print_summary(result, extras=extras, report_paths=report_paths)
