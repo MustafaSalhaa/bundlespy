@@ -191,12 +191,11 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
             _frag_match = re.search(r"#script-(\d+)-[a-f0-9]+$", bare)
             if _frag_match:
                 _script_num = _frag_match.group(1)
-                # Page path only (strip scheme+host+fragment)
-                _page_path = re.sub(r"^https?://[^/]+", "", bare.split("#")[0]) or "/"
-                if _page_path == "/":
-                    url = f"script {_script_num} @ /"
-                else:
-                    url = f"script {_script_num} @ {_page_path}"
+                # Full host + path (strip fragment only)
+                _page_display = bare.split("#")[0]
+                # Strip scheme for brevity: https://odehfin.com/admin -> odehfin.com/admin
+                _page_display = re.sub(r"^https?://", "", _page_display).rstrip("/") or "/"
+                url = f"script {_script_num} @ {_page_display}"
             else:
                 url = re.sub(r"^https?://[^/]+", "", bare) or bare
             tag = f" {A.GREY}[inline]{A.RESET}"
