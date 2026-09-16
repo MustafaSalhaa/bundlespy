@@ -519,11 +519,15 @@ def print_coverage(coverage) -> None:
 
 
 def print_attack_surface(surface):
-    if not surface or surface.get("total_items", 0) == 0:
-        # Still show state-change / auth / admin if present
-        if not (surface.get("state_change") or surface.get("auth_surface")
-                or surface.get("admin_surface")):
-            return
+    if not surface:
+        return
+    # Only show section if there is something meaningful to display
+    has_content = (
+        surface.get("total_items", 0) > 0
+        or surface.get("state_change")
+    )
+    if not has_content:
+        return
 
     total = surface.get("total_items", 0)
     _section("ATTACK SURFACE", str(total), A.RED)
