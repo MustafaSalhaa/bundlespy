@@ -109,21 +109,22 @@ HTML_PATTERNS = [
         "remediation":  "Remove immediately. Rotate in AWS console.",
     },
 
-    # Netlify / Vercel / hosting site IDs
+    # Netlify / Vercel / hosting site IDs — public identifiers, not secrets
     {
         "id":          "NETLIFY_SITE_ID",
         "name":        "Netlify Site ID",
         "category":    "Hosting",
-        "severity":    "LOW",
+        "severity":    "INFO",
         "confidence":  0.85,
+        "classification": "PUBLIC_IDENTIFIER",
         "pattern":     re.compile(
             r'data-netlify-(?:rum-site-id|site-id)\s*=\s*["\']'
             r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
             r'["\']',
             re.IGNORECASE,
         ),
-        "description":  "Netlify Site ID found in HTML attribute.",
-        "remediation":  "Site IDs are low risk alone but confirm hosting provider.",
+        "description":  "Netlify Site ID found in HTML attribute. This is a public identifier, not a secret credential.",
+        "remediation":  "No action required. Site IDs are public by design.",
     },
 
     # Firebase config in meta or data attributes
@@ -266,6 +267,7 @@ def scan_html(html: str, page_url: str) -> List[Finding]:
                 remediation          = rule["remediation"],
                 false_positive_notes = "",
                 status               = "likely_secret" if rule["confidence"] >= 0.85 else "candidate",
+                classification       = rule.get("classification", ""),
                 occurrences          = [f"html:{page_url}:{line_no}"],
             )
             findings.append(finding)
