@@ -470,39 +470,69 @@ def run_scan(args) -> int:
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
     # Per-file analysis breakdown — prove every file was analyzed
-    # Build a lookup of findings per source file from already-computed all_findings
-    _findings_by_file = {}
-    for _f in all_findings:
-        _fkey = _f.file_url or ""
-        _findings_by_file.setdefault(_fkey, 0)
-        if _f.status != "likely_false_positive":
-            _findings_by_file[_fkey] += 1
+    # Build per-file stats from already-computed findings and endpoints
+    # Strip all URL prefixes for matching (html:, inline:, sourcemap://, etc.)
+    def _strip_url_prefix(url: str) -> str:
+        for pfx in ["html:", "inline:", "sourcemap://", "local://", "headless://"]:
+            if url.startswith(pfx):
+                return url[len(pfx):]
+        return url
 
-    _endpoints_by_file = {}
+    # Build lookup: stripped_url -> count
+    _findings_by_stripped = {}
+    for _f in all_findings:
+        _fkey = _strip_url_prefix(_f.file_url or "")
+        if _f.status != "likely_false_positive":
+            _findings_by_stripped[_fkey] = _findings_by_stripped.get(_fkey, 0) + 1
+
+    _endpoints_by_stripped = {}
     for _ep in all_endpoints:
-        _ekey = getattr(_ep, "source_file", "") or ""
-        _endpoints_by_file[_ekey] = _endpoints_by_file.get(_ekey, 0) + 1
+        _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
+        _endpoints_by_stripped[_ekey] = _endpoints_by_stripped.get(_ekey, 0) + 1
+
+    # Build finding/endpoint lookup by sha256 for inline scripts
+    # (multiple inline scripts from same page share the same URL)
+    _findings_by_hash = {}
+    for _f in all_findings:
+        if _f.sha256:
+            _findings_by_hash[_f.sha256] = _findings_by_hash.get(_f.sha256, 0) + 1
+
+    # For each JS file, run quick per-file extraction to get accurate counts
+    from .analysis.endpoint_intel import extract_endpoint_intelligence as _ep_intel
+    from .analysis.ast_endpoints import extract_all_endpoints as _ast_ep
 
     per_file_stats = []
     for js in all_js:
         if not js.content:
             continue
-        _f_infra = extract_infrastructure(js.content, js.url)
 
-        # Match findings to this file by URL
-        _sec_count = (
-            _findings_by_file.get(js.url, 0) +
-            _findings_by_file.get("html:" + js.url, 0) +
-            _findings_by_file.get("inline:" + js.url, 0)
-        )
-        _ep_count = _endpoints_by_file.get(js.url, 0)
+        # Per-file endpoint count: run extractors on this specific file
+        _file_eps = set()
+        for _ep in _ep_intel(js.content, js.url):
+            _file_eps.add(_ep.url.rstrip("/").lower().split("?")[0])
+        for _ep in _ast_ep(js.content, js.url):
+            _file_eps.add(_ep.url.rstrip("/").lower().split("?")[0])
+
+        # Per-file secret count: use scanner on this specific file
+        _file_findings = scanner.scan(js.content, js.url, js.source_page or "")
+        _file_secrets = len([f for f in _file_findings
+                             if f.status != "likely_false_positive"])
+
+        # Also check if any global findings came from this file's URL variants
+        _js_stripped = _strip_url_prefix(js.url)
+        _url_secrets = _findings_by_stripped.get(_js_stripped, 0)
+
+        # Take the max (scanner may miss HTML attribute findings)
+        _total_secrets = max(_file_secrets, _url_secrets)
+
+        _f_infra = extract_infrastructure(js.content, js.url)
 
         per_file_stats.append({
             "url":        js.url,
             "size":       js.size_bytes,
             "sha256":     js.sha256[:8] if js.sha256 else "",
-            "secrets":    _sec_count,
-            "endpoints":  _ep_count,
+            "secrets":    _total_secrets,
+            "endpoints":  len(_file_eps),
             "infra":      len(_f_infra),
             "technology": getattr(js, "technology", ""),
         })
