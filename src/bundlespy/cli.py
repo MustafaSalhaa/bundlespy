@@ -505,8 +505,12 @@ def run_scan(args) -> int:
     # ── Analysis ──────────────────────────────────────────────────────────────
     if not args.quiet:
         phase("Analyzing JavaScript")
+    import time as _time
+    _t_analysis = _time.monotonic()
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
+    _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
+    logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
 
     # Merge HTML attribute findings BEFORE building per-file stats
     # so html: findings are visible to the stats builder
