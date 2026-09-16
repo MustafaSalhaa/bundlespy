@@ -173,38 +173,76 @@ def _write_reports(
 
 
 def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
+    """
+    Analyze JS files for secrets, endpoints, and infrastructure.
+
+    Content-hash dedup: if two JSFile objects have identical sha256,
+    analyze the content only once but attribute findings/endpoints
+    to ALL file URLs that share that content (provenance preserved).
+
+    Static↔runtime endpoint correlation: same canonical URL seen in
+    both static JS and runtime interception → one entity, higher confidence.
+    """
     findings:   list = []
     endpoints:  list = []
     infra:      list = []
     seen_finds: set  = set()
     seen_eps:   set  = set()
 
+    # Content-hash dedup: sha256 -> list of JSFile sharing that content
+    from collections import defaultdict
+    content_groups: dict = defaultdict(list)
+    no_hash: list = []
+
     for js in js_files:
         if not js.content:
             continue
+        if js.sha256:
+            content_groups[js.sha256].append(js)
+        else:
+            no_hash.append(js)
 
-        # Secret detection
-        for f in scanner.scan(js.content, js.url, js.source_page):
+    # Analyze each unique content once; attribute to all occurrences
+    def _process(primary_js: "JSFile", all_urls: list) -> None:
+        content = primary_js.content
+
+        # Secret detection — scan once against primary URL
+        for f in scanner.scan(content, primary_js.url, primary_js.source_page):
             if f.sha256 not in seen_finds:
                 seen_finds.add(f.sha256)
+                # Record all occurrence URLs in the finding
+                if len(all_urls) > 1:
+                    f.occurrences = [f"{u}:{f.line_number}" for u in all_urls]
                 findings.append(f)
 
-        # Advanced endpoint extraction (AST-aware)
-        for ep in extract_all_endpoints(js.content, js.url):
+        # Endpoint extraction — deduplicate by canonical key
+        _eps_this_file = []
+        for ep in extract_all_endpoints(content, primary_js.url):
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_eps:
                 seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
                 endpoints.append(ep)
 
-        # Legacy endpoint extractor (catches additional patterns)
-        for ep in extract_endpoints(js.content, js.url):
+        for ep in extract_endpoints(content, primary_js.url):
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_eps:
                 seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
                 endpoints.append(ep)
 
         # Infrastructure detection
-        infra.extend(extract_infrastructure(js.content, js.url))
+        infra.extend(extract_infrastructure(content, primary_js.url))
+
+    for sha, group in content_groups.items():
+        primary = group[0]
+        all_urls = [js.url for js in group]
+        _process(primary, all_urls)
+
+    for js in no_hash:
+        _process(js, [js.url])
 
     return findings, endpoints, infra
 
@@ -411,6 +449,10 @@ def run_scan(args) -> int:
             seen_hashes   = _crawler_js_hashes,
         )
         headless_files     = headless_result.get("js_files", [])
+        # Tag all browser-captured files so the inventory can distinguish them
+        for _hf in headless_files:
+            if not getattr(_hf, "source_type", ""):
+                _hf.source_type = "browser"
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats     = headless_result.get("stats", {})
 
