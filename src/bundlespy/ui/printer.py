@@ -68,6 +68,61 @@ def print_header(target, mode="Active", scope="Strict", version="1.0.0", author=
     _p()
 
 
+# ── Authentication result ─────────────────────────────────────────────────────
+
+def print_auth_result(auth: dict) -> None:
+    """
+    Print the authentication verification block.
+    Only called when credentials were supplied (cookie/header).
+    """
+    if not auth:
+        return
+
+    _section("AUTHENTICATION")
+
+    verified   = auth.get("authenticated", False)
+    supplied   = auth.get("credentials_supplied", False)
+    n_cookies  = auth.get("cookies_injected", 0)
+    init_url   = auth.get("initial_url", "")
+    status     = auth.get("status", 0)
+    final_url  = auth.get("final_url", "")
+    chain      = auth.get("redirect_chain", [])
+    ck_present = auth.get("cookies_present", [])
+    reason     = auth.get("reason", "")
+
+    _p(f"  {_label('Credentials')}{'YES' if supplied else 'NO'}")
+    _p(f"  {_label('Cookies injected')}{n_cookies}")
+    _p(f"  {_label('Initial URL')}{init_url}")
+
+    status_color = A.GREEN if status == 200 else A.ORANGE if status in (301, 302) else A.RED
+    _p(f"  {_label('Status')}{status_color}{status}{A.RESET}")
+    _p(f"  {_label('Final URL')}{final_url}")
+
+    redirected = init_url.rstrip("/") != final_url.rstrip("/") if init_url and final_url else False
+    to_login   = any(k in final_url.lower() for k in ["/login", "/signin", "/sign-in"])
+
+    redir_color = A.RED if to_login else A.ORANGE if redirected else A.GREEN
+    redir_label = "YES (to login)" if to_login else "YES" if redirected else "NO"
+    _p(f"  {_label('Redirected')}{redir_color}{redir_label}{A.RESET}")
+
+    if chain:
+        _p(f"  {_label('Redirect chain')}{A.GREY}{' → '.join(chain[:5])}{A.RESET}")
+
+    if ck_present:
+        _p(f"  {_label('Browser cookies')}{A.GREY}{', '.join(ck_present[:8])}{A.RESET}")
+
+    if verified:
+        _p(f"  {_label('Auth state')}{A.GREEN}{A.BOLD}VERIFIED{A.RESET}")
+    else:
+        _p(f"  {_label('Auth state')}{A.RED}{A.BOLD}NOT VERIFIED{A.RESET}")
+        if reason:
+            _p(f"  {_label('Reason')}{A.GREY}{reason}{A.RESET}")
+        _p(f"  {A.YELLOW}Credentials supplied but authentication not verified.{A.RESET}")
+        _p(f"  {A.YELLOW}Results reflect the unauthenticated application state.{A.RESET}")
+
+    _p()
+
+
 # ── Phase lines ───────────────────────────────────────────────────────────────
 
 def phase(label):
@@ -836,6 +891,10 @@ def print_report(
     verbose:            bool = False,
 ) -> None:
     extras = extras or {}
+
+    # Authentication verification block — shown first when credentials were used
+    if extras.get("auth_result"):
+        print_auth_result(extras["auth_result"])
 
     print_js_inventory(result.js_files, verbose=verbose,
                         per_file_stats=extras.get("per_file_stats"))
