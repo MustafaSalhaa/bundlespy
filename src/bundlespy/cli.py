@@ -475,8 +475,8 @@ def run_scan(args) -> int:
     def _strip_url_prefix(url: str) -> str:
         for pfx in ["html:", "inline:", "sourcemap://", "local://", "headless://"]:
             if url.startswith(pfx):
-                return url[len(pfx):]
-        return url
+                return url[len(pfx):].rstrip("/")
+        return url.rstrip("/")
 
     # Build lookup: stripped_url -> count
     _findings_by_stripped = {}
