@@ -3,6 +3,7 @@ BundleSpy terminal UI — clean, modern, professional.
 """
 
 import os
+import re
 import sys
 import shutil
 from typing import List, Optional, Dict
