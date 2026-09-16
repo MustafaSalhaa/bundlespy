@@ -22,6 +22,7 @@ class JSFile:
     has_source_map: bool = False
     source_map_url: str = ""
     technology: str = ""
+    source_type: str = "static"   # static | browser | inline | sourcemap | chunk
 
 
 @dataclass
@@ -79,6 +80,7 @@ class Endpoint:
     auth_context:    str   = ""     # "Bearer", "Cookie", "ApiKey", "None"
     evidence:        str   = ""     # Raw JS snippet that revealed this endpoint
     kind:            str   = "api"  # api / route / external / websocket / graphql
+    source_type:     str   = "static"  # static | runtime | correlated
 
 
 @dataclass
