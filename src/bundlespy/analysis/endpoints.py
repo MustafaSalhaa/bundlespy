@@ -50,7 +50,16 @@ def _categorize_path(path: str) -> str:
         return "GRAPHQL"
     if any(k in lower for k in ["/ws/", "/socket", "wss://", "ws://"]):
         return "WEBSOCKET"
+    if any(k in lower for k in ["/.netlify/functions/", "/.netlify/", "/functions/", "/serverless/", "/lambdas/", "/fn/"]):
+        return "SERVERLESS"
     if any(k in lower for k in ["/api/", "/v1/", "/v2/", "/v3/", "/rest/"]):
+        return "API"
+    # Heuristic: path segments that look like API actions (verb-noun, kebab-case with known verbs)
+    _seg = lower.strip("/").split("/")[-1] if lower.strip("/") else ""
+    if any(_seg.startswith(v) or _seg.endswith(v) for v in [
+        "create", "update", "delete", "toggle", "fetch", "get", "set",
+        "submit", "send", "process", "generate", "search", "list",
+    ]):
         return "API"
     return "UNKNOWN"
 
