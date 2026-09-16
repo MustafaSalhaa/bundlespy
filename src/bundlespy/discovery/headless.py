@@ -520,6 +520,56 @@ class PageStabilizer:
 
 # ── HeadlessEngine ────────────────────────────────────────────────────────────
 
+def _parse_cookie_string(cookie_str: str, domain: str) -> List[dict]:
+    """
+    Parse a browser-style cookie string into Playwright cookie dicts.
+    e.g. "laravel-session=abc123; XSRF-TOKEN=xyz" -> [{name, value, domain, path}]
+    """
+    cookies = []
+    if not cookie_str:
+        return cookies
+    for pair in cookie_str.split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" in pair:
+            name, _, value = pair.partition("=")
+            name  = name.strip()
+            value = value.strip()
+        else:
+            name  = pair.strip()
+            value = ""
+        if name:
+            cookies.append({
+                "name":   name,
+                "value":  value,
+                "domain": domain,
+                "path":   "/",
+            })
+    return cookies
+
+
+def _parse_extra_headers(extra_headers: dict) -> dict:
+    """
+    Return only non-Cookie headers suitable for Playwright context.
+    Cookies are injected separately via add_cookies.
+    """
+    return {k: v for k, v in (extra_headers or {}).items() if k.lower() != "cookie"}
+
+
+# ── Login-page indicators ──────────────────────────────────────────────────────
+
+LOGIN_PATH_KEYWORDS = {
+    "/login", "/signin", "/sign-in", "/log-in", "/auth/login",
+    "/account/login", "/user/login", "/session/new",
+}
+
+def _is_login_url(url: str) -> bool:
+    """Return True if the URL looks like a login/auth page."""
+    lower = urlparse(url).path.lower().rstrip("/")
+    return any(lower == kw or lower.endswith(kw) for kw in LOGIN_PATH_KEYWORDS)
+
+
 class HeadlessEngine:
     """
     Optimized headless engine.
@@ -528,6 +578,7 @@ class HeadlessEngine:
     - Central asset registry
     - Resource blocking
     - Priority queue
+    - Authenticated scanning with cookie injection + session verification
     """
 
     def __init__(
@@ -539,7 +590,10 @@ class HeadlessEngine:
         max_pages:     int   = 100,
         interact:      bool  = False,
         workers:       int   = 3,
-        external_seen: Set[str] = None,
+        external_seen: Set[str]  = None,
+        cookies:       List[dict] = None,
+        extra_headers: dict       = None,
+        seen_hashes:   Set[str]  = None,
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -548,8 +602,14 @@ class HeadlessEngine:
         self.max_pages   = max_pages
         self.interact    = interact
         self.num_workers = max(1, min(workers, 5))
+        self.cookies       = cookies or []        # Playwright cookie dicts
+        self.extra_headers = _parse_extra_headers(extra_headers)
+        self.seen_hashes   = seen_hashes or set()
 
         self.registry    = AssetRegistry(external_seen)
+        # Pre-seed content hash registry with hashes from crawler
+        for h in self.seen_hashes:
+            self.registry.register_hash(h)
         self.timer       = PhaseTimer()
 
         self._lock       = threading.Lock()
@@ -559,6 +619,7 @@ class HeadlessEngine:
         self.ws_urls:    List[str]     = []
         self.routes:     Set[str]      = set()
         self.pages_visited: int        = 0
+        self.auth_result: Optional[dict] = None  # populated during run()
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
@@ -941,10 +1002,121 @@ class HeadlessEngine:
                 ))
         return endpoints
 
+    def _verify_auth(self, page, initial_url: str) -> dict:
+        """
+        Navigate to the target and verify the session is authenticated.
+
+        Returns a dict with:
+          credentials_supplied  bool
+          cookies_injected      int
+          initial_url           str
+          status                int
+          final_url             str
+          redirect_chain        list[str]
+          cookies_present       list[str]  (cookie names from browser)
+          authenticated         bool
+          reason                str        (why auth failed, empty if OK)
+        """
+        result = {
+            "credentials_supplied": bool(self.cookies or self.extra_headers),
+            "cookies_injected":     len(self.cookies),
+            "initial_url":          initial_url,
+            "status":               0,
+            "final_url":            initial_url,
+            "redirect_chain":       [],
+            "cookies_present":      [],
+            "authenticated":        False,
+            "reason":               "",
+        }
+
+        if not result["credentials_supplied"]:
+            # Anonymous scan — skip verification entirely
+            return result
+
+        redirect_chain: List[str] = []
+        final_status   = 0
+
+        def _on_response(response):
+            nonlocal final_status
+            if response.url == page.url or not redirect_chain:
+                final_status = response.status
+
+        def _on_request(request):
+            if request.is_navigation_request() and request.url != initial_url:
+                redirect_chain.append(request.url)
+
+        page.on("response",  _on_response)
+        page.on("request",   _on_request)
+
+        try:
+            resp = page.goto(
+                initial_url,
+                timeout=self.timeout * 1000,
+                wait_until="domcontentloaded",
+            )
+            if resp:
+                final_status = resp.status
+            PageStabilizer(page).wait_for_framework(max_ms=3000)
+        except Exception as e:
+            result["reason"] = f"Navigation failed: {e}"
+            return result
+
+        final_url = page.url
+
+        # Collect cookies that landed in the browser after navigation
+        try:
+            browser_cookies = page.context.cookies()
+            result["cookies_present"] = [c["name"] for c in browser_cookies]
+        except Exception:
+            pass
+
+        result["status"]         = final_status
+        result["final_url"]      = final_url
+        result["redirect_chain"] = redirect_chain
+
+        # ── Auth verification logic ────────────────────────────────────────
+        redirected_to_login = _is_login_url(final_url)
+
+        if redirected_to_login:
+            result["authenticated"] = False
+            result["reason"]        = "Redirected to login page — session rejected or expired"
+            return result
+
+        if final_status in (401, 403):
+            result["authenticated"] = False
+            result["reason"]        = f"Server returned {final_status} — credentials not accepted"
+            return result
+
+        # If we stayed on the intended URL (or a sub-path of it) with 200, we're in
+        from urllib.parse import urlparse as _up
+        intended_path = _up(initial_url).path.rstrip("/") or "/"
+        actual_path   = _up(final_url).path.rstrip("/")   or "/"
+
+        if final_status == 200 and (
+            actual_path == intended_path
+            or actual_path.startswith(intended_path)
+        ):
+            result["authenticated"] = True
+            result["reason"]        = ""
+            return result
+
+        # Redirected somewhere other than login (e.g. /home, /dashboard/overview) — still authenticated
+        if final_status in (200, 302) and not redirected_to_login:
+            result["authenticated"] = True
+            result["reason"]        = ""
+            return result
+
+        result["authenticated"] = False
+        result["reason"]        = (
+            f"Ended at {final_url} with status {final_status} — "
+            "could not confirm authenticated state"
+        )
+        return result
+
     def run(self) -> dict:
         if not _playwright_available():
             logger.warning("Playwright not installed.")
-            return {"js_files": [], "endpoints": [], "stats": {}, "timings": {}}
+            return {"js_files": [], "endpoints": [], "stats": {}, "timings": {}, "auth_result": None}
 
         from playwright.sync_api import sync_playwright
 
@@ -969,16 +1141,30 @@ class HeadlessEngine:
             self.timer.stop("browser_start")
 
             def _new_context():
-                ctx = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/146.0.0.0 Safari/537.36"
-                    ) if self.stealth else None,
+                kwargs = dict(
                     viewport={"width": 1280, "height": 800},
                     ignore_https_errors=True,
                     java_script_enabled=True,
                 )
+                if self.stealth:
+                    kwargs["user_agent"] = (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/146.0.0.0 Safari/537.36"
+                    )
+                if self.extra_headers:
+                    kwargs["extra_http_headers"] = self.extra_headers
+
+                ctx = browser.new_context(**kwargs)
+
+                # Inject cookies BEFORE any navigation
+                if self.cookies:
+                    try:
+                        ctx.add_cookies(self.cookies)
+                        logger.info("Injected %d cookies into browser context", len(self.cookies))
+                    except Exception as e:
+                        logger.warning("Failed to inject cookies: %s", e)
+
                 ctx.add_init_script(INTERCEPT_JS)
                 # Block images, fonts, media, analytics
                 ctx.route(
@@ -989,11 +1175,42 @@ class HeadlessEngine:
                 )
                 return ctx
 
-            # Phase 1: Root page
+            # Phase 1: Root page (+ auth verification when credentials supplied)
             self.timer.start("phase1_root")
             ctx1  = _new_context()
             page1 = ctx1.new_page()
-            initial_routes = self._visit_page(page1, self.target_url, self.target_url)
+
+            if self.cookies or self.extra_headers:
+                # Verify auth first — navigate, check final URL + status
+                self.auth_result = self._verify_auth(page1, self.target_url)
+                logger.info(
+                    "Auth verification: authenticated=%s final_url=%s status=%s",
+                    self.auth_result["authenticated"],
+                    self.auth_result["final_url"],
+                    self.auth_result["status"],
+                )
+                # Mark root URL as visited so _visit_page doesn't re-navigate
+                self.registry.register_url(self.target_url)
+                with self._lock:
+                    self.pages_visited += 1
+
+                # Extract routes from the page we already landed on
+                initial_routes = set()
+                try:
+                    initial_routes = self._extract_routes(page1)
+                    api_calls = self._extract_api_calls(page1)
+                    ws_urls   = self._extract_ws_urls(page1)
+                    with self._lock:
+                        self.api_calls.extend(api_calls)
+                        self.ws_urls.extend(ws_urls)
+                except Exception:
+                    pass
+
+                # Attach response handler for any remaining network activity
+                page1.on("response", lambda r: self._handle_response(r, self.target_url))
+            else:
+                initial_routes = self._visit_page(page1, self.target_url, self.target_url)
+
             for r in initial_routes:
                 self._add_route(r)
 
@@ -1087,12 +1304,13 @@ class HeadlessEngine:
             len(self.routes), timings.get("total", 0),
         )
         return {
-            "js_files":  self.js_files,
-            "endpoints": self.endpoints,
-            "routes":    list(self.routes),
-            "api_calls": self.api_calls,
-            "stats":     stats,
-            "timings":   timings,
+            "js_files":   self.js_files,
+            "endpoints":  self.endpoints,
+            "routes":     list(self.routes),
+            "api_calls":  self.api_calls,
+            "stats":      stats,
+            "timings":    timings,
+            "auth_result": self.auth_result,
         }
 
 
@@ -1121,12 +1339,18 @@ def collect_headless_full(
     seed_urls:     list  = None,
     interact:      bool  = False,
     workers:       int   = 3,
+    cookies:       list  = None,
+    extra_headers: dict  = None,
+    seen_hashes:   set   = None,
 ) -> dict:
     """
     Full headless scan.
-    seed_urls: routes from static analysis to pre-seed the engine.
-    workers: concurrent page processing (default 3).
-    interact: enable tab/dropdown interaction (slower, more coverage).
+    seed_urls:     routes from static analysis to pre-seed the engine.
+    workers:       concurrent page processing (default 3).
+    interact:      enable tab/dropdown interaction (slower, more coverage).
+    cookies:       Playwright cookie dicts injected before first navigation.
+    extra_headers: extra HTTP headers (non-Cookie) applied to every request.
+    seen_hashes:   content SHA-256 hashes already seen by the crawler (for dedup).
     """
     engine = HeadlessEngine(
         target_url    = url,
@@ -1137,6 +1361,9 @@ def collect_headless_full(
         interact      = interact,
         workers       = workers,
         external_seen = external_seen or set(),
+        cookies       = cookies or [],
+        extra_headers = extra_headers or {},
+        seen_hashes   = seen_hashes or set(),
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
