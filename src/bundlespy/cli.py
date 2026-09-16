@@ -469,6 +469,30 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
+    # Per-file analysis breakdown — prove every file was analyzed
+    per_file_stats = []
+    for js in all_js:
+        if not js.content:
+            continue
+        from .analysis.endpoint_intel import extract_endpoint_intelligence
+        from .analysis.ast_endpoints import extract_all_endpoints as _ast_eps
+
+        _f_findings   = scanner.scan(js.content, js.url, js.source_page)
+        _f_intel_eps  = extract_endpoint_intelligence(js.content, js.url)
+        _f_ast_eps    = _ast_eps(js.content, js.url)
+        _f_infra      = extract_infrastructure(js.content, js.url)
+
+        per_file_stats.append({
+            "url":        js.url,
+            "size":       js.size_bytes,
+            "sha256":     js.sha256[:8] if js.sha256 else "",
+            "secrets":    len([f for f in _f_findings if f.status != "likely_false_positive"]),
+            "endpoints":  len(_f_intel_eps) + len(_f_ast_eps),
+            "infra":      len(_f_infra),
+            "technology": getattr(js, "technology", ""),
+        })
+    extras["per_file_stats"] = per_file_stats
+
     # Add every crawled page as a discovered route endpoint
     # These are real pages the crawler actually visited
     if not args.passive:
