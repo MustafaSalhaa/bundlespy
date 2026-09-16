@@ -509,6 +509,9 @@ def run_scan(args) -> int:
             # Skip bare root and /index duplicates
             if _path in ("/", "/index", "/index.html", "/index.php", ""):
                 continue
+            # Skip if the full URL is just the target root
+            if _page_url.rstrip("/").lower() == target.rstrip("/").lower():
+                continue
             _seen_ep.add(_key)
             # Categorize the page route
             _lower = _path.lower()
