@@ -583,6 +583,14 @@ def run_scan(args) -> int:
             _deduped_findings.append(f)
     all_findings = _deduped_findings
 
+    # Remove bare target root from endpoints — it's not an API endpoint
+    _target_base = target.rstrip("/").lower()
+    all_endpoints = [
+        ep for ep in all_endpoints
+        if ep.url.rstrip("/").lower() not in (_target_base, _target_base + "/")
+        and not (ep.url.rstrip("/").lower() == _target_base and ep.method == "UNKNOWN")
+    ]
+
     # Final endpoint dedup — keep parameterized endpoints distinct
     # Dedup by path + sorted param names (not param values)
     # so /product?productId=1 and /product?productId=2 merge to one,
