@@ -118,7 +118,11 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
 
     show = js_files if verbose else js_files[:20]
 
-    for js in show:
+    # Separate JS files from HTML-attribute synthetic entries
+    js_files_only = [j for j in show if not j.url.startswith("html:")]
+    html_entries  = [s for s in (per_file_stats or []) if s.get("technology") == "html-attrs"]
+
+    for js in js_files_only:
         size = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
         url  = js.url
         tag  = ""
@@ -126,32 +130,23 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
         if url.startswith("sourcemap://"):
             url = url.replace("sourcemap://", ""); tag = f" {A.GREEN}[recovered]{A.RESET}"
         elif url.startswith("inline:") or url.startswith("html:"):
-            url = re.sub(r'^(inline:|html:)', '', url); tag = f" {A.GREY}[inline]{A.RESET}"
+            url = re.sub(r"^(inline:|html:)", "", url); tag = f" {A.GREY}[inline]{A.RESET}"
         elif "headless-captured" in (js.technology or ""):
             tag = f" {A.CYAN}[browser]{A.RESET}"
         elif "webworker" in (js.technology or ""):
             tag = f" {A.PURPLE}[worker]{A.RESET}"
 
-        # Display: show the full path, not just filename
-        # Strip scheme+host for cleaner display
-        import re as _re
-        _display = url
-        # Remove scheme://host prefix to show just the path
-        _display = _re.sub(r'^https?://[^/]+', '', _display) or url
-        # If empty after strip (root page), show the original filename
-        if not _display:
-            _display = url.split("/")[-1].split("?")[0] or url
-        # For inline scripts from page roots, show the page path
-        if _display == "" or _display == "/":
-            _display = "/" + url.rstrip("/").split("/")[-1]
+        # Show path only (strip scheme+host)
+        _display = re.sub(r"^https?://[^/]+", "", url) or url
+        if not _display or _display == "/":
+            _display = url.rstrip("/").split("/")[-1] or url
         fname = _display[:40].ljust(41)
 
-        # Analysis stats for this file
         st = stats_map.get(js.url)
         if st:
-            sec_c  = A.RED  if st["secrets"]  > 0 else A.GREY
-            ep_c   = A.CYAN if st["endpoints"] > 0 else A.GREY
-            inf_c  = A.ORANGE if st["infra"]   > 0 else A.GREY
+            sec_c = A.RED    if st["secrets"]   > 0 else A.GREY
+            ep_c  = A.CYAN   if st["endpoints"] > 0 else A.GREY
+            inf_c = A.ORANGE if st["infra"]     > 0 else A.GREY
             stats = (
                 f"  {sec_c}secrets={st['secrets']}{A.RESET}"
                 f"  {ep_c}endpoints={st['endpoints']}{A.RESET}"
@@ -162,6 +157,15 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
 
         smap = f" {A.YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
         _p(f"  {A.GREY}•{A.RESET} {fname}{tag}{smap}  {A.GREY}{size}{A.RESET}{stats}")
+
+    # Show HTML-attribute findings as page-level entries
+    if html_entries:
+        _p()
+        _p(f"  {A.GREY}HTML attribute findings (not in JS content):{A.RESET}")
+        for he in html_entries:
+            _page = re.sub(r"^https?://[^/]+", "", he["url"].replace("html:", "")) or he["url"]
+            sec_c = A.RED if he["secrets"] > 0 else A.GREY
+            _p(f"  {A.GREY}•{A.RESET} {_page[:40].ljust(41)}  {A.GREY}[page]{A.RESET}  {sec_c}secrets={he['secrets']}{A.RESET}")
 
     if not verbose and len(js_files) > 20:
         _p(f"\n  {A.GREY}  ... and {len(js_files)-20} more  (-v to show all){A.RESET}")
