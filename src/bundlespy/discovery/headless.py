@@ -1113,6 +1113,72 @@ class HeadlessEngine:
         )
         return result
 
+    def _dom_fingerprint(self, page) -> str:
+        """
+        Fast DOM state fingerprint — title + element count + key heading text.
+        Detects duplicate application states so we never re-explore the same state.
+        """
+        try:
+            sig = page.evaluate("""
+                (function() {
+                    var t = document.title || '';
+                    var c = document.body ? document.body.children.length : 0;
+                    var h = document.querySelector('h1,h2,[class*="title"],[class*="header"]');
+                    var txt = h ? h.innerText.trim().slice(0,80) : '';
+                    var forms = document.querySelectorAll('form').length;
+                    return t + '|' + c + '|' + txt + '|' + forms;
+                })()
+            """)
+            return __import__('hashlib').sha256((sig or "").encode()).hexdigest()[:16]
+        except Exception:
+            return ""
+
+    def _flush_page_intel(self, page, source_url: str) -> set:
+        """
+        Extract all intelligence from the current page in one pass.
+        Clears interceptor buffers after reading so the next page starts fresh.
+        """
+        new_routes = set()
+        try:
+            new_routes  = self._extract_routes(page)
+            api_calls   = self._extract_api_calls(page)
+            ws_urls     = self._extract_ws_urls(page)
+            worker_urls = self._extract_worker_urls(page)
+            iframe_urls = self._extract_iframe_urls(page)
+
+            with self._lock:
+                self.api_calls.extend(api_calls)
+                self.ws_urls.extend(ws_urls)
+
+            for w_url in worker_urls:
+                import threading as _t
+                _t.Thread(target=self._fetch_worker_js, args=(w_url, source_url), daemon=True).start()
+
+            parsed = urlparse(self.target_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            for iframe_url in iframe_urls:
+                if iframe_url.startswith(origin):
+                    new_routes.add(urlparse(iframe_url).path or "/")
+                elif iframe_url.startswith("/"):
+                    new_routes.add(iframe_url)
+
+            # Reset interceptor buffers for next page
+            try:
+                page.evaluate("""
+                    window.__bundlespy_requests = [];
+                    window.__bundlespy_ws = [];
+                    window.__bundlespy_workers = [];
+                    window.__bundlespy_iframes = [];
+                    window.__bspy_mutations = 0;
+                    window.__bspy_requests = 0;
+                    window.__bspy_last_active = Date.now();
+                """)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("Intel flush error %s: %s", source_url, e)
+        return new_routes
+
     def run(self) -> dict:
         if not _playwright_available():
             logger.warning("Playwright not installed.")
@@ -1122,6 +1188,8 @@ class HeadlessEngine:
 
         logger.info("Starting headless engine: %s", self.target_url)
         self.timer.start("total")
+
+        _seen_dom_states: Set[str] = set()
 
         with sync_playwright() as pw:
             self.timer.start("browser_start")
@@ -1133,151 +1201,174 @@ class HeadlessEngine:
                     "--disable-blink-features=AutomationControlled",
                     "--disable-web-security",
                     "--disable-features=VizDisplayCompositor",
-                    "--blink-settings=imagesEnabled=false",  # Disable images
+                    "--blink-settings=imagesEnabled=false",
                     "--disable-background-networking",
                     "--disable-sync",
                 ],
             )
             self.timer.stop("browser_start")
 
-            def _new_context():
-                kwargs = dict(
-                    viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=True,
-                    java_script_enabled=True,
+            # ── Single context — created once, cookies injected once ──────────
+            kwargs = dict(
+                viewport={"width": 1280, "height": 800},
+                ignore_https_errors=True,
+                java_script_enabled=True,
+            )
+            if self.stealth:
+                kwargs["user_agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/146.0.0.0 Safari/537.36"
                 )
-                if self.stealth:
-                    kwargs["user_agent"] = (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/146.0.0.0 Safari/537.36"
-                    )
-                if self.extra_headers:
-                    kwargs["extra_http_headers"] = self.extra_headers
+            if self.extra_headers:
+                kwargs["extra_http_headers"] = self.extra_headers
 
-                ctx = browser.new_context(**kwargs)
+            ctx = browser.new_context(**kwargs)
 
-                # Inject cookies BEFORE any navigation
-                if self.cookies:
-                    try:
-                        ctx.add_cookies(self.cookies)
-                        logger.info("Injected %d cookies into browser context", len(self.cookies))
-                    except Exception as e:
-                        logger.warning("Failed to inject cookies: %s", e)
+            if self.cookies:
+                try:
+                    ctx.add_cookies(self.cookies)
+                    logger.info("Injected %d cookies into browser context", len(self.cookies))
+                except Exception as e:
+                    logger.warning("Failed to inject cookies: %s", e)
 
-                ctx.add_init_script(INTERCEPT_JS)
-                # Block images, fonts, media, analytics
-                ctx.route(
-                    "**/*",
-                    lambda route: route.abort()
-                    if self._should_block(route.request.url, route.request.resource_type)
-                    else route.continue_()
-                )
-                return ctx
+            ctx.add_init_script(INTERCEPT_JS)
 
-            # Phase 1: Root page (+ auth verification when credentials supplied)
+            # Central response handler on context — fires for every page, attached once
+            ctx.on("response", lambda r: self._handle_response(r, r.url))
+
+            ctx.route(
+                "**/*",
+                lambda route: route.abort()
+                if self._should_block(route.request.url, route.request.resource_type)
+                else route.continue_()
+            )
+
+            # ── Single persistent page — reused across all navigation ─────────
+            page = ctx.new_page()
+            stabilizer = PageStabilizer(page)
+
+            # ── Phase 1: Auth verification + root page ────────────────────────
             self.timer.start("phase1_root")
-            ctx1  = _new_context()
-            page1 = ctx1.new_page()
 
             if self.cookies or self.extra_headers:
-                # Verify auth first — navigate, check final URL + status
-                self.auth_result = self._verify_auth(page1, self.target_url)
+                self.auth_result = self._verify_auth(page, self.target_url)
                 logger.info(
-                    "Auth verification: authenticated=%s final_url=%s status=%s",
+                    "Auth: authenticated=%s final=%s status=%s",
                     self.auth_result["authenticated"],
                     self.auth_result["final_url"],
                     self.auth_result["status"],
                 )
-                # Mark root URL as visited so _visit_page doesn't re-navigate
                 self.registry.register_url(self.target_url)
                 with self._lock:
                     self.pages_visited += 1
-
-                # Extract routes from the page we already landed on
-                initial_routes = set()
-                try:
-                    initial_routes = self._extract_routes(page1)
-                    api_calls = self._extract_api_calls(page1)
-                    ws_urls   = self._extract_ws_urls(page1)
-                    with self._lock:
-                        self.api_calls.extend(api_calls)
-                        self.ws_urls.extend(ws_urls)
-                except Exception:
-                    pass
-
-                # Attach response handler for any remaining network activity
-                page1.on("response", lambda r: self._handle_response(r, self.target_url))
+                fp = self._dom_fingerprint(page)
+                if fp:
+                    _seen_dom_states.add(fp)
+                initial_routes = self._flush_page_intel(page, self.target_url)
             else:
-                initial_routes = self._visit_page(page1, self.target_url, self.target_url)
+                try:
+                    page.goto(self.target_url, timeout=self.timeout * 1000,
+                              wait_until="domcontentloaded")
+                    with self._lock:
+                        self.pages_visited += 1
+                    stabilizer.wait_for_framework(max_ms=3000)
+                except Exception as e:
+                    logger.debug("Root page error: %s", e)
+                self.registry.register_url(self.target_url)
+                fp = self._dom_fingerprint(page)
+                if fp:
+                    _seen_dom_states.add(fp)
+                initial_routes = self._flush_page_intel(page, self.target_url)
 
             for r in initial_routes:
                 self._add_route(r)
 
-            # Add seed URLs from static analysis
             for seed_url in self.seed_urls:
-                parsed = urlparse(seed_url)
-                self._add_route(parsed.path or "/")
+                self._add_route(urlparse(seed_url).path or "/")
 
-            # SPA probe if 0 routes
             if not self.routes:
                 for probe in ["/#/", "/app", "/home"]:
                     probe_url = self.target_url.rstrip("/") + probe
                     try:
-                        page1.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
-                        PageStabilizer(page1).wait(max_ms=2000)
-                        extra = self._extract_routes(page1)
-                        if extra:
-                            for r in extra:
-                                self._add_route(r)
+                        page.goto(probe_url, timeout=8000, wait_until="domcontentloaded")
+                        stabilizer.wait(max_ms=2000)
+                        for r in self._extract_routes(page):
+                            self._add_route(r)
+                        if self.routes:
                             break
                     except Exception:
                         pass
 
-            ctx1.close()
             self.timer.stop("phase1_root")
             logger.info("Phase 1 done: %d routes", len(self.routes))
 
-            # Phase 2: Visit all routes concurrently
+            # ── Phase 2: Visit routes on same page/context — no context reload ─
             self.timer.start("phase2_routes")
             urls_to_visit = self._build_urls(self.routes)
-
-            # Sort by priority — admin/auth/api first
             urls_to_visit = sorted(urls_to_visit, key=_route_priority)
-
-            # Limit to max_pages
-            remaining = self.max_pages - self.pages_visited
+            remaining     = self.max_pages - self.pages_visited
             urls_to_visit = urls_to_visit[:max(0, remaining)]
 
-            if urls_to_visit:
-                logger.info("Phase 2: visiting %d routes", len(urls_to_visit))
+            new_routes_found: Set[str] = set()
+            login_loop_count = 0
 
-                # Playwright sync API is NOT thread-safe — must run on main thread
-                # Use a single persistent page for all route visits (fast — no context reload)
-                ctx2  = _new_context()
-                page2 = ctx2.new_page()
-                new_routes_found = set()
+            for url in urls_to_visit:
+                if self.pages_visited >= self.max_pages:
+                    break
+
+                if not self.registry.register_url(url):
+                    continue
+
+                safe, _ = validate_url(url)
+                if not safe or not self.scope.in_scope(url):
+                    continue
 
                 try:
-                    for url in urls_to_visit:
-                        if self.pages_visited >= self.max_pages:
-                            break
-                        new_routes = self._visit_page(page2, url, self.target_url)
-                        new_routes_found.update(new_routes)
-                finally:
-                    try:
-                        ctx2.close()
-                    except Exception:
-                        pass
+                    page.goto(url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+                    with self._lock:
+                        self.pages_visited += 1
 
-                # Add newly discovered routes
-                for r in new_routes_found:
-                    self._add_route(r)
+                    # Login loop detection — stop wasting time on auth failures
+                    final_url = page.url
+                    if _is_login_url(final_url) and not _is_login_url(url):
+                        login_loop_count += 1
+                        if login_loop_count >= 2:
+                            logger.warning("Login loop — stopping route exploration")
+                            break
+                        continue
+
+                    # DOM state dedup — skip identical states
+                    stabilizer.wait_for_framework(max_ms=2000)
+                    fp = self._dom_fingerprint(page)
+                    if fp and fp in _seen_dom_states:
+                        logger.debug("Duplicate DOM state, skipping: %s", url)
+                        continue
+                    if fp:
+                        _seen_dom_states.add(fp)
+
+                    if self.interact:
+                        self._interact(page, stabilizer)
+                        self._observe_forms(page, stabilizer)
+
+                    new_routes = self._flush_page_intel(page, url)
+                    new_routes_found.update(new_routes)
+
+                except Exception as e:
+                    logger.debug("Error visiting %s: %s", url, e)
+
+            for r in new_routes_found:
+                self._add_route(r)
 
             self.timer.stop("phase2_routes")
+
+            try:
+                ctx.close()
+            except Exception:
+                pass
             browser.close()
 
-        # Phase 3: Build endpoints
+        # ── Phase 3: Build endpoints ──────────────────────────────────────────
         self.timer.start("endpoint_build")
         self.endpoints = self._api_calls_to_endpoints()
         self.timer.stop("endpoint_build")
@@ -1312,7 +1403,6 @@ class HeadlessEngine:
             "timings":    timings,
             "auth_result": self.auth_result,
         }
-
 
 def _playwright_available() -> bool:
     try:
