@@ -26,7 +26,8 @@ def print_report(
 ) -> None:
     extras = extras or {}
 
-    print_js_inventory(result.js_files, verbose=verbose)
+    print_js_inventory(result.js_files, verbose=verbose,
+                        per_file_stats=extras.get('per_file_stats') if extras else None)
 
     # Feature summaries
     if extras.get("source_map_details"):
