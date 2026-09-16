@@ -305,12 +305,20 @@ def run_scan(args) -> int:
         # Include HTML attribute findings from crawler
         html_findings_from_crawler = getattr(crawler, "html_findings", [])
 
-        for script_content, source_page in crawler.inline_scripts:
+        for idx, (script_content, source_page) in enumerate(crawler.inline_scripts):
             import hashlib
+            content_hash = hashlib.sha256(
+                script_content.encode("utf-8", errors="ignore")
+            ).hexdigest()
+            inline_url = (
+                f"inline:{source_page}"
+                f"#script-{idx + 1}-{content_hash[:12]}"
+            )
             all_js.append(JSFile(
-                url="inline:" + source_page, source_page=source_page,
+                url=inline_url,
+                source_page=source_page,
                 status_code=200, content_type="text/javascript",
-                size_bytes=len(script_content), sha256="",
+                size_bytes=len(script_content), sha256=content_hash,
                 content=script_content,
             ))
 
@@ -532,8 +540,6 @@ def run_scan(args) -> int:
     # Re-running the scanner would get different results due to env/path differences
 
     # Build lookup: file_url (stripped) -> secret count
-    # Store both the full stripped key AND the path-only key so inline: (path)
-    # and html: (full URL) findings always match the same script entry.
     _sec_by_file = {}
     for _f in all_findings:
         if _f.status == "likely_false_positive":
@@ -541,11 +547,6 @@ def run_scan(args) -> int:
         _furl = _f.file_url or ""
         _fkey = _strip_url_prefix(_furl)
         _sec_by_file[_fkey] = _sec_by_file.get(_fkey, 0) + 1
-        # Also index by path alone so path-only keys match full-URL findings
-        from urllib.parse import urlparse as _up3
-        _fpath = (_up3(_fkey).path if _fkey.startswith("http") else _fkey).rstrip("/") or "/"
-        if _fpath != _fkey:
-            _sec_by_file[_fpath] = _sec_by_file.get(_fpath, 0) + 1
 
     # Build lookup: source_file (stripped) -> endpoint count
     _ep_by_file = {}
@@ -572,18 +573,7 @@ def run_scan(args) -> int:
         _is_inline = js.url.startswith("inline:") or js.url.startswith("html:")
 
         if _is_inline:
-            # Inline scripts may have path-only keys (/admin) while html: findings
-            # use full URLs (https://odehfin.com/admin). Normalize both to path for matching.
-            from urllib.parse import urlparse as _up2
-            def _to_path(k):
-                p = _up2(k).path if k.startswith("http") else k
-                return p.rstrip("/") or "/"
-            _js_path = _to_path(_js_key)
-            # Sum secrets from all keys whose path matches this script's path
-            _sec_count = sum(
-                v for k, v in _sec_by_file.items()
-                if _to_path(k) == _js_path
-            )
+            _sec_count = _sec_by_file.get(_js_key, 0)
         else:
             _sec_count = _sec_by_file.get(_js_key, 0)
 
