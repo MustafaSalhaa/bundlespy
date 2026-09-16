@@ -1,968 +1,1140 @@
 """
-BundleSpy terminal UI — clean, modern, professional.
+BundleSpy CLI — clean, automation-friendly, no interactive prompts.
 """
 
+import sys
 import os
 import re
-import sys
-import shutil
-from typing import List, Optional, Dict
+import argparse
+import logging
 from datetime import datetime
+from pathlib import Path
 
-from .theme import A
-
-
-def _p(text: str = "") -> None:
-    print(text)
-
-
-def _w() -> int:
-    try:
-        return min(shutil.get_terminal_size((80, 24)).columns, 110)
-    except Exception:
-        return 80
-
-
-def _line(char: str = "─", color: str = "") -> str:
-    rst = A.RESET if color else ""
-    return f"{color}{char * _w()}{rst}"
-
-
-def _label(text: str, width: int = 14) -> str:
-    return f"{A.GREY}{text.ljust(width)}{A.RESET}"
-
-
-def _val(text: str, color: str = "") -> str:
-    rst = A.RESET if color else ""
-    return f"{color}{text}{rst}"
+from .config import BundleSpyConfig, CrawlerConfig, ScopeConfig, ReportingConfig
+from .config import PROJECT_NAME, PROJECT_VERSION, AUTHOR_NAME, GITHUB_URL
+from .safety.network import validate_url
+from .crawler.fetcher import Fetcher
+from .crawler.scope import ScopeChecker
+from .crawler.crawler import Crawler
+from .analysis.secrets import SecretScanner
+from .analysis.endpoints import extract_endpoints
+from .analysis.ast_endpoints import extract_all_endpoints
+from .analysis.endpoint_intel import extract_endpoint_intelligence
+from .analysis.infrastructure import extract_infrastructure
+from .analysis.jwt import find_jwts
+from .storage.models import ScanResult, Finding, Endpoint, InfrastructureItem, JSFile
+from .reporting.terminal import print_report
+from .reporting.json_report import generate as generate_json
+from .reporting.html_report import generate as generate_html
+from .reporting.csv_report import generate as generate_csv
+from .reporting.burp_export import generate_burp_xml, generate_url_list
+from .ui.printer import (
+    print_header, phase, phase_done, phase_warn, phase_error,
+)
+from .ui.theme import A
 
 
-def _section(title: str, count: str = "", color: str = "") -> None:
-    c   = color or A.WHITE
-    cnt = f"  {A.GREY}({count}){A.RESET}" if count else ""
-    _p()
-    _p(f"  {c}{A.BOLD}{title}{A.RESET}{cnt}")
-    _p(f"  {A.GREY}{_line()}{A.RESET}")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bundlespy",
+        description="BundleSpy — JavaScript Intelligence and Secret Exposure Scanner",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+examples:
+  bundlespy scan https://example.com
+  bundlespy scan https://example.com --source-maps --chunks --validate
+  bundlespy scan https://example.com --passive --format html --output ./reports/
+  bundlespy scan https://example.com --headless --stealth
+  bundlespy scan https://example.com --graphql --harvest-subs
+  bundlespy scan https://example.com --format html,json,burp --output ./reports/
+  bundlespy local ./dist/
+  bundlespy demo
+""",
+    )
+
+    sub = parser.add_subparsers(dest="command")
+
+    # ── scan ──────────────────────────────────────────────────────────────────
+    scan = sub.add_parser("scan", help="Scan a target URL")
+    scan.add_argument("target")
+
+    # Crawl
+    scan.add_argument("--depth",       type=int, default=5)
+    scan.add_argument("--max-pages",   type=int, default=500)
+    scan.add_argument("--max-js",      type=int, default=1000)
+    scan.add_argument("--rate",        type=int, default=3)
+    scan.add_argument("--timeout",     type=int, default=10)
+    scan.add_argument("--common-paths",action="store_true")
+    scan.add_argument("--subdomains",  action="store_true")
+    scan.add_argument("--exclude",     nargs="+", default=[])
+
+    # Features
+    scan.add_argument("--source-maps",    action="store_true")
+    scan.add_argument("--chunks",         action="store_true")
+    scan.add_argument("--passive",        action="store_true")
+    scan.add_argument("--headless",       action="store_true")
+    scan.add_argument("--validate",       action="store_true")
+    scan.add_argument("--graphql",        action="store_true")
+    scan.add_argument("--harvest-subs",   action="store_true")
+    scan.add_argument("--validate-secrets", action="store_true")
+    scan.add_argument("--stealth",        action="store_true")
+    scan.add_argument("--interact",       action="store_true", help="Enable full page interaction in headless mode (slower but finds more lazy JS)")
+    scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
+    scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
+    scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
+                      help="Extra header to include in all requests (can use multiple times)")
+
+    # Output
+    scan.add_argument("--format", default="terminal")
+    scan.add_argument("--output", default="")
+    scan.add_argument("-v", "--verbose",  action="store_true")
+    scan.add_argument("-vv","--debug",    action="store_true")
+    scan.add_argument("-q", "--quiet",    action="store_true")
+    scan.add_argument("--no-color",       action="store_true")
+    scan.add_argument("--json",           action="store_true", help="JSON output only")
+    scan.add_argument("--csv",            action="store_true", help="CSV output only")
+    scan.add_argument("--show-fp",        action="store_true", help="Show likely false positives in output")
+    scan.add_argument("--silent",         action="store_true", help="Findings only - no progress, no headers")
+
+    # ── local ─────────────────────────────────────────────────────────────────
+    local = sub.add_parser("local", help="Scan local JS files")
+    local.add_argument("path")
+    local.add_argument("--format",   default="terminal")
+    local.add_argument("--output",   default="")
+    local.add_argument("-v", "--verbose", action="store_true")
+    local.add_argument("--no-color", action="store_true")
+
+    # ── demo ──────────────────────────────────────────────────────────────────
+    sub.add_parser("demo", help="Run offline demo")
+
+    return parser
 
 
-SEV_COLOR = {
-    "CRITICAL": A.RED    + A.BOLD,
-    "HIGH":     A.ORANGE + A.BOLD,
-    "MEDIUM":   A.YELLOW,
-    "LOW":      A.BLUE,
-    "INFO":     A.GREY,
-}
-
-
-# ── Header ────────────────────────────────────────────────────────────────────
-
-def print_header(target, mode="Active", scope="Strict", version="1.0.0", author="Mustafa Salha"):
-    ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
-    _p()
-    _p(f"  {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
-    _p(f"  {A.GREY}{_line()}{A.RESET}")
-    _p(f"  {_label('Target')}{A.CYAN}{target[:_w()-22]}{A.RESET}")
-    _p(f"  {_label('Mode')}{mode}")
-    _p(f"  {_label('Scope')}{scope}")
-    _p(f"  {_label('Started')}{A.GREY}{ts}{A.RESET}")
-    _p()
-
-
-# ── Authentication result ─────────────────────────────────────────────────────
-
-def print_auth_result(auth: dict) -> None:
-    """
-    Print the authentication verification block.
-    Only called when credentials were supplied (cookie/header).
-    """
-    if not auth:
-        return
-
-    _section("AUTHENTICATION")
-
-    verified   = auth.get("authenticated", False)
-    supplied   = auth.get("credentials_supplied", False)
-    n_cookies  = auth.get("cookies_injected", 0)
-    init_url   = auth.get("initial_url", "")
-    status     = auth.get("status", 0)
-    final_url  = auth.get("final_url", "")
-    chain      = auth.get("redirect_chain", [])
-    ck_present = auth.get("cookies_present", [])
-    reason     = auth.get("reason", "")
-
-    _p(f"  {_label('Credentials')}{'YES' if supplied else 'NO'}")
-    _p(f"  {_label('Cookies injected')}{n_cookies}")
-    _p(f"  {_label('Initial URL')}{init_url}")
-
-    status_color = A.GREEN if status == 200 else A.ORANGE if status in (301, 302) else A.RED
-    _p(f"  {_label('Status')}{status_color}{status}{A.RESET}")
-    _p(f"  {_label('Final URL')}{final_url}")
-
-    redirected = init_url.rstrip("/") != final_url.rstrip("/") if init_url and final_url else False
-    to_login   = any(k in final_url.lower() for k in ["/login", "/signin", "/sign-in"])
-
-    redir_color = A.RED if to_login else A.ORANGE if redirected else A.GREEN
-    redir_label = "YES (to login)" if to_login else "YES" if redirected else "NO"
-    _p(f"  {_label('Redirected')}{redir_color}{redir_label}{A.RESET}")
-
-    if chain:
-        _p(f"  {_label('Redirect chain')}{A.GREY}{' → '.join(chain[:5])}{A.RESET}")
-
-    if ck_present:
-        _p(f"  {_label('Browser cookies')}{A.GREY}{', '.join(ck_present[:8])}{A.RESET}")
-
-    if verified:
-        _p(f"  {_label('Auth state')}{A.GREEN}{A.BOLD}VERIFIED{A.RESET}")
+def _setup_logging(verbose: bool, debug: bool, quiet: bool) -> None:
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    elif quiet:
+        level = logging.ERROR
     else:
-        _p(f"  {_label('Auth state')}{A.RED}{A.BOLD}NOT VERIFIED{A.RESET}")
-        if reason:
-            _p(f"  {_label('Reason')}{A.GREY}{reason}{A.RESET}")
-        _p(f"  {A.YELLOW}Credentials supplied but authentication not verified.{A.RESET}")
-        _p(f"  {A.YELLOW}Results reflect the unauthenticated application state.{A.RESET}")
-
-    _p()
+        level = logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="  %(message)s",
+    )
 
 
-# ── Phase lines ───────────────────────────────────────────────────────────────
+def _write_reports(
+    result:    ScanResult,
+    formats:   list,
+    output_dir: str,
+    started:   datetime,
+) -> dict:
+    """Write file reports. Returns dict of format -> path."""
+    ts      = started.strftime("%Y%m%d_%H%M%S")
+    paths   = {}
 
-def phase(label):
-    _p(f"  {A.GREY}›{A.RESET}  {label}")
+    if "json" in formats:
+        out = generate_json(result)
+        d   = output_dir or "./bundlespy-reports"
+        os.makedirs(d, exist_ok=True)
+        p   = Path(d) / f"bundlespy_{ts}.json"
+        p.write_text(out)
+        paths["json"] = str(p)
+
+    if "html" in formats:
+        out = generate_html(result)
+        d   = output_dir or "./bundlespy-reports"
+        os.makedirs(d, exist_ok=True)
+        p   = Path(d) / f"bundlespy_{ts}.html"
+        p.write_text(out)
+        paths["html"] = str(p)
+
+    if "csv" in formats:
+        out = generate_csv(result)
+        d   = output_dir or "./bundlespy-reports"
+        os.makedirs(d, exist_ok=True)
+        p   = Path(d) / f"bundlespy_{ts}.csv"
+        p.write_text(out)
+        paths["csv"] = str(p)
+
+    if "burp" in formats:
+        d   = output_dir or "./bundlespy-reports"
+        os.makedirs(d, exist_ok=True)
+        p1  = Path(d) / f"bundlespy_{ts}_burp.xml"
+        p2  = Path(d) / f"bundlespy_{ts}_urls.txt"
+        p1.write_text(generate_burp_xml(result))
+        p2.write_text(generate_url_list(result))
+        paths["burp-xml"]  = str(p1)
+        paths["burp-urls"] = str(p2)
+
+    return paths
 
 
-def phase_done(label, detail=""):
-    det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.GREEN}✓{A.RESET}  {label}{det}")
+def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
+    """
+    Analyze JS files for secrets, endpoints, and infrastructure.
 
+    Content-hash dedup: if two JSFile objects have identical sha256,
+    analyze the content only once but attribute findings/endpoints
+    to ALL file URLs that share that content (provenance preserved).
 
-def phase_warn(label):
-    _p(f"  {A.YELLOW}!{A.RESET}  {label}")
+    Static↔runtime endpoint correlation: same canonical URL seen in
+    both static JS and runtime interception → one entity, higher confidence.
+    """
+    findings:   list = []
+    endpoints:  list = []
+    infra:      list = []
+    seen_finds: set  = set()
+    seen_eps:   set  = set()
 
+    # Content-hash dedup: sha256 -> list of JSFile sharing that content
+    from collections import defaultdict
+    content_groups: dict = defaultdict(list)
+    no_hash: list = []
 
-def phase_error(label):
-    print(f"  {A.RED}✗{A.RESET}  {label}", file=sys.stderr)
-
-
-# ── JS Inventory ──────────────────────────────────────────────────────────────
-
-def print_js_inventory(js_files, verbose=False, per_file_stats=None):
-    if not js_files:
-        return
-
-    headless_count  = sum(1 for j in js_files if "headless-captured" in (j.technology or ""))
-    inline_count    = sum(1 for j in js_files if j.url.startswith("inline:") or j.url.startswith("html:"))
-    recovered_count = sum(1 for j in js_files if j.url.startswith("sourcemap://"))
-    static_count    = len(js_files) - headless_count - inline_count - recovered_count
-    total_size      = sum(j.size_bytes for j in js_files if j.size_bytes)
-
-    _section("JAVASCRIPT ASSETS", str(len(js_files)), A.CYAN)
-
-    summary_parts = []
-    if static_count:    summary_parts.append(f"{static_count} static")
-    if headless_count:  summary_parts.append(f"{headless_count} browser-captured")
-    if inline_count:    summary_parts.append(f"{inline_count} inline")
-    if recovered_count: summary_parts.append(f"{recovered_count} recovered")
-    if summary_parts:
-        _p(f"  {A.GREY}{' · '.join(summary_parts)} · {total_size/1024:.0f} KB total{A.RESET}")
-    _p()
-
-    # Per-file analysis table — proves every file was analyzed
-    stats_map = {}
-    if per_file_stats:
-        for s in per_file_stats:
-            stats_map[s["url"]] = s
-
-    show = js_files if verbose else js_files[:20]
-
-    # Separate JS files from HTML-attribute synthetic entries
-    js_files_only = [j for j in show if not j.url.startswith("html:")]
-    html_entries  = [s for s in (per_file_stats or []) if s.get("technology") == "html-attrs"]
-
-    for js in js_files_only:
-        size = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
-        url  = js.url
-        tag  = ""
-
-        if url.startswith("sourcemap://"):
-            url = url.replace("sourcemap://", ""); tag = f" {A.GREEN}[recovered]{A.RESET}"
-        elif url.startswith("inline:") or url.startswith("html:"):
-            url = re.sub(r"^(inline:|html:)", "", url); tag = f" {A.GREY}[inline]{A.RESET}"
-        elif "headless-captured" in (js.technology or ""):
-            tag = f" {A.CYAN}[browser]{A.RESET}"
-        elif "webworker" in (js.technology or ""):
-            tag = f" {A.PURPLE}[worker]{A.RESET}"
-
-        # Show path only (strip scheme+host)
-        _display = re.sub(r"^https?://[^/]+", "", url) or url
-        if not _display or _display == "/":
-            _display = url.rstrip("/").split("/")[-1] or url
-        fname = _display[:40].ljust(41)
-
-        st = stats_map.get(js.url)
-        if st:
-            sec_c = A.RED    if st["secrets"]   > 0 else A.GREY
-            ep_c  = A.CYAN   if st["endpoints"] > 0 else A.GREY
-            inf_c = A.ORANGE if st["infra"]     > 0 else A.GREY
-            stats = (
-                f"  {sec_c}secrets={st['secrets']}{A.RESET}"
-                f"  {ep_c}endpoints={st['endpoints']}{A.RESET}"
-                f"  {inf_c}infra={st['infra']}{A.RESET}"
-            )
+    for js in js_files:
+        if not js.content:
+            continue
+        if js.sha256:
+            content_groups[js.sha256].append(js)
         else:
-            stats = f"  {A.GREY}not analyzed{A.RESET}"
+            no_hash.append(js)
 
-        smap = f" {A.YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
-        _p(f"  {A.GREY}•{A.RESET} {fname}{tag}{smap}  {A.GREY}{size}{A.RESET}{stats}")
+    # Analyze each unique content once; attribute to all occurrences
+    def _process(primary_js: "JSFile", all_urls: list) -> None:
+        content = primary_js.content
 
-    # Show HTML-attribute findings as page-level entries
-    if html_entries:
-        _p()
-        _p(f"  {A.GREY}HTML attribute findings (not in JS content):{A.RESET}")
-        for he in html_entries:
-            _page = re.sub(r"^https?://[^/]+", "", he["url"].replace("html:", "")) or he["url"]
-            sec_c = A.RED if he["secrets"] > 0 else A.GREY
-            _p(f"  {A.GREY}•{A.RESET} {_page[:40].ljust(41)}  {A.GREY}[page]{A.RESET}  {sec_c}secrets={he['secrets']}{A.RESET}")
+        # Secret detection — scan once against primary URL
+        for f in scanner.scan(content, primary_js.url, primary_js.source_page):
+            if f.sha256 not in seen_finds:
+                seen_finds.add(f.sha256)
+                # Record all occurrence URLs in the finding
+                if len(all_urls) > 1:
+                    f.occurrences = [f"{u}:{f.line_number}" for u in all_urls]
+                findings.append(f)
 
-    if not verbose and len(js_files) > 20:
-        _p(f"\n  {A.GREY}  ... and {len(js_files)-20} more  (-v to show all){A.RESET}")
-    _p()
+        # Endpoint extraction — deduplicate by canonical key
+        _eps_this_file = []
+        for ep in extract_all_endpoints(content, primary_js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
 
+        for ep in extract_endpoints(content, primary_js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
 
-# ── Feature summaries ─────────────────────────────────────────────────────────
+        # Infrastructure detection
+        infra.extend(extract_infrastructure(content, primary_js.url))
 
-def print_source_maps(discovered, valid, recovered, sources, details=None):
-    if not discovered:
-        return
-    _section("SOURCE MAPS", "", A.YELLOW)
-    for label, val in [("Discovered", str(discovered)), ("Valid", str(valid)),
-                       ("Recovered", str(recovered)), ("Sources", str(sources))]:
-        _p(f"  {_label(label)}{val}")
-    if details:
-        for d in details:
-            _p(f"\n  {A.WHITE}{d.get('js','')}{A.RESET}")
-            _p(f"  {A.GREY}  └─ {d.get('map','')}{A.RESET}")
-            if d.get("sources"):
-                _p(f"  {A.GREY}     ├─ {d['sources']} original sources{A.RESET}")
-    _p()
+    for sha, group in content_groups.items():
+        primary = group[0]
+        all_urls = [js.url for js in group]
+        _process(primary, all_urls)
 
+    for js in no_hash:
+        _process(js, [js.url])
 
-def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0):
-    if not discovered:
-        return
-    _section("WEBPACK CHUNKS", "", A.YELLOW)
-    rows = [("Runtime", "detected" if runtime else "not found"),
-            ("Discovered", str(discovered)), ("Downloaded", str(downloaded))]
-    if endpoints:
-        rows.append(("New endpoints", str(endpoints)))
-    if findings:
-        rows.append(("New findings", str(findings)))
-    for label, val in rows:
-        _p(f"  {_label(label)}{val}")
-    _p()
+    return findings, endpoints, infra
 
 
-def print_passive(source, urls, js, unique, new, errors=None):
-    _section("PASSIVE DISCOVERY", "", A.CYAN)
-    _p(f"  {_label('Source')}{source}")
-    if urls > 0:
-        _p(f"  {_label('URLs found')}{urls}")
-        _p(f"  {_label('JS assets')}{js}")
-        _p(f"  {_label('New')}{new}")
-    else:
-        _p(f"  {_label('Status')}{A.GREY}No historical assets found{A.RESET}")
-    if errors:
-        for err in errors:
-            _p(f"  {A.YELLOW}  ! {err}{A.RESET}")
-    _p()
+def run_scan(args) -> int:
+    # Handle --json / --csv shortcuts
+    if args.json:
+        args.format = "json"
+        args.quiet  = True
+    if args.csv:
+        args.format = "csv"
+        args.quiet  = True
 
+    _setup_logging(args.verbose, getattr(args, "debug", False), args.quiet)
 
-def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
-                   workers=0, timings=None):
-    _section("BROWSER DISCOVERY", "", A.CYAN)
-    rows = [("Engine", "Chromium"), ("Pages", str(pages)), ("JS captured", str(js))]
-    if xhr or fetch:
-        rows.append(("API calls", str(xhr + fetch)))
-    if ws:
-        rows.append(("WebSockets", str(ws)))
-    if routes:
-        rows.append(("Routes", str(routes)))
-    if endpoints:
-        rows.append(("Endpoints", str(endpoints)))
-    if workers:
-        rows.append(("Workers", str(workers)))
-    for label, val in rows:
-        _p(f"  {_label(label)}{val}")
+    # Apply NO_COLOR
+    if args.no_color or os.environ.get("NO_COLOR"):
+        os.environ["NO_COLOR"] = "1"
 
-    # Phase timings
-    if timings:
-        _p()
-        _p(f"  {A.GREY}Phase timings:{A.RESET}")
-        phase_labels = {
-            "browser_start": "Browser start",
-            "phase1_root":   "Root page",
-            "phase2_routes": "Route crawl",
-            "endpoint_build":"Endpoint build",
-            "total":         "Total",
+    target = args.target.strip()
+
+    # Normalize URL — fix common input mistakes
+    # Collapse duplicate schemes: https://https://x -> https://x
+    while re.match(r'^https?://https?://', target):
+        target = re.sub(r'^https?://(https?://)', r'\1', target)
+    # Add scheme if completely missing
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    # Safety check — fail cleanly, no prompt
+    safe, reason = validate_url(target, check_dns=False)
+    if not safe:
+        phase_error(f"Target blocked by safety policy: {reason}")
+        return 2
+
+    formats = [f.strip() for f in args.format.split(",")]
+    started = datetime.utcnow()
+    extras  = {}
+
+    if not args.quiet:
+        mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
+        if args.stealth:
+            mode += " + Stealth"
+        if args.cookie or args.header:
+            mode += " + Credentials supplied"
+        scope_label = "Subdomains included" if args.subdomains else "Strict"
+        print_header(target, mode=mode, scope=scope_label, version=PROJECT_VERSION, author=AUTHOR_NAME)
+
+    # Parse extra headers
+    extra_headers = {}
+    for h in args.header:
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra_headers[k.strip()] = v.strip()
+    if args.cookie:
+        extra_headers["Cookie"] = args.cookie
+
+    fetcher = Fetcher(
+        timeout=args.timeout,
+        requests_per_second=args.rate,
+        stealth=args.stealth,
+        extra_headers=extra_headers,
+    )
+    scope = ScopeChecker(
+        target_url=target,
+        same_origin=True,
+        subdomains=args.subdomains,
+        exclude=args.exclude,
+    )
+
+    all_js: list = []
+    errors: list = []
+
+    # ── Active crawl ──────────────────────────────────────────────────────────
+    # Skip crawler when headless + credentials are supplied.
+    # The unauthenticated crawler would only hit the login page and waste time.
+    # Headless handles full discovery with the authenticated session instead.
+    _skip_crawler = args.headless and bool(args.cookie or args.header)
+    crawler = None  # may stay None if skipped or passive
+
+    if not args.passive and not _skip_crawler:
+        if not args.quiet:
+            phase("Crawling target")
+        crawler = Crawler(
+            target_url=target, fetcher=fetcher, scope=scope,
+            max_depth=args.depth, max_pages=args.max_pages,
+            max_js_files=args.max_js, common_paths=args.common_paths,
+        )
+        try:
+            crawler.crawl()
+        except KeyboardInterrupt:
+            phase_warn("Scan interrupted by user")
+            return 0
+
+        errors.extend(crawler.errors)
+        all_js.extend(crawler.js_files)
+
+        # Include HTML attribute findings from crawler
+        html_findings_from_crawler = getattr(crawler, "html_findings", [])
+
+        for idx, (script_content, source_page) in enumerate(crawler.inline_scripts):
+            import hashlib
+            content_hash = hashlib.sha256(
+                script_content.encode("utf-8", errors="ignore")
+            ).hexdigest()
+            inline_url = (
+                f"inline:{source_page}"
+                f"#script-{idx + 1}-{content_hash[:12]}"
+            )
+            all_js.append(JSFile(
+                url=inline_url,
+                source_page=source_page,
+                status_code=200, content_type="text/javascript",
+                size_bytes=len(script_content), sha256=content_hash,
+                content=script_content,
+            ))
+
+        if not args.quiet:
+            phase_done("Crawl complete",
+                f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
+
+    # ── Passive ───────────────────────────────────────────────────────────────
+    if args.passive:
+        if not args.quiet:
+            phase("Collecting from web archives")
+        from .discovery.passive import collect_passive_js_urls
+        passive_urls = collect_passive_js_urls(target)
+        new_js = 0
+        seen   = set()
+        for url in passive_urls[:args.max_js]:
+            if url in seen or not scope.in_scope(url):
+                continue
+            seen.add(url)
+            content, status, ct, sha256 = fetcher.get(url)
+            if content and status in range(200, 300):
+                from datetime import datetime as dt
+                all_js.append(JSFile(
+                    url=url, source_page=target, status_code=status,
+                    content_type=ct, size_bytes=len(content),
+                    sha256=sha256, content=content, discovered_at=dt.utcnow(),
+                ))
+                new_js += 1
+        extras["passive_stats"] = {
+            "source": "Wayback Machine + CommonCrawl",
+            "urls": len(passive_urls), "js": new_js,
+            "unique": new_js, "new": new_js,
         }
-        for key, label in phase_labels.items():
-            if key in timings:
-                secs = timings[key]
-                color = A.RED if key == "total" else A.GREY
-                _p(f"  {A.GREY}  {label:<16}{color}{secs:.1f}s{A.RESET}")
-    _p()
+        if not args.quiet:
+            phase_done("Passive collection", f"{len(passive_urls)} archive URLs  {new_js} JS assets")
+
+    # ── Headless ──────────────────────────────────────────────────────────────
+    if args.headless:
+        if not args.quiet:
+            phase("Launching advanced headless browser")
+        from .discovery.headless import collect_headless_full, _parse_cookie_string
+        # Extract routes from already-collected JS files
+        # so headless visits every Angular/React/Vue route
+        from .analysis.ast_endpoints import extract_all_endpoints as _extract_eps
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(target)
+        _base   = f"{_parsed.scheme}://{_parsed.netloc}"
+        _static_routes = set()
+        for _js in all_js:
+            if not _js.content:
+                continue
+            for _ep in _extract_eps(_js.content, _js.url):
+                # Only relative paths — these are frontend routes
+                if _ep.url.startswith("/") and not _ep.url.startswith("//"):
+                    # Skip API paths — we want page routes not API endpoints
+                    if not any(k in _ep.url.lower() for k in [
+                        "/api/", "/rest/", "/graphql", "/v1/", "/v2/",
+                        "/upload", "/download", "/socket",
+                    ]):
+                        _static_routes.add(_base + _ep.url.split("?")[0])
+
+        # Combine crawler pages + statically discovered routes
+        crawler_seen  = getattr(crawler if not args.passive else None, "visited_js", set()) or set()
+        crawler_pages = list(getattr(crawler if not args.passive else None, "visited_pages", set()) or set())
+        all_seed_urls = list(set(crawler_pages) | _static_routes)
+
+        if _static_routes and not args.quiet and not getattr(args, "silent", False):
+            phase(f"Headless will visit {len(all_seed_urls)} pages ({len(_static_routes)} from JS routes)")
+
+        # Parse cookie string into Playwright cookie dicts
+        _parsed_domain = _urlparse(target).netloc.split(":")[0]
+        _playwright_cookies = _parse_cookie_string(args.cookie, _parsed_domain) if args.cookie else []
+
+        # Pre-seed headless dedup with content hashes from crawler JS files.
+        # This prevents headless from counting a file it sees again (same content,
+        # possibly same or different URL) as a new unique JS asset.
+        _crawler_js_hashes = {js.sha256 for js in all_js if js.sha256}
+
+        headless_result = collect_headless_full(
+            target, scope,
+            stealth       = args.stealth,
+            timeout       = args.timeout,
+            max_pages     = args.max_pages,
+            external_seen = crawler_seen,
+            seed_urls     = all_seed_urls,
+            interact      = getattr(args, "interact", False),
+            workers       = getattr(args, "workers", 3),
+            cookies       = _playwright_cookies,
+            extra_headers = extra_headers,
+            seen_hashes   = _crawler_js_hashes,
+        )
+        headless_files     = headless_result.get("js_files", [])
+        # Tag all browser-captured files so the inventory can distinguish them
+        for _hf in headless_files:
+            if not getattr(_hf, "source_type", ""):
+                _hf.source_type = "browser"
+        headless_endpoints = headless_result.get("endpoints", [])
+        headless_stats     = headless_result.get("stats", {})
+
+        # Store auth result — used for mode label correction and report
+        _auth_result = headless_result.get("auth_result")
+        if _auth_result:
+            extras["auth_result"] = _auth_result
+            # Correct the mode label based on actual verification
+            if _auth_result["credentials_supplied"]:
+                if _auth_result["authenticated"]:
+                    extras["auth_verified"] = True
+                else:
+                    extras["auth_verified"] = False
+
+        all_js.extend(headless_files)
+
+        # Add network-intercepted endpoints directly
+        if headless_endpoints:
+            all_endpoints_extra = headless_endpoints
+        else:
+            all_endpoints_extra = []
+
+        extras["headless_stats"] = {
+            "pages":     headless_stats.get("pages", 0),
+            "js":        len(headless_files),
+            "xhr":       headless_stats.get("xhr", 0),
+            "fetch":     headless_stats.get("fetch", 0),
+            "ws":        headless_stats.get("ws", 0),
+            "routes":    headless_stats.get("routes", 0),
+            "endpoints": headless_stats.get("endpoints", 0),
+            "workers":   headless_stats.get("workers", 0),
+            "timings":   headless_stats.get("timings", {}),
+        }
+        if not args.quiet:
+            phase_done("Browser discovery",
+                f"{headless_stats.get('pages',0)} pages  "
+                f"{len(headless_files)} JS  "
+                f"{headless_stats.get('xhr',0)+headless_stats.get('fetch',0)} API calls  "
+                f"{headless_stats.get('ws',0)} WS  "
+                f"{headless_stats.get('routes',0)} routes"
+            )
+
+    # ── Source maps ───────────────────────────────────────────────────────────
+    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
+    if args.source_maps:
+        if not args.quiet:
+            phase("Analyzing source maps")
+        from .discovery.source_maps import process_js_file
+        recovered_files = []
+        for js_file in list(all_js):
+            result = process_js_file(js_file, fetcher, scope)
+            if result:
+                sm_details["discovered"] += 1
+                if result.recovered_files:
+                    sm_details["valid"]     += 1
+                    sm_details["recovered"] += 1
+                    sm_details["sources"]   += len(result.recovered_files)
+                    sm_details["items"].append({
+                        "js":      js_file.url.split("/")[-1],
+                        "map":     result.map_url.split("/")[-1] if not result.map_url.startswith("data:") else "inline",
+                        "sources": len(result.recovered_files),
+                    })
+                    recovered_files.extend(result.recovered_files)
+        all_js.extend(recovered_files)
+        extras["source_map_details"] = sm_details
+        extras["recovered_sources"]  = len(recovered_files)
+        if not args.quiet:
+            phase_done("Source map analysis",
+                f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
+
+    # ── Webpack chunks ────────────────────────────────────────────────────────
+    chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0}
+    if args.chunks:
+        if not args.quiet:
+            phase("Discovering webpack chunks")
+        from .discovery.webpack_chunks import fetch_chunks, detect_webpack
+        seen_chunk_urls = {js.url for js in all_js}
+        chunk_files     = []
+        for js_file in list(all_js):
+            if detect_webpack(js_file.content):
+                chunk_stats["runtime"] = True
+            chunks = fetch_chunks(js_file, fetcher, scope, seen_chunk_urls)
+            chunk_files.extend(chunks)
+        all_js.extend(chunk_files)
+        chunk_stats["discovered"] = len(chunk_files)
+        chunk_stats["downloaded"] = len(chunk_files)
+        extras["chunk_stats"]  = chunk_stats
+        extras["chunks_found"] = len(chunk_files)
+        if not args.quiet:
+            phase_done("Chunk discovery", f"{len(chunk_files)} chunks")
+
+    # ── Analysis ──────────────────────────────────────────────────────────────
+    if not args.quiet:
+        phase("Analyzing JavaScript")
+    import time as _time
+    import logging as _logging
+    _logger = _logging.getLogger("bundlespy.cli")
+    _t_analysis = _time.monotonic()
+    scanner = SecretScanner()
+    all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
+    _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
+    _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
+
+    # Re-categorize UNKNOWN endpoints using full classifier
+    from .analysis.endpoints import _categorize_path as _recat
+    from urllib.parse import urlparse as _uprc
+    for _ep in all_endpoints:
+        if _ep.category in ("UNKNOWN", ""):
+            _ep_path = _uprc(_ep.url).path or _ep.url
+            _ep.category = _recat(_ep_path)
+
+    # Merge HTML attribute findings BEFORE building per-file stats
+    # so html: findings are visible to the stats builder
+    html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
+    seen_html = {f.sha256 for f in all_findings}
+    for f in html_findings_from_crawler:
+        if f.sha256 not in seen_html:
+            seen_html.add(f.sha256)
+            all_findings.append(f)
+
+    # Per-file analysis breakdown — prove every file was analyzed
+    # Build per-file stats from already-computed findings and endpoints
+    # Strip all URL prefixes for matching (html:, inline:, sourcemap://, etc.)
+    def _strip_url_prefix(url: str) -> str:
+        for pfx in ["html:", "inline:", "sourcemap://", "local://", "headless://"]:
+            if url.startswith(pfx):
+                return url[len(pfx):].rstrip("/")
+        return url.rstrip("/")
+
+    # Build lookup: stripped_url -> count
+    _findings_by_stripped = {}
+    for _f in all_findings:
+        _fkey = _strip_url_prefix(_f.file_url or "")
+        if _f.status != "likely_false_positive":
+            _findings_by_stripped[_fkey] = _findings_by_stripped.get(_fkey, 0) + 1
+
+    _endpoints_by_stripped = {}
+    for _ep in all_endpoints:
+        _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
+        _endpoints_by_stripped[_ekey] = _endpoints_by_stripped.get(_ekey, 0) + 1
+
+    # Per-file stats — run each extractor on each file individually
+    # HTML attribute findings (html: prefix) are PAGE-level, not script-level
+    # They are shown separately — we do NOT assign them to inline scripts
+    from .analysis.endpoint_intel import extract_endpoint_intelligence as _ep_intel
+    from .analysis.ast_endpoints import extract_all_endpoints as _ast_ep
+
+    # Per-file stats — map already-computed findings/endpoints back to each file
+    # This is accurate because it uses the SAME findings already verified correct
+    # Re-running the scanner would get different results due to env/path differences
+
+    # Build lookup: file_url (stripped) -> secret count
+    _sec_by_file = {}
+    for _f in all_findings:
+        if _f.status == "likely_false_positive":
+            continue
+        _furl = _f.file_url or ""
+        _fkey = _strip_url_prefix(_furl)
+        _sec_by_file[_fkey] = _sec_by_file.get(_fkey, 0) + 1
+
+    # Build lookup: source_file (stripped) -> endpoint count
+    _ep_by_file = {}
+    for _ep in all_endpoints:
+        _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
+        _ep_by_file[_ekey] = _ep_by_file.get(_ekey, 0) + 1
+
+    # Build lookup: source_file (stripped) -> infra count
+    _infra_by_file = {}
+    for _inf in all_infra:
+        _ikey = _strip_url_prefix(getattr(_inf, "source_file", "") or "")
+        _infra_by_file[_ikey] = _infra_by_file.get(_ikey, 0) + 1
+
+    # Track which inline pages already showed their secret count
+    # to avoid repeating it on every inline script from the same page
+    _inline_page_shown = set()
+
+    per_file_stats = []
+    for js in all_js:
+        if not js.content:
+            continue
+
+        _js_key = _strip_url_prefix(js.url)
+        _is_inline = js.url.startswith("inline:") or js.url.startswith("html:")
+
+        if _is_inline:
+            _sec_count = _sec_by_file.get(_js_key, 0)
+        else:
+            _sec_count = _sec_by_file.get(_js_key, 0)
+
+        per_file_stats.append({
+            "url":        js.url,
+            "size":       js.size_bytes,
+            "sha256":     js.sha256[:8] if js.sha256 else "",
+            "secrets":    _sec_count,
+            "endpoints":  _ep_by_file.get(_js_key, 0),
+            "infra":      _infra_by_file.get(_js_key, 0),
+            "technology": getattr(js, "technology", ""),
+            "note":       "",
+        })
+
+    # HTML attribute findings — completely separate section, never merged into inline JS
+    # Each page that has html: findings gets its own row, independent of inline scripts
+    _html_pages = {}
+    for _f in all_findings:
+        if _f.status == "likely_false_positive":
+            continue
+        _furl = _f.file_url or ""
+        if _furl.startswith("html:"):
+            _page = _furl[5:]
+            _html_pages[_page] = _html_pages.get(_page, 0) + 1
+
+    for _page_url, _count in _html_pages.items():
+        per_file_stats.append({
+            "url":        "html:" + _page_url,
+            "size":       0,
+            "sha256":     "",
+            "secrets":    _count,
+            "endpoints":  0,
+            "infra":      0,
+            "technology": "html-attrs",
+            "note":       "HTML attributes",
+        })
+
+    extras["per_file_stats"] = per_file_stats
+
+    # Add every crawled page as a discovered route endpoint
+    # These are real pages the crawler actually visited
+    if not args.passive:
+        from urllib.parse import urlparse as _up
+        from .storage.models import Endpoint as _Endpoint
+        _crawled_pages = getattr(crawler, "visited_pages", set()) or set()
+        _seen_ep = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
+        for _page_url in _crawled_pages:
+            _pp   = _up(_page_url)
+            _path = _pp.path or "/"
+            _key  = _page_url.rstrip("/").lower().split("?")[0]
+            if _key in _seen_ep:
+                continue
+            # Skip bare root and /index duplicates
+            if _path in ("/", "/index", "/index.html", "/index.php", ""):
+                continue
+            # Skip if the full URL is just the target root
+            if _page_url.rstrip("/").lower() == target.rstrip("/").lower():
+                continue
+            _seen_ep.add(_key)
+            # Categorize the page route
+            _lower = _path.lower()
+            if any(k in _lower for k in ["/login", "/logout", "/auth", "/register", "/signin", "/signup"]):
+                _cat = "AUTH"
+            elif any(k in _lower for k in ["/admin", "/administration", "/manage"]):
+                _cat = "ADMIN"
+            elif "/graphql" in _lower:
+                _cat = "GRAPHQL"
+            elif any(k in _lower for k in ["/api/", "/rest/", "/v1/", "/v2/"]):
+                _cat = "API"
+            else:
+                _cat = "ROUTE"
+            # Query params from the page URL
+            _qp = []
+            if _pp.query:
+                for _pair in _pp.query.split("&"):
+                    _n = _pair.split("=")[0]
+                    if _n:
+                        _qp.append({"name": _n})
+            all_endpoints.append(_Endpoint(
+                url=_page_url, path=_path, method="GET",
+                category=_cat, source_file="crawler://page",
+                line_number=0, confidence=0.99,
+                host=_pp.netloc, query_params=_qp,
+                path_params=[], body_fields=[], request_headers={},
+                auth_context="", evidence="Crawled page", kind="route",
+            ))
+
+    # Merge headless-intercepted endpoints (real network calls, high confidence)
+    if args.headless and "all_endpoints_extra" in dir():
+        from .analysis.endpoints import _categorize_path as _cat_path
+        seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
+        for ep in all_endpoints_extra:
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_ep_keys:
+                seen_ep_keys.add(key)
+                # Re-categorize UNKNOWN endpoints using full classifier
+                if ep.category in ("UNKNOWN", ""):
+                    from urllib.parse import urlparse as _upep
+                    _ep_path = _upep(ep.url).path or ep.url
+                    ep.category = _cat_path(_ep_path)
+                all_endpoints.append(ep)
+    if not args.quiet:
+        phase_done("Analysis complete",
+            f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
+
+    # Deduplicate findings by rule + value — same secret on multiple pages
+    # becomes ONE finding with all occurrences listed
+    _finding_map = {}
+    _deduped_findings = []
+    for f in all_findings:
+        dedup_key = f"{f.rule_id}:{f.matched_value}"
+        if dedup_key in _finding_map:
+            # Add this location to the existing finding's occurrences
+            existing = _finding_map[dedup_key]
+            loc = f"{f.file_url}:{f.line_number}"
+            if not existing.occurrences:
+                existing.occurrences = []
+            if loc not in existing.occurrences:
+                existing.occurrences.append(loc)
+        else:
+            _finding_map[dedup_key] = f
+            loc = f"{f.file_url}:{f.line_number}"
+            if not f.occurrences:
+                f.occurrences = [loc]
+            _deduped_findings.append(f)
+    all_findings = _deduped_findings
+
+    # Remove bare target root from endpoints — it's not an API endpoint
+    _target_base = target.rstrip("/").lower()
+    all_endpoints = [
+        ep for ep in all_endpoints
+        if ep.url.rstrip("/").lower() not in (_target_base, _target_base + "/")
+        and not (ep.url.rstrip("/").lower() == _target_base and ep.method == "UNKNOWN")
+    ]
+
+    # Final endpoint dedup — keep parameterized endpoints distinct
+    # Dedup by path + sorted param names (not param values)
+    # so /product?productId=1 and /product?productId=2 merge to one,
+    # but /product?productId and /product?category stay separate
+    seen_final = set()
+    deduped = []
+    for ep in all_endpoints:
+        from urllib.parse import urlparse as _upx
+        _p = _upx(ep.url)
+        _path = _p.path.rstrip("/").lower()
+        # Build param signature from query param names
+        _param_names = sorted(qp.get("name", "") for qp in (ep.query_params or []))
+        _param_sig = ",".join(_param_names)
+        # Method + path + param names = unique attack surface
+        key = f"{ep.method}:{_path}?{_param_sig}"
+        if key not in seen_final:
+            seen_final.add(key)
+            deduped.append(ep)
+    all_endpoints = deduped
+
+    # ── Attack surface analysis ────────────────────────────────────────────────
+    from .analysis.attack_surface import analyze_attack_surface
+    attack_surface = analyze_attack_surface(all_endpoints)
+    extras["attack_surface"] = attack_surface
+
+    # ── Vulnerable library detection ───────────────────────────────────────────
+    if not args.quiet and not getattr(args, "silent", False):
+        phase("Scanning for vulnerable libraries")
+    from .analysis.library_scanner import scan_for_vulnerable_libraries
+    lib_findings = []
+    lib_seen = set()
+    for js in all_js:
+        for lf in scan_for_vulnerable_libraries(js.content, js.url):
+            key = f"{lf.library}:{lf.version}:{lf.cve_id}"
+            if key not in lib_seen:
+                lib_seen.add(key)
+                lib_findings.append(lf)
+    extras["lib_findings"] = lib_findings
+    if not args.quiet and not getattr(args, "silent", False):
+        if lib_findings:
+            # Count unique libraries vs total CVEs
+            unique_libs = len(set(f"{l.library}:{l.version}" for l in lib_findings))
+            total_cves  = len(lib_findings)
+            crit = sum(1 for l in lib_findings if l.severity == "CRITICAL")
+            high = sum(1 for l in lib_findings if l.severity == "HIGH")
+
+            lib_word = "library" if unique_libs == 1 else "libraries"
+            cve_word = "vulnerability" if total_cves == 1 else "vulnerabilities"
+            detail = f"{total_cves} {cve_word} in {unique_libs} {lib_word}"
+            if crit: detail += f"  {crit} critical"
+            if high: detail += f"  {high} high"
+            phase_done("Library scan", detail)
+        else:
+            phase_done("Library scan", "no known vulnerable libraries")
+
+    # Update chunk stats with findings
+    if args.chunks:
+        chunk_stats["findings"]  = len([f for f in all_findings if any(c.technology == "webpack-chunk" for c in all_js if c.url == f.file_url)])
+        chunk_stats["endpoints"] = len([e for e in all_endpoints if any(c.technology == "webpack-chunk" for c in all_js if c.url == e.source_file)])
+
+    # ── Subdomain harvesting ──────────────────────────────────────────────────
+    subdomains = []
+    if args.harvest_subs:
+        if not args.quiet:
+            phase("Harvesting subdomains")
+        from .discovery.subdomains import harvest_subdomains
+        subdomains = harvest_subdomains(
+            target,
+            [js.content for js in all_js],
+            [ep.url for ep in all_endpoints],
+        )
+        extras["subdomains"] = len(subdomains)
+        if not args.quiet:
+            phase_done("Subdomain harvest", f"{len(subdomains)} subdomains")
+
+    # ── Endpoint validation ───────────────────────────────────────────────────
+    validation_results = []
+    if args.validate and all_endpoints:
+        if not args.quiet:
+            phase(f"Validating {len(all_endpoints)} endpoints")
+        from .analysis.endpoint_validator import validate_endpoints
+        validation_results = validate_endpoints(
+            all_endpoints, target, scope,
+            stealth=args.stealth, rate=max(1, args.rate // 2),
+        )
+        interesting = sum(1 for r in validation_results if r.interesting)
+        if not args.quiet:
+            phase_done("Endpoint validation", f"{interesting} interesting")
+
+    # ── GraphQL ───────────────────────────────────────────────────────────────
+    graphql_schemas = []
+    if args.graphql and all_endpoints:
+        if not args.quiet:
+            phase("GraphQL introspection")
+        from .analysis.graphql import find_graphql_endpoints, introspect
+        gql_urls = find_graphql_endpoints(all_endpoints)
+        for gql_url in gql_urls:
+            schema = introspect(gql_url, stealth=args.stealth)
+            if schema:
+                graphql_schemas.append(schema)
+        total_ops = sum(len(s.queries) + len(s.mutations) for s in graphql_schemas if not s.error)
+        extras["graphql_queries"] = total_ops
+        if not args.quiet:
+            phase_done("GraphQL", f"{len(gql_urls)} endpoints  {total_ops} operations")
+
+    # ── Secret validation ─────────────────────────────────────────────────────
+    if args.validate_secrets and all_findings:
+        if not args.quiet:
+            phase("Validating secrets")
+        from .analysis.secret_validator import validate_finding
+        validated = 0
+        for finding in all_findings:
+            if finding.status == "likely_false_positive":
+                continue
+            vr = validate_finding(finding.rule_id, finding.matched_value)
+            if vr and vr.valid:
+                finding.status      = "validated"
+                finding.description += f" | VALIDATED: {vr.detail}"
+                validated += 1
+        if not args.quiet:
+            phase_done("Secret validation", f"{validated} confirmed active")
+
+    # ── Build result ──────────────────────────────────────────────────────────
+    finished = datetime.utcnow()
+    result = ScanResult(
+        target_url     = target,
+        started_at     = started,
+        finished_at    = finished,
+        pages_crawled  = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
+        js_files       = all_js,
+        findings       = all_findings,
+        endpoints      = all_endpoints,
+        infrastructure = all_infra,
+        errors         = errors,
+    )
+
+    # ── Coverage metrics ──────────────────────────────────────────────────────
+    from .analysis.coverage import compute_coverage
+    coverage = compute_coverage(
+        js_files            = all_js,
+        endpoints           = all_endpoints,
+        findings            = all_findings,
+        pages_crawled       = getattr(crawler if not args.passive else None, "pages_crawled", 0) or 0,
+        headless_used       = args.headless,
+        source_maps         = args.source_maps,
+        chunks_used         = args.chunks,
+        passive_used        = args.passive,
+        has_cookie          = bool(args.cookie),
+        has_headless_routes = extras.get("headless_stats", {}).get("routes", 0),
+        lib_findings        = extras.get("lib_findings", []),
+        scan_errors         = errors,
+        headless_stats      = extras.get("headless_stats", {}),
+        sm_details          = extras.get("source_map_details", {}),
+        visited_pages       = getattr(crawler if not args.passive else None, "visited_pages", set()) or set(),
+    )
+    extras["coverage"] = coverage
+
+    # ── Reports ───────────────────────────────────────────────────────────────
+    file_paths = {}
+    file_formats = [f for f in formats if f != "terminal"]
+    if file_formats:
+        file_paths = _write_reports(result, file_formats, args.output, started)
+
+    if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
+        print_report(
+            result,
+            verbose             = args.verbose,
+            no_color            = args.no_color,
+            extras              = extras,
+            validation_results  = validation_results,
+            graphql_schemas     = graphql_schemas,
+            subdomains          = subdomains,
+            report_paths        = file_paths,
+        )
+    elif getattr(args, "silent", False):
+        # Silent mode — print only findings, one per line
+        real = [f for f in all_findings if f.status != "likely_false_positive"]
+        for f in real:
+            print(f"[{f.severity}] {f.title} | {f.file_url}:{f.line_number} | {f.matched_value}")
+    elif args.quiet and file_paths:
+        for fmt, path in file_paths.items():
+            print(path)
+
+    critical = [f for f in all_findings
+                if f.severity == "CRITICAL" and f.status != "likely_false_positive"]
+    return 1 if critical else 0
 
 
-def _print_libraries(lib_findings):
-    if not lib_findings:
-        return
+def run_local(args) -> int:
+    _setup_logging(args.verbose, False, False)
+    if args.no_color or os.environ.get("NO_COLOR"):
+        os.environ["NO_COLOR"] = "1"
 
-    # Group CVEs by library+version
-    by_lib: dict = {}
-    for lf in lib_findings:
-        key = f"{lf.library}::{lf.version}"
-        by_lib.setdefault(key, []).append(lf)
+    path = args.path
+    if not args.verbose:
+        from .ui.printer import phase
+        phase(f"Local scan: {path}")
 
-    unique_libs = len(by_lib)
-    total_cves  = len(lib_findings)
+    from .discovery.local_scanner import load_local_files
+    js_files = load_local_files(path)
 
-    counts: dict = {}
-    for lf in lib_findings:
-        counts[lf.severity] = counts.get(lf.severity, 0) + 1
+    if not js_files:
+        phase_error("No JavaScript files found.")
+        return 0
 
-    _section("VULNERABLE LIBRARIES",
-             f"{total_cves} in {unique_libs}", A.RED)
+    scanner = SecretScanner()
+    all_findings, all_endpoints, all_infra = _analyze(js_files, scanner)
 
-    # Severity summary bar
-    parts = []
-    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
-        if counts.get(sev):
-            c = SEV_COLOR.get(sev, "")
-            parts.append(f"{c}{counts[sev]} {sev.lower()}{A.RESET}")
-    if parts:
-        _p("  " + "   ".join(parts))
-    _p()
+    started  = datetime.utcnow()
+    finished = datetime.utcnow()
 
-    # One block per library, showing all its CVEs together
-    for lib_key in sorted(by_lib.keys(),
-                          key=lambda k: -max(c.cvss for c in by_lib[k])):
-        cves    = sorted(by_lib[lib_key], key=lambda x: -x.cvss)
-        library = cves[0].library
-        version = cves[0].version
-        fname   = cves[0].source_file.split("/")[-1] if "/" in cves[0].source_file else cves[0].source_file
+    result = ScanResult(
+        target_url=f"local://{path}", started_at=started, finished_at=finished,
+        pages_crawled=0, js_files=js_files,
+        findings=all_findings, endpoints=all_endpoints,
+        infrastructure=all_infra, errors=[],
+    )
 
-        # Highest severity determines header color
-        top_sev = cves[0].severity
-        hc      = SEV_COLOR.get(top_sev, "")
+    extras = {"local_path": path}
+    formats = [f.strip() for f in args.format.split(",")]
+    file_paths = {}
+    file_formats = [f for f in formats if f != "terminal"]
+    if file_formats:
+        file_paths = _write_reports(result, file_formats, args.output, started)
 
-        # Library header
-        _p(f"  {hc}{A.BOLD}{library} {version}{A.RESET}  {A.GREY}·  {fname}{A.RESET}")
-        _p(f"  {A.GREY}{'─' * min(_w()-4, 70)}{A.RESET}")
-
-        # Each CVE as a clean row
-        for cve in cves:
-            c        = SEV_COLOR.get(cve.severity, "")
-            sev_tag  = f"{c}{cve.severity:<8}{A.RESET}"
-            cvss_tag = f"{A.GREY}CVSS {cve.cvss}{A.RESET}"
-            _p(f"  {sev_tag} {A.CYAN}{cve.cve_id}{A.RESET}  {cvss_tag}")
-            _p(f"           {cve.description}")
-            _p(f"           {A.GREY}Fix: {cve.remediation}{A.RESET}")
-            _p()
-        _p()
-
-
-def _print_intelligence(intel):
-    has = (intel.sitemap_urls or intel.api_endpoints or
-           intel.security_txt or intel.openid_config or intel.api_schema)
-    if not has:
-        return
-
-    _section("PASSIVE INTELLIGENCE", "", A.PURPLE)
-
-    if intel.sitemap_urls:
-        _p(f"  {_label('Sitemap URLs')}{len(intel.sitemap_urls)}")
-        for url in intel.sitemap_urls[:8]:
-            _p(f"  {A.GREY}  • {url[:_w()-8]}{A.RESET}")
-        if len(intel.sitemap_urls) > 8:
-            _p(f"  {A.GREY}  ... and {len(intel.sitemap_urls)-8} more{A.RESET}")
-
-    if intel.api_schema:
-        _p(f"\n  {_label('API Schema')}{intel.api_schema.get('type','?')}  {A.GREY}{intel.api_schema.get('url','')}{A.RESET}")
-        for ep in intel.api_endpoints[:12]:
-            _p(f"  {A.GREY}  • {ep}{A.RESET}")
-
-    if intel.security_txt:
-        _p(f"\n  {_label('security.txt')}{A.GREEN}found{A.RESET}")
-        for line in intel.security_txt.splitlines()[:5]:
-            if line.strip() and not line.startswith("#"):
-                _p(f"  {A.GREY}  {line.strip()}{A.RESET}")
-
-    if intel.openid_config:
-        _p(f"\n  {_label('OpenID Config')}{A.YELLOW}found{A.RESET}")
-        if isinstance(intel.openid_config, dict):
-            for k in ["issuer", "authorization_endpoint", "token_endpoint"]:
-                if k in intel.openid_config:
-                    _p(f"  {A.GREY}  {k}: {intel.openid_config[k]}{A.RESET}")
-    _p()
-
-
-# ── Secret analysis ───────────────────────────────────────────────────────────
-
-def print_secret_analysis(findings):
-    if not findings:
-        return
-
-    # PUBLIC_IDENTIFIER findings (Netlify site IDs, etc.) are not secrets — exclude from counts
-    def _is_public_id(f):
-        return getattr(f, "classification", "") == "PUBLIC_IDENTIFIER" or f.rule_id in (
-            "NETLIFY_SITE_ID",
+    if "terminal" in formats:
+        print_report(
+            result,
+            verbose=args.verbose,
+            no_color=args.no_color,
+            report_paths=file_paths,
         )
 
-    secrets   = [f for f in findings if not _is_public_id(f)]
-    pub_ids   = [f for f in findings if _is_public_id(f)]
-    total     = len(secrets)
-    high_conf = sum(1 for f in secrets if f.confidence >= 0.85 and f.status != "likely_false_positive")
-    validated = sum(1 for f in secrets if f.status == "validated")
-    fps       = sum(1 for f in secrets if f.status == "likely_false_positive")
-
-    _section("SECRET ANALYSIS", "", A.RED)
-    for label, val, color in [
-        ("Detected",          str(total),        ""),
-        ("High confidence",   str(high_conf),    A.RED if high_conf else ""),
-        ("Likely FP",         str(fps),          A.GREY),
-        ("Validated",         str(validated),    A.RED + A.BOLD if validated else ""),
-        ("Public identifiers", str(len(pub_ids)), A.GREY),
-    ]:
-        if label == "Public identifiers" and len(pub_ids) == 0:
-            continue
-        _p(f"  {_label(label, 18)}{_val(val, color)}")
-    _p()
+    critical = [f for f in all_findings
+                if f.severity == "CRITICAL" and f.status != "likely_false_positive"]
+    return 1 if critical else 0
 
 
-# ── Findings ──────────────────────────────────────────────────────────────────
+def run_demo() -> int:
+    from .storage.models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
+    import hashlib
 
-def print_findings(findings, verbose=False):
-    real = [f for f in findings if f.status != "likely_false_positive"]
-    fps  = [f for f in findings if f.status == "likely_false_positive"]
-
-    if not real and not fps:
-        _section("FINDINGS")
-        _p(f"  {A.GREY}No findings detected above the confidence threshold.{A.RESET}")
-        _p()
-        return
-
-    counts: dict = {}
-    for f in real:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-
-    order    = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    fp_note  = f"  {A.GREY}+{len(fps)} FP excluded{A.RESET}" if fps else ""
-    _section("FINDINGS", f"{len(real)} confirmed{fp_note}", A.RED)
-
-    for sev in order:
-        if counts.get(sev):
-            c = SEV_COLOR.get(sev, "")
-            _p(f"  {c}{sev:<10}{A.RESET}  {counts[sev]}")
-    _p()
-
-    for f in sorted(real, key=lambda x: order.index(x.severity) if x.severity in order else 99):
-        _print_finding(f, verbose=verbose)
-
-    if fps and verbose:
-        _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
-        _p(f"  {A.GREY}Likely false positives ({len(fps)}){A.RESET}")
-        for f in fps[:10]:
-            fname = f.file_url.split("/")[-1] if "/" in f.file_url else f.file_url
-            _p(f"  {A.GREY}  • {f.title}  {fname}:{f.line_number}  {f.matched_value[:40]}{A.RESET}")
-    _p()
-
-
-def _print_finding(f, verbose=False):
-    sc  = SEV_COLOR.get(f.severity, "")
-
-    _p(f"  {sc}{f.severity:<8}{A.RESET}  {A.WHITE}{A.BOLD}{f.title}{A.RESET}  {A.GREY}({f.rule_id}){A.RESET}")
-    _p()
-
-    url = f.file_url[:_w()-6]
-    occ = getattr(f, "occurrences", None) or []
-    if len(occ) > 1:
-        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}  {A.YELLOW}(+{len(occ)-1} more pages){A.RESET}")
-    else:
-        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}")
-    _p(f"  {_label('Type')}{f.category}")
-
-    sc2 = {"likely_secret": A.RED, "validated": A.RED+A.BOLD,
-           "candidate": A.YELLOW, "likely_false_positive": A.GREY}.get(f.status, "")
-    _p(f"  {_label('Confidence')}{f.confidence:.0%}  {sc2}{f.status}{A.RESET}")
-    _p(f"  {_label('Evidence')}{sc}{f.matched_value}{A.RESET}")
-
-    if f.context and verbose:
-        ctx = f.context[:120].replace("\n", " ").strip()
-        _p(f"  {_label('Context')}{A.GREY}{ctx}{A.RESET}")
-
-    _p(f"  {_label('Fix')}{f.remediation[:100]}")
-
-    if f.status == "validated":
-        _p(f"  {A.RED}{A.BOLD}  ⚡ CONFIRMED ACTIVE{A.RESET}")
-
-    _p(f"  {A.GREY}{'─' * 60}{A.RESET}")
-    _p()
-
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
-
-def print_coverage(coverage) -> None:
-    """Print observed coverage data and blind spots — real counts only."""
-    if not coverage:
-        return
-
-    _section("COVERAGE & BLIND SPOTS", "", A.CYAN)
-
-    def _row(label: str, val, color=""):
-        _p(f"  {A.GREY}{label:<18}{A.RESET}  {color}{val}{A.RESET}")
-
-    # Pages
-    p = coverage.pages
-    _p(f"  {A.WHITE}{A.BOLD}Pages{A.RESET}")
-    _row("Discovered",   p.discovered)
-    _row("Visited",      p.visited,
-         A.GREEN if p.visited == p.discovered else A.YELLOW)
-    if p.failed:
-        _row("Failed", p.failed, A.RED)
-    if p.auth_required:
-        _row("Auth-required", p.auth_required, A.YELLOW)
-        for u in p.auth_urls[:3]:
-            _p(f"  {A.GREY}    {u}{A.RESET}")
-    _p()
-
-    # JavaScript
-    j = coverage.js
-    _p(f"  {A.WHITE}{A.BOLD}JavaScript{A.RESET}")
-    _row("Discovered", j.discovered)
-    _row("Analyzed",   j.analyzed,
-         A.GREEN if j.analyzed == j.discovered else A.YELLOW)
-    if j.failed:
-        _row("Failed", j.failed, A.RED)
-        for u in j.failed_urls[:2]:
-            _p(f"  {A.GREY}    {u}{A.RESET}")
-    _p()
-
-    # Routes
-    r = coverage.routes
-    if r.discovered > 0:
-        _p(f"  {A.WHITE}{A.BOLD}Routes{A.RESET}")
-        _row("Discovered", r.discovered)
-        _row("Visited",    r.visited,
-             A.GREEN if r.visited >= r.discovered else A.YELLOW)
-        if r.unvisited:
-            _row("Unvisited", r.unvisited, A.YELLOW)
-        _p()
-
-    # Runtime
-    rt = coverage.runtime
-    has_runtime = any([rt.api_requests, rt.websockets, rt.workers, rt.iframes])
-    if has_runtime:
-        _p(f"  {A.WHITE}{A.BOLD}Runtime{A.RESET}")
-        if rt.api_requests: _row("API requests",  rt.api_requests, A.GREEN)
-        if rt.websockets:   _row("WebSockets",    rt.websockets,   A.GREEN)
-        if rt.workers:      _row("Workers",       rt.workers,      A.GREEN)
-        if rt.iframes:      _row("Iframes",       rt.iframes,      A.GREEN)
-        _p()
-
-    # Source maps
-    sm = coverage.source_maps
-    _p(f"  {A.WHITE}{A.BOLD}Source Maps{A.RESET}")
-    if sm.discovered == 0:
-        _p(f"  {A.GREY}  None referenced in any JS file{A.RESET}")
-    else:
-        _row("Discovered",  sm.discovered)
-        if sm.recovered > 0:
-            _row("Recovered",   sm.recovered, A.GREEN)
-        else:
-            _row("Recovered",   0, A.YELLOW)
-        if sm.unavailable > 0:
-            _row("Unavailable", sm.unavailable, A.YELLOW)
-            for u in sm.unavailable_urls[:3]:
-                _p(f"  {A.GREY}    {u}{A.RESET}")
-    _p()
-
-    # Blind spots
-    if coverage.blind_spots:
-        _p(f"  {A.ORANGE}{A.BOLD}BLIND SPOTS{A.RESET}")
-        _p()
-        for bs in coverage.blind_spots:
-            sc = (A.RED    if bs.severity == "HIGH"   else
-                  A.YELLOW if bs.severity == "MEDIUM" else A.GREY)
-            _p(f"  {sc}[{bs.severity}]{A.RESET}  {bs.description}")
-            for u in (bs.urls or [])[:3]:
-                _p(f"  {A.GREY}         {u}{A.RESET}")
-            if bs.mitigation:
-                _p(f"  {A.GREY}         → {bs.mitigation}{A.RESET}")
-            _p()
-
-
-def print_attack_surface(surface):
-    if not surface:
-        return
-    # Only show section if there is something meaningful to display
-    has_content = (
-        surface.get("total_items", 0) > 0
-        or surface.get("state_change")
+    fake_js = JSFile(
+        url="https://demo.example.com/static/js/main.8f31ab.chunk.js",
+        source_page="https://demo.example.com/",
+        status_code=200, content_type="application/javascript",
+        size_bytes=42000, sha256=hashlib.sha256(b"fake").hexdigest(),
+        content="", technology="React",
     )
-    if not has_content:
-        return
 
-    total = surface.get("total_items", 0)
-    _section("ATTACK SURFACE", str(total), A.RED)
+    fake_findings = [
+        Finding(
+            id="demo001", rule_id="AWS_ACCESS_KEY", title="AWS Access Key ID",
+            category="AWS", severity="CRITICAL", confidence=0.96,
+            file_url=fake_js.url, source_page=fake_js.source_page,
+            line_number=18291, column=12,
+            matched_value="AKIAIOSFODNN7REALKEY",
+            redacted_value="AKIA***************EY",
+            sha256="abc123",
+            context="const awsKey = 'AKIAIOSFODNN7REALKEY'",
+            description="AWS Access Key ID found in JavaScript bundle.",
+            impact="", remediation="Remove from client-side code. Rotate in AWS console.",
+            false_positive_notes="", status="likely_secret",
+            occurrences=["main.8f31ab.chunk.js:18291"],
+        ),
+        Finding(
+            id="demo002", rule_id="JWT_TOKEN", title="JSON Web Token",
+            category="JWT", severity="HIGH", confidence=0.89,
+            file_url=fake_js.url, source_page=fake_js.source_page,
+            line_number=1882, column=22,
+            matched_value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SIGFAKE",
+            redacted_value="eyJhbGci...FAKE",
+            sha256="def456",
+            context="const token = 'eyJhbGciOi...'",
+            description="JWT token hardcoded in JavaScript.",
+            impact="", remediation="Remove hardcoded tokens. Use runtime authentication.",
+            false_positive_notes="", status="likely_secret",
+            occurrences=["main.8f31ab.chunk.js:1882"],
+        ),
+        Finding(
+            id="demo003", rule_id="GENERIC_API_KEY", title="Generic API Key",
+            category="Generic", severity="MEDIUM", confidence=0.70,
+            file_url=fake_js.url, source_page=fake_js.source_page,
+            line_number=3441, column=4,
+            matched_value="api_key_placeholder_do_not_use",
+            redacted_value="api_key_plac...use",
+            sha256="ghi789",
+            context="const config = { api_key: 'placeholder' }",
+            description="Generic API key assignment.",
+            impact="", remediation="Move to environment variables.",
+            false_positive_notes="contains placeholder indicator", status="likely_false_positive",
+            occurrences=["main.8f31ab.chunk.js:3441"],
+        ),
+    ]
 
-    # Summary bar
-    parts = []
-    for key, label, color in [
-        ("idor", "IDOR", A.RED),
-        ("injection", "Injection", A.ORANGE),
-        ("file_ops", "LFI/Path", A.ORANGE),
-        ("ssrf", "SSRF", A.YELLOW),
-        ("open_redirect", "Open Redirect", A.YELLOW),
-    ]:
-        n = len(surface.get(key, []))
-        if n:
-            parts.append(f"{color}{n} {label}{A.RESET}")
-    if parts:
-        _p("  " + "   ".join(parts))
-        _p()
+    fake_endpoints = [
+        Endpoint(url="/api/v1/users",    path="/api/v1/users",    method="GET",  category="API",
+                 source_file=fake_js.url, line_number=512, confidence=0.80),
+        Endpoint(url="/api/auth/login",  path="/api/auth/login",  method="POST", category="AUTH",
+                 source_file=fake_js.url, line_number=623, confidence=0.85),
+        Endpoint(url="/admin/dashboard", path="/admin/dashboard", method="GET",  category="ADMIN",
+                 source_file=fake_js.url, line_number=891, confidence=0.75),
+        Endpoint(url="/graphql",         path="/graphql",         method="POST", category="GRAPHQL",
+                 source_file=fake_js.url, line_number=1024, confidence=0.90),
+        Endpoint(url="/api/v1/config",   path="/api/v1/config",   method="GET",  category="API",
+                 source_file=fake_js.url, line_number=1201, confidence=0.78),
+    ]
 
-    def _print_group(items, title, color):
-        if not items:
-            return
-        _p(f"  {color}{A.BOLD}{title}{A.RESET}  {A.GREY}({len(items)}){A.RESET}")
-        for it in items[:15]:
-            path = it.endpoint_url[:_w()-30]
-            _p(f"  {A.GREY}  {it.method:<6}{A.RESET} {path}")
-            _p(f"  {A.GREY}         param: {A.RESET}{color}{it.param_name}{A.RESET}  {A.GREY}{it.reason}{A.RESET}")
-        if len(items) > 15:
-            _p(f"  {A.GREY}  ... and {len(items)-15} more{A.RESET}")
-        _p()
+    fake_infra = [
+        InfrastructureItem(
+            value="192.168.1.50", classification="PRIVATE_IP",
+            source_file=fake_js.url, line_number=912, confidence=0.92, action="report_only",
+        ),
+    ]
 
-    _print_group(surface.get("idor", []), "IDOR CANDIDATES", A.RED)
-    _print_group(surface.get("injection", []), "INJECTION CANDIDATES", A.ORANGE)
-    _print_group(surface.get("file_ops", []), "PATH TRAVERSAL / LFI", A.ORANGE)
-    _print_group(surface.get("ssrf", []), "SSRF CANDIDATES", A.YELLOW)
-    _print_group(surface.get("open_redirect", []), "OPEN REDIRECT", A.YELLOW)
+    started = datetime.utcnow()
+    result  = ScanResult(
+        target_url="https://demo.example.com",
+        started_at=started, finished_at=datetime.utcnow(),
+        pages_crawled=31, js_files=[fake_js],
+        findings=fake_findings, endpoints=fake_endpoints,
+        infrastructure=fake_infra, errors=[],
+    )
 
-    # State-changing endpoints
-    sc = surface.get("state_change", [])
-    if sc:
-        _p(f"  {A.PURPLE}{A.BOLD}STATE-CHANGING ENDPOINTS{A.RESET}  {A.GREY}({len(sc)}){A.RESET}")
-        for ep in sc[:15]:
-            mc = A.RED if ep.method in ("DELETE", "PUT") else A.ORANGE
-            _p(f"  {mc}  {ep.method:<6}{A.RESET} {ep.url[:_w()-14]}")
-        if len(sc) > 15:
-            _p(f"  {A.GREY}  ... and {len(sc)-15} more{A.RESET}")
-        _p()
+    print_header(
+        "https://demo.example.com",
+        mode="Demo (offline)",
+        scope="Strict",
+        version=PROJECT_VERSION,
+        author=AUTHOR_NAME,
+    )
 
-
-def print_endpoints(endpoints, validation_results=None, verbose=False):
-    if not endpoints:
-        return
-
-    by_cat: dict = {}
-    for ep in endpoints:
-        by_cat.setdefault(ep.category, []).append(ep)
-
-    val_map: dict = {}
-    if validation_results:
-        for r in validation_results:
-            val_map[r.endpoint] = r
-
-    _section("ENDPOINTS", str(len(endpoints)), A.BLUE)
-
-    cat_colors = {"AUTH": A.RED, "ADMIN": A.ORANGE, "GRAPHQL": A.PURPLE,
-                  "API": A.BLUE, "WEBSOCKET": A.CYAN, "SERVERLESS": A.YELLOW, "ROUTE": A.GREEN}
-
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "SERVERLESS", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
-        eps = by_cat.get(cat, [])
-        if not eps:
-            continue
-        c = cat_colors.get(cat, A.GREY)
-        _p(f"  {c}{A.BOLD}{cat:<12}{A.RESET}  {len(eps)}")
-
-    _p()
-    shown = 0
-    limit = 9999 if verbose else 40
-
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "SERVERLESS", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
-        eps = by_cat.get(cat, [])
-        if not eps:
-            continue
-        c = cat_colors.get(cat, A.GREY)
-        for ep in eps:
-            if shown >= limit:
-                break
-            method = (ep.method or "?").ljust(6)
-            url    = ep.url[:_w()-20]
-            vr     = val_map.get(ep.url)
-
-            # Color method by type
-            mc = (A.RED if ep.method in ("DELETE", "PUT") else
-                  A.ORANGE if ep.method == "POST" else
-                  A.GREY)
-
-            if vr:
-                sc = (A.GREEN if vr.status_code == 200 else
-                      A.YELLOW if vr.status_code in (301,302,307) else
-                      A.RED if vr.status_code in (401,403) else A.GREY)
-                ct = vr.content_type.split(";")[0][:20] if vr.content_type else ""
-                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}  {sc}{vr.status_code}{A.RESET}  {A.GREY}{ct}{A.RESET}")
-            else:
-                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}")
-
-            # Show intelligence in verbose mode
-            if verbose:
-                intel_parts = []
-                bf = getattr(ep, "body_fields", None) or []
-                qp = getattr(ep, "query_params", None) or []
-                pp = getattr(ep, "path_params", None) or []
-                auth = getattr(ep, "auth_context", "") or ""
-
-                if bf:
-                    names = ", ".join(f["name"] for f in bf[:6])
-                    _p(f"  {A.GREY}         body: {names}{A.RESET}")
-                if qp:
-                    names = ", ".join(f["name"] for f in qp[:6])
-                    _p(f"  {A.GREY}         query: {names}{A.RESET}")
-                if pp:
-                    names = ", ".join(f["name"] for f in pp[:6])
-                    _p(f"  {A.GREY}         path params: {names}{A.RESET}")
-                if auth:
-                    _p(f"  {A.YELLOW}         auth: {auth}{A.RESET}")
-
-            shown += 1
-
-    if shown >= limit and not verbose:
-        _p(f"\n  {A.GREY}  ... use -v to show all {len(endpoints)} endpoints{A.RESET}")
-    _p()
+    print_report(
+        result,
+        verbose=True,
+        extras={
+            "source_map_details": {"discovered": 2, "valid": 2, "recovered": 2, "sources": 31, "items": [
+                {"js": "main.8f31ab.chunk.js", "map": "main.8f31ab.chunk.js.map", "sources": 31},
+            ]},
+            "chunk_stats": {"runtime": True, "discovered": 8, "downloaded": 8, "endpoints": 14, "findings": 1},
+            "passive_stats": {"source": "Wayback Machine", "urls": 142, "js": 23, "unique": 19, "new": 4},
+        },
+        subdomains=["api.example.com", "staging.example.com", "admin.example.com"],
+    )
+    return 0
 
 
-# ── GraphQL ───────────────────────────────────────────────────────────────────
+def main() -> None:
+    parser = build_parser()
+    args   = parser.parse_args()
 
-def print_graphql(schemas):
-    if not schemas:
-        return
-    _section("GRAPHQL", "", A.PURPLE)
-    _p(f"  {_label('Endpoints')}{len(schemas)}")
-    _p(f"  {_label('Introspection')}{'enabled' if any(not s.error for s in schemas) else 'disabled'}")
-    _p(f"  {_label('Types')}{sum(len(s.types) for s in schemas if not s.error)}")
-    _p(f"  {_label('Queries')}{sum(len(s.queries) for s in schemas if not s.error)}")
-    _p(f"  {_label('Mutations')}{sum(len(s.mutations) for s in schemas if not s.error)}")
-    for schema in schemas:
-        _p(f"\n  {A.WHITE}{schema.endpoint[:_w()-4]}{A.RESET}")
-        if schema.error:
-            _p(f"  {A.GREY}  {schema.error}{A.RESET}")
-            continue
-        if schema.queries:
-            _p(f"  {A.GREY}  Queries:{A.RESET}   {', '.join(schema.queries[:8])}")
-        if schema.mutations:
-            _p(f"  {A.ORANGE}  Mutations:{A.RESET}  {', '.join(schema.mutations[:8])}")
-        if schema.sensitive_fields:
-            _p(f"  {A.RED}  Sensitive:{A.RESET}  {', '.join(schema.sensitive_fields[:6])}")
-    _p()
-
-
-# ── Infrastructure ────────────────────────────────────────────────────────────
-
-def print_infrastructure(items):
-    if not items:
-        return
-    by_cls: dict = {}
-    for item in items:
-        by_cls.setdefault(item.classification, []).append(item)
-    _section("INFRASTRUCTURE", str(len(items)), A.YELLOW)
-    for cls, its in sorted(by_cls.items()):
-        cls_c = A.RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else (A.ORANGE if "HOSTNAME" in cls else A.GREY)
-        _p(f"\n  {cls_c}{cls}{A.RESET}  {A.GREY}({len(its)}){A.RESET}")
-        for item in its[:10]:
-            fname = item.source_file.split("/")[-1] if "/" in item.source_file else item.source_file
-            _p(f"  {A.GREY}  • {item.value}  line {item.line_number} in {fname}{A.RESET}")
-    _p()
-
-
-# ── Subdomains ────────────────────────────────────────────────────────────────
-
-def print_subdomains(subdomains):
-    if not subdomains:
-        return
-    _section("SUBDOMAINS", str(len(subdomains)), A.GREEN)
-    for sub in subdomains[:30]:
-        _p(f"  {A.GREY}  • {sub}{A.RESET}")
-    if len(subdomains) > 30:
-        _p(f"  {A.GREY}  ... and {len(subdomains)-30} more{A.RESET}")
-    _p()
-
-
-# ── Endpoint validation ───────────────────────────────────────────────────────
-
-def print_validation_results(results):
-    interesting = [r for r in results if r.interesting]
-    if not interesting:
-        return
-    _section("ENDPOINT VALIDATION", f"{len(interesting)} interesting", A.GREEN)
-    for r in interesting:
-        sc = (A.GREEN if r.status_code == 200 else
-              A.YELLOW if r.status_code in (301,302,307) else
-              A.RED if r.status_code in (401,403) else A.GREY)
-        url   = r.endpoint[:_w()-20]
-        notes = " | ".join(r.notes[:2]) if r.notes else ""
-        _p(f"  {sc}{r.status_code}{A.RESET}  {url}  {A.GREY}{notes}{A.RESET}")
-    _p()
-
-
-# ── Summary ───────────────────────────────────────────────────────────────────
-
-def print_summary(result, extras=None, report_paths=None):
-    extras       = extras or {}
-    report_paths = report_paths or {}
-
-    findings = result.findings
-    real     = [f for f in findings if f.status != "likely_false_positive"]
-    counts: dict = {}
-    for f in real:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-    validated = [f for f in findings if f.status == "validated"]
-
-    duration = ""
-    if result.finished_at and result.started_at:
-        secs     = (result.finished_at - result.started_at).total_seconds()
-        duration = f"{secs:.1f}s"
-
-    _p()
-    _p(f"  {A.WHITE}{A.BOLD}{_line('─')}{A.RESET}")
-    _p(f"  {A.WHITE}{A.BOLD}SCAN COMPLETE{A.RESET}  {A.GREY}{duration}{A.RESET}")
-    _p(f"  {A.WHITE}{A.BOLD}{_line('─')}{A.RESET}")
-    _p()
-
-    _p(f"  {_label('Target')}{A.CYAN}{result.target_url[:70]}{A.RESET}")
-    _p(f"  {_label('Pages crawled')}{result.pages_crawled}")
-
-    js_count = len([js for js in result.js_files if not js.url.startswith("sourcemap://")])
-    _p(f"  {_label('JS files')}{js_count}")
-    if extras.get("recovered_sources"):
-        _p(f"  {_label('Recovered')}{A.GREEN}{extras['recovered_sources']} source files{A.RESET}")
-    if extras.get("chunks_found"):
-        _p(f"  {_label('Chunks')}{extras['chunks_found']}")
-
-    _p()
-    _p(f"  {_label('Endpoints')}{len(result.endpoints)}")
-    if extras.get("subdomains"):
-        _p(f"  {_label('Subdomains')}{extras['subdomains']}")
-    if result.infrastructure:
-        _p(f"  {_label('Infrastructure')}{len(result.infrastructure)}")
-
-    lib_f = extras.get("lib_findings", [])
-    if lib_f:
-        _p(f"  {_label('Vuln libraries')}{A.RED}{len(lib_f)}{A.RESET}")
-
-    _p()
-    _p(f"  {_label('Findings')}{len(real)}")
-    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-        n = counts.get(sev, 0)
-        if n:
-            c = SEV_COLOR.get(sev, "")
-            _p(f"  {c}  {sev:<10}  {n}{A.RESET}")
-
-    if validated:
-        _p(f"\n  {A.RED}{A.BOLD}  ⚡ {len(validated)} secrets VALIDATED as active{A.RESET}")
-
-    if report_paths:
-        _p()
-        _p(f"  {_label('Reports')}")
-        for fmt, path in report_paths.items():
-            _p(f"  {A.GREY}  {fmt.upper():<8}{A.RESET}  {path}")
-
-    _p()
-    if counts.get("CRITICAL") or validated:
-        _p(f"  {A.RED}{A.BOLD}Critical findings present. Immediate action required.{A.RESET}")
-    elif counts.get("HIGH"):
-        _p(f"  {A.ORANGE}{A.BOLD}High severity findings present. Review required.{A.RESET}")
-    elif counts.get("MEDIUM"):
-        _p(f"  {A.YELLOW}Medium severity findings present.{A.RESET}")
+    if args.command == "scan":
+        sys.exit(run_scan(args))
+    elif args.command == "local":
+        sys.exit(run_local(args))
+    elif args.command == "demo":
+        sys.exit(run_demo())
     else:
-        _p(f"  {A.GREEN}Scan complete. No critical findings.{A.RESET}")
-    _p()
+        parser.print_help()
+        sys.exit(0)
 
 
-# ── Main report ───────────────────────────────────────────────────────────────
-
-def print_report(
-    result,
-    show_sensitive:     bool = True,
-    no_color:           bool = False,
-    min_severity:       str  = "INFO",
-    extras:             dict = None,
-    validation_results: list = None,
-    graphql_schemas:    list = None,
-    subdomains:         list = None,
-    report_paths:       dict = None,
-    verbose:            bool = False,
-) -> None:
-    extras = extras or {}
-
-    # Authentication verification block — shown first when credentials were used
-    if extras.get("auth_result"):
-        print_auth_result(extras["auth_result"])
-
-    print_js_inventory(result.js_files, verbose=verbose,
-                        per_file_stats=extras.get("per_file_stats"))
-
-    if extras.get("source_map_details"):
-        d = extras["source_map_details"]
-        print_source_maps(d.get("discovered",0), d.get("valid",0),
-                          d.get("recovered",0), d.get("sources",0), d.get("items",[]))
-
-    if extras.get("chunk_stats"):
-        c = extras["chunk_stats"]
-        print_webpack(c.get("runtime",False), c.get("discovered",0),
-                      c.get("downloaded",0), c.get("endpoints",0), c.get("findings",0))
-
-    if extras.get("passive_stats"):
-        p = extras["passive_stats"]
-        print_passive(p.get("source",""), p.get("urls",0), p.get("js",0),
-                      p.get("unique",0), p.get("new",0))
-
-    if extras.get("headless_stats"):
-        h = extras["headless_stats"]
-        print_headless(h.get("pages",0), h.get("js",0), h.get("xhr",0),
-                       h.get("fetch",0), h.get("ws",0), h.get("routes",0),
-                       h.get("endpoints",0))
-
-    intel = extras.get("intel")
-    if intel:
-        _print_intelligence(intel)
-
-    lib_findings = extras.get("lib_findings", [])
-    if lib_findings:
-        _print_libraries(lib_findings)
-
-    print_secret_analysis(result.findings)
-    print_findings(result.findings, verbose=verbose)
-    print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
-
-    # Attack surface analysis
-    surface = extras.get("attack_surface")
-    if surface:
-        print_attack_surface(surface)
-
-    # Coverage and blind spots
-    coverage = extras.get("coverage")
-    if coverage:
-        print_coverage(coverage)
-
-    if validation_results:
-        print_validation_results(validation_results)
-
-    if graphql_schemas:
-        print_graphql(graphql_schemas)
-
-    print_infrastructure(result.infrastructure)
-
-    if subdomains:
-        print_subdomains(subdomains)
-
-    print_summary(result, extras=extras, report_paths=report_paths)
+if __name__ == "__main__":
+    main()
