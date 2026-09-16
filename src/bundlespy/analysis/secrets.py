@@ -43,6 +43,7 @@ class SecretRule:
 
 
 def _shannon_entropy(value: str) -> float:
+    """Calculate Shannon entropy of a string. Higher = more random = more likely real."""
     if not value:
         return 0.0
     freq = {}
@@ -53,19 +54,26 @@ def _shannon_entropy(value: str) -> float:
 
 
 def _is_likely_fp(value: str) -> Tuple[bool, str]:
+    """Check if a matched value looks like a placeholder or example."""
     lower = value.lower()
     for indicator in FP_INDICATORS:
         if indicator in lower:
             return True, f"contains placeholder indicator '{indicator}'"
+
+    # Very low entropy (all same chars, sequential, etc.)
     entropy = _shannon_entropy(value)
     if len(value) > 8 and entropy < 2.0:
         return True, f"low entropy ({entropy:.2f}) suggests non-random value"
+
+    # Repeated character sequences
     if len(set(value)) < 4 and len(value) > 8:
         return True, "too few unique characters"
+
     return False, ""
 
 
 def _get_context(content: str, pos: int, chars: int = 120) -> str:
+    """Extract surrounding context around a match position."""
     start = max(0, pos - chars // 2)
     end   = min(len(content), pos + chars // 2)
     return content[start:end].replace("\n", " ").strip()
@@ -78,15 +86,20 @@ def _get_line_number(content: str, pos: int) -> int:
 def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
     """Load detection rules from YAML file."""
     if rules_path is None:
-        here = Path(__file__).resolve().parent
-        rules_path = None
-        for p in [here, here.parent, here.parent.parent, here.parent.parent.parent]:
-            candidate = p / 'rules' / 'secrets.yaml'
-            if candidate.exists():
-                rules_path = candidate
-                break
-        if rules_path is None:
-            rules_path = here.parent.parent / 'rules' / 'secrets.yaml'
+        # Find the rules file — prefer the largest one (most rules)
+        _base = Path(__file__).parent
+        candidates = [
+            _base / "rules" / "secrets.yaml",
+            _base.parent / "rules" / "secrets.yaml",
+            _base.parent.parent / "rules" / "secrets.yaml",
+            _base.parent.parent.parent / "rules" / "secrets.yaml",
+        ]
+        existing = [p for p in candidates if p.exists()]
+        if existing:
+            # Pick the file with most content (most rules)
+            rules_path = max(existing, key=lambda p: p.stat().st_size)
+        else:
+            rules_path = candidates[0]
 
     try:
         with open(rules_path) as f:
@@ -125,12 +138,17 @@ class SecretScanner:
         self.rules = load_rules(rules_path)
 
     def scan(self, content: str, file_url: str, source_page: str = "") -> List[Finding]:
+        """
+        Scan JavaScript content for secrets.
+        Returns a list of Finding objects, deduplicated by value+rule.
+        """
         findings: List[Finding] = []
-        seen: Dict[str, Finding] = {}
+        seen: Dict[str, Finding] = {}  # sha256 -> Finding
 
         for rule in self.rules:
             for match in rule.pattern.finditer(content):
                 raw_value = match.group(0)
+                # If there's a capture group, prefer it (more specific)
                 if match.lastindex and match.lastindex >= 1:
                     try:
                         cap = match.group(1)
@@ -139,7 +157,9 @@ class SecretScanner:
                     except IndexError:
                         pass
 
+                # Check for false positives
                 is_fp, fp_reason = _is_likely_fp(raw_value)
+
                 confidence = rule.confidence
                 status     = "candidate"
 
@@ -149,37 +169,39 @@ class SecretScanner:
                 elif confidence >= 0.85:
                     status = "likely_secret"
 
-                redacted   = Finding.redact(raw_value)
-                sha256     = hashlib.sha256(f"{rule.id}:{raw_value}".encode()).hexdigest()
-                context    = _get_context(content, match.start())
-                line_no    = _get_line_number(content, match.start())
+                redacted = Finding.redact(raw_value)
+                sha256   = hashlib.sha256(f"{rule.id}:{raw_value}".encode()).hexdigest()
+                context  = _get_context(content, match.start())
+                line_no  = _get_line_number(content, match.start())
+
                 finding_id = Finding.make_id(rule.id, raw_value, file_url)
 
+                # Deduplication: same rule + value across files
                 if sha256 in seen:
                     seen[sha256].occurrences.append(f"{file_url}:{line_no}")
                     continue
 
                 finding = Finding(
-                    id                   = finding_id,
-                    rule_id              = rule.id,
-                    title                = rule.name,
-                    category             = rule.category,
-                    severity             = rule.severity,
-                    confidence           = round(confidence, 2),
-                    file_url             = file_url,
-                    source_page          = source_page,
-                    line_number          = line_no,
-                    column               = match.start() - content.rfind("\n", 0, match.start()),
-                    matched_value        = raw_value,
-                    redacted_value       = redacted,
-                    sha256               = sha256,
-                    context              = context,
-                    description          = rule.description,
-                    impact               = "",
-                    remediation          = rule.remediation,
+                    id                  = finding_id,
+                    rule_id             = rule.id,
+                    title               = rule.name,
+                    category            = rule.category,
+                    severity            = rule.severity,
+                    confidence          = round(confidence, 2),
+                    file_url            = file_url,
+                    source_page         = source_page,
+                    line_number         = line_no,
+                    column              = match.start() - content.rfind("\n", 0, match.start()),
+                    matched_value       = raw_value,
+                    redacted_value      = redacted,
+                    sha256              = sha256,
+                    context             = context,
+                    description         = rule.description,
+                    impact              = "",
+                    remediation         = rule.remediation,
                     false_positive_notes = fp_reason or rule.fp_notes,
-                    status               = status,
-                    occurrences          = [f"{file_url}:{line_no}"],
+                    status              = status,
+                    occurrences         = [f"{file_url}:{line_no}"],
                 )
 
                 seen[sha256] = finding
