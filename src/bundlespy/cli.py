@@ -588,7 +588,8 @@ def run_scan(args) -> int:
             "note":       "",
         })
 
-    # HTML attribute findings — shown as page-level entries
+    # HTML attribute findings — completely separate section, never merged into inline JS
+    # Each page that has html: findings gets its own row, independent of inline scripts
     _html_pages = {}
     for _f in all_findings:
         if _f.status == "likely_false_positive":
