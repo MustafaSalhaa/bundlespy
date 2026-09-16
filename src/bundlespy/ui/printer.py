@@ -413,6 +413,58 @@ def _print_finding(f, verbose=False):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+def _score_bar(score: int, width: int = 20) -> str:
+    """Render a simple ASCII progress bar for a score."""
+    filled = int(width * score / 100)
+    bar    = "█" * filled + "░" * (width - filled)
+    color  = A.GREEN if score >= 75 else A.YELLOW if score >= 50 else A.RED
+    return f"{color}{bar}{A.RESET} {score}%"
+
+
+def print_coverage(coverage) -> None:
+    """Print coverage metrics and blind-spot report."""
+    if not coverage:
+        return
+
+    _section("COVERAGE & BLIND SPOTS", "", A.CYAN)
+
+    # Overall score
+    _p(f"  {_label('Overall coverage')}  {_score_bar(coverage.overall)}")
+    _p()
+
+    # Per-category scores
+    cats = [
+        ("JS discovery",       coverage.js_coverage),
+        ("Page discovery",     coverage.page_coverage),
+        ("Secret precision",   coverage.secret_precision),
+        ("Endpoint coverage",  coverage.endpoint_coverage),
+    ]
+    for label, score in cats:
+        _p(f"  {_label(label)}{_score_bar(score, 15)}")
+    _p()
+
+    # Summary line
+    _p(f"  {A.GREY}{coverage.summary}{A.RESET}")
+    _p()
+
+    # Blind spots — always show, this is the honest part
+    if coverage.blind_spots:
+        _p(f"  {A.YELLOW}{A.BOLD}BLIND SPOTS{A.RESET}  {A.GREY}(what BundleSpy cannot see){A.RESET}")
+        _p()
+        for bs in coverage.blind_spots:
+            sev_color = A.RED if bs.severity == "HIGH" else A.YELLOW if bs.severity == "MEDIUM" else A.GREY
+            _p(f"  {sev_color}▸ [{bs.severity}]{A.RESET}  {bs.description}")
+            _p(f"  {A.GREY}    Fix: {bs.mitigation}{A.RESET}")
+            _p()
+
+    # Recommendations
+    if coverage.recommendations:
+        _p(f"  {A.CYAN}{A.BOLD}RECOMMENDED NEXT STEPS{A.RESET}")
+        for i, rec in enumerate(coverage.recommendations, 1):
+            _p(f"  {A.GREY}  {i}. {rec}{A.RESET}")
+        _p()
+
+
 def print_attack_surface(surface):
     if not surface or surface.get("total_items", 0) == 0:
         # Still show state-change / auth / admin if present
@@ -753,6 +805,11 @@ def print_report(
     surface = extras.get("attack_surface")
     if surface:
         print_attack_surface(surface)
+
+    # Coverage and blind spots
+    coverage = extras.get("coverage")
+    if coverage:
+        print_coverage(coverage)
 
     if validation_results:
         print_validation_results(validation_results)
