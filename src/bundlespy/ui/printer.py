@@ -409,18 +409,30 @@ def _print_intelligence(intel):
 def print_secret_analysis(findings):
     if not findings:
         return
-    total     = len(findings)
-    high_conf = sum(1 for f in findings if f.confidence >= 0.85 and f.status != "likely_false_positive")
-    validated = sum(1 for f in findings if f.status == "validated")
-    fps       = sum(1 for f in findings if f.status == "likely_false_positive")
+
+    # PUBLIC_IDENTIFIER findings (Netlify site IDs, etc.) are not secrets — exclude from counts
+    def _is_public_id(f):
+        return getattr(f, "classification", "") == "PUBLIC_IDENTIFIER" or f.rule_id in (
+            "NETLIFY_SITE_ID",
+        )
+
+    secrets   = [f for f in findings if not _is_public_id(f)]
+    pub_ids   = [f for f in findings if _is_public_id(f)]
+    total     = len(secrets)
+    high_conf = sum(1 for f in secrets if f.confidence >= 0.85 and f.status != "likely_false_positive")
+    validated = sum(1 for f in secrets if f.status == "validated")
+    fps       = sum(1 for f in secrets if f.status == "likely_false_positive")
 
     _section("SECRET ANALYSIS", "", A.RED)
     for label, val, color in [
-        ("Detected",        str(total),      ""),
-        ("High confidence", str(high_conf),  A.RED if high_conf else ""),
-        ("Likely FP",       str(fps),        A.GREY),
-        ("Validated",       str(validated),  A.RED + A.BOLD if validated else ""),
+        ("Detected",          str(total),        ""),
+        ("High confidence",   str(high_conf),    A.RED if high_conf else ""),
+        ("Likely FP",         str(fps),          A.GREY),
+        ("Validated",         str(validated),    A.RED + A.BOLD if validated else ""),
+        ("Public identifiers", str(len(pub_ids)), A.GREY),
     ]:
+        if label == "Public identifiers" and len(pub_ids) == 0:
+            continue
         _p(f"  {_label(label, 18)}{_val(val, color)}")
     _p()
 
@@ -663,9 +675,9 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
     _section("ENDPOINTS", str(len(endpoints)), A.BLUE)
 
     cat_colors = {"AUTH": A.RED, "ADMIN": A.ORANGE, "GRAPHQL": A.PURPLE,
-                  "API": A.BLUE, "WEBSOCKET": A.CYAN, "ROUTE": A.GREEN}
+                  "API": A.BLUE, "WEBSOCKET": A.CYAN, "SERVERLESS": A.YELLOW, "ROUTE": A.GREEN}
 
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "SERVERLESS", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
@@ -676,7 +688,7 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
     shown = 0
     limit = 9999 if verbose else 40
 
-    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
+    for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "SERVERLESS", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
