@@ -88,58 +88,72 @@ def phase_error(label):
 
 # ── JS Inventory ──────────────────────────────────────────────────────────────
 
-def print_js_inventory(js_files, verbose=False):
+def print_js_inventory(js_files, verbose=False, per_file_stats=None):
     if not js_files:
         return
 
-    # Count by source type
-    headless_count  = sum(1 for j in js_files if "headless-captured" in j.technology)
-    inline_count    = sum(1 for j in js_files if j.url.startswith("inline:"))
+    headless_count  = sum(1 for j in js_files if "headless-captured" in (j.technology or ""))
+    inline_count    = sum(1 for j in js_files if j.url.startswith("inline:") or j.url.startswith("html:"))
     recovered_count = sum(1 for j in js_files if j.url.startswith("sourcemap://"))
     static_count    = len(js_files) - headless_count - inline_count - recovered_count
     total_size      = sum(j.size_bytes for j in js_files if j.size_bytes)
 
     _section("JAVASCRIPT ASSETS", str(len(js_files)), A.CYAN)
 
-    # Summary line
     summary_parts = []
-    if static_count:   summary_parts.append(f"{static_count} static")
-    if headless_count: summary_parts.append(f"{headless_count} browser-captured")
-    if inline_count:   summary_parts.append(f"{inline_count} inline")
+    if static_count:    summary_parts.append(f"{static_count} static")
+    if headless_count:  summary_parts.append(f"{headless_count} browser-captured")
+    if inline_count:    summary_parts.append(f"{inline_count} inline")
     if recovered_count: summary_parts.append(f"{recovered_count} recovered")
     if summary_parts:
         _p(f"  {A.GREY}{' · '.join(summary_parts)} · {total_size/1024:.0f} KB total{A.RESET}")
     _p()
 
-    show = js_files if verbose else js_files[:15]
+    # Per-file analysis table — proves every file was analyzed
+    stats_map = {}
+    if per_file_stats:
+        for s in per_file_stats:
+            stats_map[s["url"]] = s
+
+    show = js_files if verbose else js_files[:20]
 
     for js in show:
-        size  = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
-        tech  = f" {A.GREY}[{js.technology.replace('headless-captured','')}]{A.RESET}" if js.technology and js.technology != "headless-captured" else ""
-        smap  = f" {A.YELLOW}[map]{A.RESET}" if js.has_source_map else ""
-        url   = js.url
-        tag   = ""
+        size = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
+        url  = js.url
+        tag  = ""
 
         if url.startswith("sourcemap://"):
-            url = url.replace("sourcemap://", "")
-            tag = f" {A.GREEN}[recovered]{A.RESET}"
-        elif url.startswith("local://"):
-            url = url.replace("local://", "")
-            tag = f" {A.YELLOW}[local]{A.RESET}"
-        elif url.startswith("inline:"):
-            url = url.replace("inline:", "")
-            tag = f" {A.GREY}[inline]{A.RESET}"
-        elif url.startswith("html:"):
-            url = url.replace("html:", "")
-            tag = f" {A.BLUE}[html]{A.RESET}"
-        elif "headless-captured" in js.technology:
+            url = url.replace("sourcemap://", ""); tag = f" {A.GREEN}[recovered]{A.RESET}"
+        elif url.startswith("inline:") or url.startswith("html:"):
+            url = re.sub(r'^(inline:|html:)', '', url); tag = f" {A.GREY}[inline]{A.RESET}"
+        elif "headless-captured" in (js.technology or ""):
             tag = f" {A.CYAN}[browser]{A.RESET}"
+        elif "webworker" in (js.technology or ""):
+            tag = f" {A.PURPLE}[worker]{A.RESET}"
 
-        url = url[:_w()-30]
-        _p(f"  {A.GREY}•{A.RESET} {url}{tag}{tech}{smap}  {A.GREY}{size}{A.RESET}")
+        # Filename for display
+        fname = url.split("/")[-1].split("?")[0] or url
+        fname = fname[:35].ljust(36)
 
-    if not verbose and len(js_files) > 15:
-        _p(f"\n  {A.GREY}  ... and {len(js_files)-15} more  (-v to show all){A.RESET}")
+        # Analysis stats for this file
+        st = stats_map.get(js.url)
+        if st:
+            sec_c  = A.RED  if st["secrets"]  > 0 else A.GREY
+            ep_c   = A.CYAN if st["endpoints"] > 0 else A.GREY
+            inf_c  = A.ORANGE if st["infra"]   > 0 else A.GREY
+            stats = (
+                f"  {sec_c}secrets={st['secrets']}{A.RESET}"
+                f"  {ep_c}endpoints={st['endpoints']}{A.RESET}"
+                f"  {inf_c}infra={st['infra']}{A.RESET}"
+            )
+        else:
+            stats = f"  {A.GREY}not analyzed{A.RESET}"
+
+        smap = f" {A.YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
+        _p(f"  {A.GREY}•{A.RESET} {fname}{tag}{smap}  {A.GREY}{size}{A.RESET}{stats}")
+
+    if not verbose and len(js_files) > 20:
+        _p(f"\n  {A.GREY}  ... and {len(js_files)-20} more  (-v to show all){A.RESET}")
     _p()
 
 
@@ -473,16 +487,20 @@ def print_coverage(coverage) -> None:
 
     # Source maps
     sm = coverage.source_maps
-    if sm.discovered > 0:
-        _p(f"  {A.WHITE}{A.BOLD}Source Maps{A.RESET}")
+    _p(f"  {A.WHITE}{A.BOLD}Source Maps{A.RESET}")
+    if sm.discovered == 0:
+        _p(f"  {A.GREY}  None referenced in any JS file{A.RESET}")
+    else:
         _row("Discovered",  sm.discovered)
-        _row("Recovered",   sm.recovered,
-             A.GREEN if sm.recovered == sm.discovered else A.YELLOW)
-        if sm.unavailable:
+        if sm.recovered > 0:
+            _row("Recovered",   sm.recovered, A.GREEN)
+        else:
+            _row("Recovered",   0, A.YELLOW)
+        if sm.unavailable > 0:
             _row("Unavailable", sm.unavailable, A.YELLOW)
-            for u in sm.unavailable_urls[:2]:
+            for u in sm.unavailable_urls[:3]:
                 _p(f"  {A.GREY}    {u}{A.RESET}")
-        _p()
+    _p()
 
     # Blind spots
     if coverage.blind_spots:
@@ -800,7 +818,8 @@ def print_report(
 ) -> None:
     extras = extras or {}
 
-    print_js_inventory(result.js_files, verbose=verbose)
+    print_js_inventory(result.js_files, verbose=verbose,
+                        per_file_stats=extras.get("per_file_stats"))
 
     if extras.get("source_map_details"):
         d = extras["source_map_details"]
