@@ -508,6 +508,15 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
 
+    # Merge HTML attribute findings BEFORE building per-file stats
+    # so html: findings are visible to the stats builder
+    html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
+    seen_html = {f.sha256 for f in all_findings}
+    for f in html_findings_from_crawler:
+        if f.sha256 not in seen_html:
+            seen_html.add(f.sha256)
+            all_findings.append(f)
+
     # Per-file analysis breakdown — prove every file was analyzed
     # Build per-file stats from already-computed findings and endpoints
     # Strip all URL prefixes for matching (html:, inline:, sourcemap://, etc.)
@@ -672,14 +681,6 @@ def run_scan(args) -> int:
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
-
-    # Merge HTML attribute findings from crawler
-    html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
-    seen_html = {f.sha256 for f in all_findings}
-    for f in html_findings_from_crawler:
-        if f.sha256 not in seen_html:
-            seen_html.add(f.sha256)
-            all_findings.append(f)
 
     # Deduplicate findings by rule + value — same secret on multiple pages
     # becomes ONE finding with all occurrences listed
