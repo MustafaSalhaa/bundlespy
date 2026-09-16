@@ -552,8 +552,9 @@ def run_scan(args) -> int:
     scanner = SecretScanner()
     all_findings, all_endpoints, all_infra = _analyze(all_js, scanner)
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
-    logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
-
+    import logging as _logging
+    _logger = _logging.getLogger("bundlespy.cli")
+    _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
     # Merge HTML attribute findings BEFORE building per-file stats
     # so html: findings are visible to the stats builder
     html_findings_from_crawler = locals().get("html_findings_from_crawler", [])
