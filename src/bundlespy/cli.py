@@ -87,6 +87,8 @@ examples:
     # Output
     scan.add_argument("--format", default="terminal")
     scan.add_argument("--output", default="")
+    scan.add_argument("--report-name", default="", metavar="NAME",
+                      help="Custom filename stem for report files (e.g. client-webapp-2026)")
     scan.add_argument("-v", "--verbose",  action="store_true")
     scan.add_argument("-vv","--debug",    action="store_true")
     scan.add_argument("-q", "--quiet",    action="store_true")
@@ -126,20 +128,26 @@ def _setup_logging(verbose: bool, debug: bool, quiet: bool) -> None:
 
 
 def _write_reports(
-    result:    ScanResult,
-    formats:   list,
-    output_dir: str,
-    started:   datetime,
+    result:      ScanResult,
+    formats:     list,
+    output_dir:  str,
+    started:     datetime,
+    report_name: str = "",
 ) -> dict:
     """Write file reports. Returns dict of format -> path."""
-    ts      = started.strftime("%Y%m%d_%H%M%S")
+    ts       = started.strftime("%Y%m%d_%H%M%S")
+    stem     = report_name.strip() if report_name else f"bundlespy_{ts}"
+    # Strip any extension the user may have added — we add the right one
+    for ext in (".html", ".json", ".csv", ".xml", ".txt"):
+        if stem.lower().endswith(ext):
+            stem = stem[:-len(ext)]
     paths   = {}
 
     if "json" in formats:
         out = generate_json(result)
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
-        p   = Path(d) / f"bundlespy_{ts}.json"
+        p   = Path(d) / f"{stem}.json"
         p.write_text(out)
         paths["json"] = str(p)
 
@@ -147,7 +155,7 @@ def _write_reports(
         out = generate_html(result)
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
-        p   = Path(d) / f"bundlespy_{ts}.html"
+        p   = Path(d) / f"{stem}.html"
         p.write_text(out)
         paths["html"] = str(p)
 
@@ -155,15 +163,15 @@ def _write_reports(
         out = generate_csv(result)
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
-        p   = Path(d) / f"bundlespy_{ts}.csv"
+        p   = Path(d) / f"{stem}.csv"
         p.write_text(out)
         paths["csv"] = str(p)
 
     if "burp" in formats:
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
-        p1  = Path(d) / f"bundlespy_{ts}_burp.xml"
-        p2  = Path(d) / f"bundlespy_{ts}_urls.txt"
+        p1  = Path(d) / f"{stem}_burp.xml"
+        p2  = Path(d) / f"{stem}_urls.txt"
         p1.write_text(generate_burp_xml(result))
         p2.write_text(generate_url_list(result))
         paths["burp-xml"]  = str(p1)
@@ -946,7 +954,7 @@ def run_scan(args) -> int:
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
     if file_formats:
-        file_paths = _write_reports(result, file_formats, args.output, started)
+        file_paths = _write_reports(result, file_formats, args.output, started, report_name=getattr(args, "report_name", ""))
 
     if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
         print_report(
@@ -1008,7 +1016,7 @@ def run_local(args) -> int:
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
     if file_formats:
-        file_paths = _write_reports(result, file_formats, args.output, started)
+        file_paths = _write_reports(result, file_formats, args.output, started, report_name=getattr(args, "report_name", ""))
 
     if "terminal" in formats:
         print_report(
