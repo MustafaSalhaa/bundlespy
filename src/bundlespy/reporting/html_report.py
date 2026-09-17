@@ -152,6 +152,7 @@ def _js_html(result, extras):
         st_color = {"static":"#34d399","browser":"#60a5fa","inline":"#a78bfa","sourcemap":"#86efac","chunk":"#22d3ee"}.get(st,"#94a3b8")
         tech = f'<span class="tech-tag">{_e(js.technology)}</span>' if js.technology else ""
         sm   = '<span class="sm-tag">map</span>' if js.has_source_map else ""
+        # Build a readable label: real filename instead of "script N @ page"
         label = js.url
         try:
             from urllib.parse import urlparse as _up
@@ -160,14 +161,11 @@ def _js_html(result, extras):
                 frag = js.url.split("#")[-1] if "#" in js.url else ""
                 num  = _re.search(r"script-(\d+)", frag)
                 n    = num.group(1) if num else "?"
-                p = _up(bare)
+                p    = _up(bare)
                 label = f"inline:{n} @ {p.netloc}{p.path or '/'}"
             else:
                 p = _up(js.url)
                 filename = p.path.rstrip("/").split("/")[-1] or p.netloc
-                if not filename:
-                    filename = p.netloc
-                page = f"{p.netloc}{p.path.rsplit('/',1)[0] or '/'}"
                 label = f"{filename} @ {p.netloc}"
         except Exception:
             label = js.url
@@ -471,6 +469,20 @@ def _graph_data(result):
     return _j(result.graph.to_dict())
 
 
+def _trace_data(result) -> str:
+    """Serialize all page traces to JSON for the Trace Engine panel."""
+    if not result.graph:
+        return "[]"
+    try:
+        traces = result.graph.trace_all_from_pages(max_depth=6)
+        out = []
+        for tr in traces:
+            out.append(tr.to_dict())
+        return _j(out)
+    except Exception:
+        return "[]"
+
+
 # ── Main generator ────────────────────────────────────────────────────────────
 
 def generate(
@@ -509,6 +521,7 @@ def generate(
     scan_start = result.started_at.strftime("%Y-%m-%d %H:%M UTC") if result.started_at else "—"
     dur        = _duration(result)
     graph_json = _graph_data(result)
+    trace_json = _trace_data(result)
     g_stats    = result.graph.stats().get("by_type", {}) if result.graph else {}
 
     # Pre-compute filter buttons (Python 3.10: no backslash in f-string expressions)
@@ -544,6 +557,15 @@ def generate(
     _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
     _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
     _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
+
+    # Node counts for graph section subtitle
+    _page_n     = g_stats.get("PAGE", 0)
+    _js_n       = g_stats.get("JS", 0) + g_stats.get("CHUNK", 0)
+    _ep_n       = g_stats.get("ENDPOINT", 0)
+    _secret_n   = g_stats.get("SECRET", 0)
+    # Graph node/edge counts for overview (fixed NameError: use result.graph.stats() not self._nodes)
+    _graph_node_count = result.graph.stats()["nodes"] if result.graph else 0
+    _graph_edge_count = result.graph.stats()["edges"] if result.graph else 0
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -783,6 +805,42 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .neighbor-list{{display:flex;flex-direction:column;gap:3px}}
 .neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .neighbor-item:hover{{color:var(--accent)}}
+/* ── Trace Engine ── */
+.trace-controls{{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}}
+.trace-mode-btn{{padding:5px 14px;border-radius:20px;border:1px solid var(--border2);background:none;color:var(--text2);font-size:11px;cursor:pointer;transition:all .15s;font-family:inherit}}
+.trace-mode-btn:hover{{border-color:var(--accent);color:var(--accent)}}
+.trace-mode-btn.active{{background:rgba(88,166,255,.12);border-color:var(--accent);color:var(--accent);font-weight:600}}
+.trace-search{{flex:1;max-width:280px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-sm);color:var(--text);font-size:11px;font-family:inherit}}
+.trace-search:focus{{outline:none;border-color:var(--accent)}}
+.trace-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden}}
+.trace-card-header{{padding:11px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:10px}}
+.trace-card-header:hover{{background:rgba(255,255,255,.02)}}
+.trace-origin{{font-weight:600;font-size:13px;color:var(--accent);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.trace-meta{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
+.trace-badge{{font-size:10px;padding:2px 6px;border-radius:10px;font-weight:500}}
+.trace-badge.paths{{background:rgba(88,166,255,.1);color:var(--accent);border:1px solid rgba(88,166,255,.2)}}
+.trace-badge.secrets{{background:rgba(248,81,73,.1);color:var(--red);border:1px solid rgba(248,81,73,.2)}}
+.trace-badge.endpoints{{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.2)}}
+.trace-toggle{{color:var(--text3);font-size:12px;transition:transform .2s}}
+.trace-toggle.open{{transform:rotate(90deg)}}
+.trace-body{{display:none;border-top:1px solid var(--border);padding:14px 16px}}
+.trace-body.open{{display:block}}
+.trace-path{{margin-bottom:14px;padding:10px 12px;background:#0a0d13;border:1px solid var(--border);border-radius:var(--radius-sm)}}
+.trace-path-label{{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;font-weight:600;margin-bottom:8px}}
+.trace-step{{display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;font-size:11px}}
+.trace-step:last-child{{margin-bottom:0}}
+.trace-step-depth{{color:var(--text3);width:16px;flex-shrink:0;font-size:10px;text-align:right;padding-top:1px}}
+.trace-step-arrow{{color:var(--border2);flex-shrink:0}}
+.trace-node{{font-weight:600}}
+.trace-node.PAGE{{color:var(--accent)}}.trace-node.JS{{color:var(--green)}}.trace-node.ENDPOINT{{color:var(--purple)}}
+.trace-node.SECRET{{color:var(--red)}}.trace-node.WORKER{{color:var(--yellow)}}.trace-node.HOST{{color:var(--orange)}}
+.trace-node.CHUNK{{color:var(--cyan)}}.trace-node.PARAMETER{{color:var(--text2)}}
+.trace-node.SOURCEMAP{{color:#86efac}}.trace-node.CONFIG{{color:#c084fc}}
+.trace-edge-kind{{font-size:10px;color:var(--text3);background:var(--border);padding:1px 5px;border-radius:3px;margin-left:4px}}
+.trace-evidence{{font-size:10px;color:var(--text3);margin-left:auto;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.trace-truncated{{font-size:11px;color:var(--orange);padding:4px 0;font-style:italic}}
+.trace-empty{{text-align:center;padding:40px 20px;color:var(--text3)}}
+.trace-empty-icon{{font-size:24px;display:block;margin-bottom:8px}}
 /* ── Notice ── */
 .notice{{background:rgba(63,185,80,.05);border:1px solid rgba(63,185,80,.15);border-radius:var(--radius);padding:10px 14px;font-size:12px;color:var(--text2);margin-top:14px;line-height:1.7}}
 /* ── Empty ── */
@@ -806,6 +864,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="nav-label">Report</div>
       <button class="nav-item active" onclick="show('overview')"><span class="nav-icon">◈</span>Overview</button>
       <button class="nav-item" onclick="show('graph')"><span class="nav-icon">⬡</span>Attack Surface</button>
+      <button class="nav-item" onclick="show('trace')"><span class="nav-icon">⇢</span>Trace Engine</button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Intelligence</div>
@@ -872,7 +931,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
             <tr><td class="meta-key">Vuln libraries</td><td class="meta-val">{len(lib_findings)} CVE(s) found</td></tr>
             <tr><td class="meta-key">Infrastructure</td><td class="meta-val">{len(result.infrastructure)} indicator(s)</td></tr>
             {f'<tr><td class="meta-key">Auth state</td><td class="meta-val" style="color:{("#34d399" if auth_result.get("authenticated") else "#f87171")}">{("Verified" if auth_result.get("authenticated") else "Not verified")}</td></tr>' if auth_result else ''}
-            {f'<tr><td class="meta-key">Graph</td><td class="meta-val">{result.graph.stats()["nodes"]} nodes · {result.graph.stats()["edges"]} relationships</td></tr>' if result.graph else ''}
+            {f'<tr><td class="meta-key">Graph</td><td class="meta-val">{_graph_node_count} nodes · {_graph_edge_count} relationships</td></tr>' if result.graph else ''}
             {f'<tr><td class="meta-key">Scan errors</td><td class="meta-val" style="color:var(--red)">{len(result.errors)}</td></tr>' if result.errors else ''}
           </table>
         </div>
@@ -887,7 +946,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <!-- ATTACK SURFACE GRAPH -->
     <div id="section-graph" class="section">
       <div class="section-title">Attack Surface Graph
-        <span class="count">{g_stats.get("PAGE",0)} pages · {g_stats.get("JS",0)+g_stats.get("CHUNK",0)} assets · {g_stats.get("ENDPOINT",0)} endpoints · {g_stats.get("SECRET",0)} secrets</span>
+        <span class="count">{_page_n} pages · {_js_n} assets · {_ep_n} endpoints · {_secret_n} secrets</span>
       </div>
       <div class="graph-legend">
         {''.join(f'<div class="legend-item"><div class="legend-dot" style="background:{c}"></div>{k.title()}</div>' for k,c in NODE_COLOR.items())}
@@ -911,6 +970,19 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
           <div id="dp-body"></div>
         </div>
       </div>
+    </div>
+
+    <!-- TRACE ENGINE -->
+    <div id="section-trace" class="section">
+      <div class="section-title">Trace Engine
+        <span class="count">downstream &amp; upstream path analysis</span>
+      </div>
+      <div class="trace-controls">
+        <button id="btn-downstream" class="trace-mode-btn active" onclick="setTraceMode('downstream',this)">⬇ Downstream</button>
+        <button id="btn-upstream"   class="trace-mode-btn"        onclick="setTraceMode('upstream',this)">⬆ Upstream</button>
+        <input  id="trace-search"   class="trace-search" type="text" placeholder="Filter by origin URL…" oninput="renderTraces(currentTraceMode)">
+      </div>
+      <div id="trace-list"></div>
     </div>
 
     <!-- FINDINGS -->
@@ -996,6 +1068,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script>
 const GRAPH_DATA = {graph_json};
+const TRACE_DATA = {trace_json};
 const NC = {_j(NODE_COLOR)};
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -1005,6 +1078,7 @@ function show(id) {{
   document.getElementById('section-' + id).classList.add('active');
   event.currentTarget.classList.add('active');
   if (id === 'graph') initGraph();
+  if (id === 'trace') initTrace();
 }}
 
 // ── Findings filter ───────────────────────────────────────────────────────────
@@ -1014,6 +1088,100 @@ function filterF(sev, btn) {{
   document.querySelectorAll('.finding-card').forEach(c => {{
     c.style.display = (sev === 'ALL' || c.dataset.severity === sev) ? '' : 'none';
   }});
+}}
+
+// ── Trace Engine ──────────────────────────────────────────────────────────────
+let currentTraceMode = 'downstream';
+let traceInitDone = false;
+
+function initTrace() {{
+  if (!traceInitDone) {{
+    traceInitDone = true;
+    renderTraces('downstream');
+  }}
+}}
+
+function setTraceMode(mode, btn) {{
+  currentTraceMode = mode;
+  document.querySelectorAll('.trace-mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTraces(mode);
+}}
+
+function renderTraces(mode) {{
+  const container = document.getElementById('trace-list');
+  if (!TRACE_DATA || TRACE_DATA.length === 0) {{
+    container.innerHTML = '<div class="trace-empty"><span class="trace-empty-icon">⇢</span><p>No trace data available — graph may be empty or Trace Engine not enabled.</p></div>';
+    return;
+  }}
+  const filter = (document.getElementById('trace-search') || {{}}).value || '';
+  const filtered = TRACE_DATA.filter(tr => {{
+    if (tr.direction !== mode) return false;
+    if (filter && !tr.origin_label.toLowerCase().includes(filter.toLowerCase())) return false;
+    return true;
+  }});
+  if (filtered.length === 0) {{
+    container.innerHTML = '<div class="trace-empty"><span class="trace-empty-icon">⇢</span><p>No ' + mode + ' traces found' + (filter ? ' matching "' + filter + '"' : '') + '.</p></div>';
+    return;
+  }}
+  container.innerHTML = filtered.map((tr, idx) => renderTraceCard(tr, idx)).join('');
+}}
+
+function renderTraceCard(tr, idx) {{
+  const secrets   = (tr.secrets   || []).length;
+  const endpoints = (tr.endpoints || []).length;
+  const paths     = (tr.paths     || []).length;
+  const secBadge  = secrets   ? '<span class="trace-badge secrets">' + secrets   + ' secret'   + (secrets   > 1 ? 's' : '') + '</span>' : '';
+  const epBadge   = endpoints ? '<span class="trace-badge endpoints">' + endpoints + ' endpoint' + (endpoints > 1 ? 's' : '') + '</span>' : '';
+  const pathBadge = '<span class="trace-badge paths">' + paths + ' path' + (paths !== 1 ? 's' : '') + '</span>';
+  const truncNote = tr.truncated ? '<div class="trace-truncated">⚠ Result truncated — max depth or node limit reached</div>' : '';
+
+  let pathsHtml = '';
+  (tr.paths || []).forEach((path, pi) => {{
+    if (!path || path.length === 0) return;
+    let stepsHtml = '';
+    // Show the origin node first
+    const first = path[0];
+    stepsHtml += '<div class="trace-step"><span class="trace-step-depth">0</span><span class="trace-step-arrow">●</span><span class="trace-node ' + (first.from_kind || '') + '">' + escHtml(first.from_label || '') + '</span><span class="trace-edge-kind" style="background:none;color:var(--text3);font-size:9px">' + (first.from_kind || '') + '</span></div>';
+    path.forEach(step => {{
+      stepsHtml += '<div class="trace-step">'
+        + '<span class="trace-step-depth">' + step.depth + '</span>'
+        + '<span class="trace-step-arrow">→</span>'
+        + '<span class="trace-node ' + (step.to_kind || '') + '">' + escHtml(step.to_label || '') + '</span>'
+        + '<span class="trace-edge-kind">' + escHtml(step.edge_kind || '') + '</span>'
+        + (step.evidence ? '<span class="trace-evidence" title="' + escAttr(step.evidence) + '">' + escHtml(step.evidence.length > 40 ? step.evidence.slice(0,40) + '…' : step.evidence) + '</span>' : '')
+        + '</div>';
+    }});
+    pathsHtml += '<div class="trace-path"><div class="trace-path-label">Path ' + (pi+1) + '</div>' + stepsHtml + '</div>';
+  }});
+
+  return '<div class="trace-card" id="trace-card-' + idx + '">'
+    + '<div class="trace-card-header" onclick="toggleTrace(' + idx + ')">'
+    + '<span class="trace-origin" title="' + escAttr(tr.origin_label || '') + '">' + escHtml(tr.origin_label || '—') + '</span>'
+    + '<span class="trace-meta">' + pathBadge + secBadge + epBadge + '</span>'
+    + '<span class="trace-toggle" id="trace-toggle-' + idx + '">▶</span>'
+    + '</div>'
+    + '<div class="trace-body" id="trace-body-' + idx + '">'
+    + truncNote
+    + (pathsHtml || '<div style="color:var(--text3);font-size:11px;padding:4px 0">No paths traced.</div>')
+    + '</div>'
+    + '</div>';
+}}
+
+function toggleTrace(idx) {{
+  const body    = document.getElementById('trace-body-'   + idx);
+  const toggle  = document.getElementById('trace-toggle-' + idx);
+  const isOpen  = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  toggle.classList.toggle('open', !isOpen);
+  toggle.textContent = isOpen ? '▶' : '▼';
+}}
+
+function escHtml(s) {{
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+function escAttr(s) {{
+  return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }}
 
 // ── Graph ─────────────────────────────────────────────────────────────────────
