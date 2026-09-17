@@ -1,6 +1,6 @@
 """
 BundleSpy Attack Surface Graph
-═══════════════════════════════════════════════════════════════════════════════
+===============================================================================
 
 The graph is the intelligence layer that sits on top of the flat lists in
 ScanResult. It connects every discovered entity - pages, JS files, endpoints,
@@ -27,22 +27,31 @@ Node types:
   CONFIG      - a configuration entry (API base URL, etc.)
 
 Relationship types:
-  LOADS           PAGE      → JS
-  IMPORTS         JS        → JS (chunk / worker)
-  CALLS           JS        → ENDPOINT
-  EXPOSES         JS        → SECRET
-  ACCEPTS         ENDPOINT  → PARAMETER
-  OBSERVED_ON     ENDPOINT  → PAGE
-  RELATED_TO      SECRET    → ENDPOINT
-  HOSTS           HOST      → ENDPOINT
-  REFERENCES      PAGE      → PAGE (navigation / redirect)
-  RECOVERS        JS        → SOURCEMAP
+  LOADS           PAGE      -> JS
+  IMPORTS         JS        -> JS (chunk / worker)
+  CALLS           JS        -> ENDPOINT
+  EXPOSES         JS        -> SECRET
+  ACCEPTS         ENDPOINT  -> PARAMETER
+  OBSERVED_ON     ENDPOINT  -> PAGE
+  RELATED_TO      SECRET    -> ENDPOINT
+  HOSTS           HOST      -> ENDPOINT
+  REFERENCES      PAGE      -> PAGE (navigation / redirect)
+  RECOVERS        JS        -> SOURCEMAP
+
+Trace Engine (P1):
+  trace_upstream(node_id)    - what leads to this node? (reverse BFS)
+  trace_downstream(node_id)  - what does this node lead to? (forward BFS)
+  trace_path(src, dst)       - shortest path between two nodes (BFS)
+
+  All trace functions return a TraceResult with structured TraceStep entries.
+  Each step includes: from_node, edge, to_node, evidence snippet.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Any
@@ -51,7 +60,7 @@ from urllib.parse import urlparse
 from .models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
 
 
-# ── Node / Edge types ─────────────────────────────────────────────────────────
+# -- Node / Edge types ---------------------------------------------------------
 
 class NodeType(str, Enum):
     PAGE       = "PAGE"
@@ -67,19 +76,19 @@ class NodeType(str, Enum):
 
 
 class EdgeType(str, Enum):
-    LOADS       = "LOADS"       # PAGE      → JS
-    IMPORTS     = "IMPORTS"     # JS        → JS
-    CALLS       = "CALLS"       # JS        → ENDPOINT
-    EXPOSES     = "EXPOSES"     # JS        → SECRET
-    ACCEPTS     = "ACCEPTS"     # ENDPOINT  → PARAMETER
-    OBSERVED_ON = "OBSERVED_ON" # ENDPOINT  → PAGE
-    RELATED_TO  = "RELATED_TO"  # SECRET    → ENDPOINT
-    HOSTS       = "HOSTS"       # HOST      → ENDPOINT
-    REFERENCES  = "REFERENCES"  # PAGE      → PAGE
-    RECOVERS    = "RECOVERS"    # JS        → SOURCEMAP
+    LOADS       = "LOADS"       # PAGE      -> JS
+    IMPORTS     = "IMPORTS"     # JS        -> JS
+    CALLS       = "CALLS"       # JS        -> ENDPOINT
+    EXPOSES     = "EXPOSES"     # JS        -> SECRET
+    ACCEPTS     = "ACCEPTS"     # ENDPOINT  -> PARAMETER
+    OBSERVED_ON = "OBSERVED_ON" # ENDPOINT  -> PAGE
+    RELATED_TO  = "RELATED_TO"  # SECRET    -> ENDPOINT
+    HOSTS       = "HOSTS"       # HOST      -> ENDPOINT
+    REFERENCES  = "REFERENCES"  # PAGE      -> PAGE
+    RECOVERS    = "RECOVERS"    # JS        -> SOURCEMAP
 
 
-# ── Core node ─────────────────────────────────────────────────────────────────
+# -- Core node -----------------------------------------------------------------
 
 @dataclass
 class Node:
@@ -90,7 +99,7 @@ class Node:
     kind        - NodeType enum value
     label       - short human-readable name (URL path, file name, etc.)
     data        - arbitrary metadata dict (serialisable to JSON)
-    confidence  - 0.0–1.0 where applicable
+    confidence  - 0.0-1.0 where applicable
     """
     id:         str
     kind:       NodeType
@@ -108,7 +117,7 @@ class Node:
         }
 
 
-# ── Core edge ─────────────────────────────────────────────────────────────────
+# -- Core edge -----------------------------------------------------------------
 
 @dataclass
 class Edge:
@@ -137,7 +146,95 @@ class Edge:
         }
 
 
-# ── ID helpers ────────────────────────────────────────────────────────────────
+# -- Trace Engine types --------------------------------------------------------
+
+@dataclass
+class TraceStep:
+    """
+    A single hop in a trace result.
+
+    from_node  - the node we're coming from (None at the start anchor)
+    edge       - the relationship traversed (None at the start anchor)
+    to_node    - the node we're arriving at
+    evidence   - a human-readable description of why this hop exists
+    depth      - how many hops from the trace origin
+    """
+    from_node: Optional[Node]
+    edge:      Optional[Edge]
+    to_node:   Node
+    evidence:  str = ""
+    depth:     int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "from_node": self.from_node.to_dict() if self.from_node else None,
+            "edge":      self.edge.to_dict()      if self.edge      else None,
+            "to_node":   self.to_node.to_dict(),
+            "evidence":  self.evidence,
+            "depth":     self.depth,
+        }
+
+
+@dataclass
+class TraceResult:
+    """
+    The result of a graph trace operation.
+
+    origin      - the node the trace started from
+    direction   - 'upstream', 'downstream', or 'path'
+    steps       - ordered list of TraceStep entries
+    paths       - grouped list-of-lists for multi-path results
+    truncated   - True if the result was cut short (graph too large)
+    """
+    origin:     Node
+    direction:  str
+    steps:      List[TraceStep]      = field(default_factory=list)
+    paths:      List[List[TraceStep]] = field(default_factory=list)
+    truncated:  bool                 = False
+
+    # -- Convenience accessors -------------------------------------------------
+
+    def all_nodes(self) -> List[Node]:
+        """All unique nodes that appear in the trace (origin + all to_nodes)."""
+        seen: Set[str] = set()
+        result: List[Node] = [self.origin]
+        seen.add(self.origin.id)
+        for step in self.steps:
+            if step.to_node.id not in seen:
+                result.append(step.to_node)
+                seen.add(step.to_node.id)
+        return result
+
+    def secrets(self) -> List[Node]:
+        """All SECRET nodes discovered during this trace."""
+        return [n for n in self.all_nodes() if n.kind == NodeType.SECRET]
+
+    def endpoints(self) -> List[Node]:
+        """All ENDPOINT nodes discovered during this trace."""
+        return [n for n in self.all_nodes() if n.kind == NodeType.ENDPOINT]
+
+    def chain_label(self) -> str:
+        """
+        Produce a single-line chain description.
+        Example: /admin -> admin.js -> GET /api/admin/users -> API_KEY
+        """
+        parts: List[str] = [self.origin.label]
+        for step in self.steps:
+            parts.append(step.to_node.label)
+        return " -> ".join(parts)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "origin":    self.origin.to_dict(),
+            "direction": self.direction,
+            "steps":     [s.to_dict() for s in self.steps],
+            "paths":     [[s.to_dict() for s in p] for p in self.paths],
+            "truncated": self.truncated,
+            "chain":     self.chain_label(),
+        }
+
+
+# -- ID helpers ----------------------------------------------------------------
 
 def _node_id(*parts: str) -> str:
     """Deterministic 16-character node ID from one or more string parts."""
@@ -179,26 +276,78 @@ def _endpoint_label(ep: Endpoint) -> str:
     return f"{method} {path}"
 
 
-# ── Attack surface graph ───────────────────────────────────────────────────────
+def _evidence_for_edge(edge: Edge, from_node: Node, to_node: Node) -> str:
+    """
+    Generate a human-readable evidence snippet for a graph hop.
+    Used in Trace Engine output.
+    """
+    kind = edge.kind
+
+    if kind == EdgeType.LOADS:
+        return f"Page '{from_node.label}' loads JavaScript asset '{to_node.label}'"
+
+    if kind == EdgeType.IMPORTS:
+        return f"'{from_node.label}' dynamically imports '{to_node.label}'"
+
+    if kind == EdgeType.CALLS:
+        src_file = to_node.data.get("source_file", "")
+        line     = to_node.data.get("line_number", "")
+        loc      = f" (line {line})" if line else ""
+        return f"'{from_node.label}' contains a call to endpoint '{to_node.label}'{loc}"
+
+    if kind == EdgeType.EXPOSES:
+        sev = to_node.data.get("severity", "")
+        cat = to_node.data.get("category", "")
+        return f"'{from_node.label}' exposes {sev} {cat} finding: '{to_node.label}'"
+
+    if kind == EdgeType.ACCEPTS:
+        param_kind = edge.label or to_node.data.get("kind", "")
+        return f"Endpoint '{from_node.label}' accepts {param_kind} parameter '{to_node.label}'"
+
+    if kind == EdgeType.OBSERVED_ON:
+        return f"Endpoint '{from_node.label}' was observed on page '{to_node.label}'"
+
+    if kind == EdgeType.RELATED_TO:
+        return f"Finding '{from_node.label}' is co-located with endpoint '{to_node.label}'"
+
+    if kind == EdgeType.HOSTS:
+        return f"External host '{from_node.label}' serves endpoint '{to_node.label}'"
+
+    if kind == EdgeType.REFERENCES:
+        return f"Page '{from_node.label}' references / navigates to '{to_node.label}'"
+
+    if kind == EdgeType.RECOVERS:
+        return f"'{from_node.label}' has a recoverable source map: '{to_node.label}'"
+
+    return f"{from_node.label} -[{kind.value}]-> {to_node.label}"
+
+
+# -- Attack surface graph ------------------------------------------------------
 
 class AttackSurfaceGraph:
     """
     The complete attack surface graph for one BundleSpy scan.
 
     Build it with AttackSurfaceGraph.from_scan_result(result).
+
     Query it with:
         graph.neighbors(node_id)
         graph.edges_from(node_id)
         graph.nodes_of_kind(NodeType.ENDPOINT)
         graph.to_dict()   # for JSON serialisation
+
+    Trace the attack surface with:
+        graph.trace_upstream(node_id)
+        graph.trace_downstream(node_id)
+        graph.trace_path(src_id, dst_id)
     """
 
     def __init__(self) -> None:
-        self._nodes: Dict[str, Node] = {}
-        self._edges: List[Edge]      = []
-        self._edge_set: Set[str]     = set()  # dedup key: source+kind+target
+        self._nodes:    Dict[str, Node] = {}
+        self._edges:    List[Edge]      = []
+        self._edge_set: Set[str]        = set()  # dedup key: source+kind+target
 
-    # ── Construction ─────────────────────────────────────────────────────────
+    # -- Construction ----------------------------------------------------------
 
     def add_node(self, node: Node) -> Node:
         """Add or merge a node. Returns the stored node."""
@@ -217,7 +366,7 @@ class AttackSurfaceGraph:
         self._edge_set.add(key)
         self._edges.append(Edge(source, target, kind, label, data or {}))
 
-    # ── Query ─────────────────────────────────────────────────────────────────
+    # -- Query -----------------------------------------------------------------
 
     def node(self, node_id: str) -> Optional[Node]:
         return self._nodes.get(node_id)
@@ -290,7 +439,7 @@ class AttackSurfaceGraph:
                             result["workers"].append(target)
         return result
 
-    # ── Statistics ────────────────────────────────────────────────────────────
+    # -- Statistics ------------------------------------------------------------
 
     def stats(self) -> Dict[str, Any]:
         """Return a summary dict suitable for the Overview card."""
@@ -298,12 +447,12 @@ class AttackSurfaceGraph:
         for n in self._nodes.values():
             counts[n.kind.value] = counts.get(n.kind.value, 0) + 1
         return {
-            "nodes":      len(self._nodes),
-            "edges":      len(self._edges),
-            "by_type":    counts,
+            "nodes":   len(self._nodes),
+            "edges":   len(self._edges),
+            "by_type": counts,
         }
 
-    # ── Serialisation ─────────────────────────────────────────────────────────
+    # -- Serialisation ---------------------------------------------------------
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the full graph to a JSON-ready dict."""
@@ -313,22 +462,255 @@ class AttackSurfaceGraph:
             "stats": self.stats(),
         }
 
-    # ── Builder ───────────────────────────────────────────────────────────────
+    # -- Trace Engine (P1) -----------------------------------------------------
+
+    def trace_downstream(
+        self,
+        node_id: str,
+        max_depth: int = 6,
+        max_nodes: int = 200,
+    ) -> TraceResult:
+        """
+        Trace all paths reachable FROM a node (forward BFS).
+        Answers: "What attack surface does this node expose?"
+
+        Example: trace_downstream(page_node_id)
+          /admin -> admin.js -> GET /api/admin/users -> API_KEY
+        """
+        origin = self._nodes.get(node_id)
+        if not origin:
+            return TraceResult(
+                origin=Node(id=node_id, kind=NodeType.PAGE, label="(not found)"),
+                direction="downstream",
+            )
+
+        result = TraceResult(origin=origin, direction="downstream")
+        seen:    Set[str]          = {node_id}
+        # queue: (current_node, edge_that_led_here, parent_node, depth)
+        queue: deque = deque()
+        queue.append((origin, None, None, 0))
+
+        while queue and len(result.steps) < max_nodes:
+            current, arriving_edge, parent, depth = queue.popleft()
+
+            if arriving_edge is not None and parent is not None:
+                evidence = _evidence_for_edge(arriving_edge, parent, current)
+                result.steps.append(TraceStep(
+                    from_node = parent,
+                    edge      = arriving_edge,
+                    to_node   = current,
+                    evidence  = evidence,
+                    depth     = depth,
+                ))
+
+            if depth >= max_depth:
+                continue
+
+            for edge in self.edges_from(current.id):
+                nid = edge.target
+                if nid in seen:
+                    continue
+                child = self._nodes.get(nid)
+                if not child:
+                    continue
+                seen.add(nid)
+                queue.append((child, edge, current, depth + 1))
+
+        result.truncated = len(result.steps) >= max_nodes
+        return result
+
+    def trace_upstream(
+        self,
+        node_id: str,
+        max_depth: int = 6,
+        max_nodes: int = 200,
+    ) -> TraceResult:
+        """
+        Trace all paths that LEAD TO a node (reverse BFS).
+        Answers: "How can an attacker reach this node?"
+
+        Example: trace_upstream(endpoint_node_id)
+          GET /api/admin/users <- admin.js <- /admin
+        """
+        origin = self._nodes.get(node_id)
+        if not origin:
+            return TraceResult(
+                origin=Node(id=node_id, kind=NodeType.PAGE, label="(not found)"),
+                direction="upstream",
+            )
+
+        result = TraceResult(origin=origin, direction="upstream")
+        seen:  Set[str] = {node_id}
+        queue: deque    = deque()
+        queue.append((origin, None, None, 0))
+
+        while queue and len(result.steps) < max_nodes:
+            current, arriving_edge, child_node, depth = queue.popleft()
+
+            if arriving_edge is not None and child_node is not None:
+                # Upstream: edge runs current -> child, but we traversed it backwards
+                evidence = _evidence_for_edge(arriving_edge, current, child_node)
+                result.steps.append(TraceStep(
+                    from_node = current,
+                    edge      = arriving_edge,
+                    to_node   = child_node,
+                    evidence  = f"[upstream] {evidence}",
+                    depth     = depth,
+                ))
+
+            if depth >= max_depth:
+                continue
+
+            for edge in self.edges_to(current.id):
+                nid = edge.source
+                if nid in seen:
+                    continue
+                parent = self._nodes.get(nid)
+                if not parent:
+                    continue
+                seen.add(nid)
+                queue.append((parent, edge, current, depth + 1))
+
+        result.truncated = len(result.steps) >= max_nodes
+        return result
+
+    def trace_path(
+        self,
+        src_id: str,
+        dst_id: str,
+        max_depth: int = 8,
+    ) -> TraceResult:
+        """
+        Find the shortest path between two nodes using BFS.
+        Answers: "How is node A connected to node B?"
+
+        Example: trace_path(page_id, secret_id)
+          /admin -> admin.js -> admin.js#L23 -> AWS_ACCESS_KEY
+        """
+        src = self._nodes.get(src_id)
+        dst = self._nodes.get(dst_id)
+
+        if not src:
+            return TraceResult(
+                origin=Node(id=src_id, kind=NodeType.PAGE, label="(not found)"),
+                direction="path",
+            )
+
+        result = TraceResult(origin=src, direction="path")
+
+        if not dst:
+            return result
+
+        if src_id == dst_id:
+            return result
+
+        # BFS tracking: node_id -> (parent_id, edge_that_got_here)
+        parent_map: Dict[str, Optional[tuple]] = {src_id: None}
+        queue: deque = deque([(src_id, 0)])
+
+        found = False
+        while queue:
+            current_id, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+            for edge in self.edges_from(current_id) + self.edges_to(current_id):
+                nid = edge.target if edge.source == current_id else edge.source
+                if nid in parent_map:
+                    continue
+                parent_map[nid] = (current_id, edge)
+                if nid == dst_id:
+                    found = True
+                    break
+                queue.append((nid, depth + 1))
+            if found:
+                break
+
+        if not found:
+            return result
+
+        # Reconstruct path by walking parent_map backwards
+        path_ids: List[str] = []
+        cur = dst_id
+        while cur is not None:
+            path_ids.append(cur)
+            entry = parent_map.get(cur)
+            cur = entry[0] if entry else None
+        path_ids.reverse()
+
+        # Build steps along the path
+        for i in range(1, len(path_ids)):
+            prev_id  = path_ids[i - 1]
+            curr_id  = path_ids[i]
+            prev_node = self._nodes[prev_id]
+            curr_node = self._nodes[curr_id]
+
+            # Find the edge connecting them
+            connecting_edge: Optional[Edge] = None
+            for e in self.edges_from(prev_id):
+                if e.target == curr_id:
+                    connecting_edge = e
+                    break
+            if not connecting_edge:
+                for e in self.edges_to(prev_id):
+                    if e.source == curr_id:
+                        connecting_edge = e
+                        break
+
+            ev = _evidence_for_edge(connecting_edge, prev_node, curr_node) if connecting_edge else ""
+            result.steps.append(TraceStep(
+                from_node = prev_node,
+                edge      = connecting_edge,
+                to_node   = curr_node,
+                evidence  = ev,
+                depth     = i,
+            ))
+
+        return result
+
+    def trace_all_to_secrets(self) -> List[TraceResult]:
+        """
+        For every SECRET node in the graph, trace its upstream path.
+        Returns a list of TraceResult, one per secret, sorted by severity.
+        """
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+        secrets = self.nodes_of_kind(NodeType.SECRET)
+        secrets.sort(
+            key=lambda n: severity_order.get(n.data.get("severity", "INFO"), 99)
+        )
+        results: List[TraceResult] = []
+        for secret in secrets:
+            tr = self.trace_upstream(secret.id, max_depth=5)
+            results.append(tr)
+        return results
+
+    def trace_all_from_pages(self) -> List[TraceResult]:
+        """
+        For every PAGE node, trace the full downstream attack surface.
+        """
+        pages = self.nodes_of_kind(NodeType.PAGE)
+        results: List[TraceResult] = []
+        for page in pages:
+            tr = self.trace_downstream(page.id, max_depth=4)
+            if tr.steps:
+                results.append(tr)
+        return results
+
+    # -- Builder ---------------------------------------------------------------
 
     @classmethod
     def from_scan_result(cls, result: ScanResult) -> "AttackSurfaceGraph":
         """
         Build the attack surface graph from a completed ScanResult.
 
-        Runs in O(n) — one pass over each entity list.
+        Runs in O(n) - one pass over each entity list.
         No network I/O, no re-analysis.
         """
         g = cls()
 
-        # ── 1. Index pages ────────────────────────────────────────────────────
+        # -- 1. Index pages ----------------------------------------------------
         # Collect pages from: js source_pages, endpoint source pages,
         # finding source pages, and any crawled page URLs.
-        page_ids: Dict[str, str] = {}  # url → node_id
+        page_ids: Dict[str, str] = {}  # url -> node_id
 
         def _ensure_page(url: str) -> Optional[str]:
             if not url or url.startswith("inline:") or url.startswith("local://"):
@@ -347,8 +729,8 @@ class AttackSurfaceGraph:
             page_ids[norm] = nid
             return nid
 
-        # ── 2. JS files ───────────────────────────────────────────────────────
-        js_ids: Dict[str, str] = {}  # url → node_id
+        # -- 2. JS files -------------------------------------------------------
+        js_ids: Dict[str, str] = {}  # url -> node_id
 
         for js in result.js_files:
             nid = _node_id("js", js.url)
@@ -378,17 +760,17 @@ class AttackSurfaceGraph:
             ))
             js_ids[js.url] = nid
 
-            # PAGE → LOADS → JS
+            # PAGE -> LOADS -> JS
             if js.source_page:
                 page_nid = _ensure_page(js.source_page)
                 if page_nid:
                     g.add_edge(page_nid, nid, EdgeType.LOADS)
 
-        # ── 3. Endpoints ──────────────────────────────────────────────────────
-        ep_ids: Dict[str, str] = {}  # canonical url → node_id
+        # -- 3. Endpoints ------------------------------------------------------
+        ep_ids: Dict[str, str] = {}  # canonical url -> node_id
 
         for ep in result.endpoints:
-            nid  = _node_id("ep", ep.method, ep.url)
+            nid   = _node_id("ep", ep.method, ep.url)
             label = _endpoint_label(ep)
 
             g.add_node(Node(
@@ -409,12 +791,12 @@ class AttackSurfaceGraph:
             ))
             ep_ids[ep.url] = nid
 
-            # JS → CALLS → ENDPOINT
+            # JS -> CALLS -> ENDPOINT
             js_nid = js_ids.get(ep.source_file)
             if js_nid:
                 g.add_edge(js_nid, nid, EdgeType.CALLS)
 
-            # ENDPOINT → OBSERVED_ON → PAGE (via source_file's source_page)
+            # ENDPOINT -> OBSERVED_ON -> PAGE (via source_file's source_page)
             # Find the page that loaded the JS that contains this endpoint
             for js in result.js_files:
                 if js.url == ep.source_file and js.source_page:
@@ -423,7 +805,7 @@ class AttackSurfaceGraph:
                         g.add_edge(nid, page_nid, EdgeType.OBSERVED_ON)
                     break
 
-            # ENDPOINT → ACCEPTS → PARAMETER
+            # ENDPOINT -> ACCEPTS -> PARAMETER
             for param in (ep.path_params or []):
                 pname  = param.get("name", "?") if isinstance(param, dict) else str(param)
                 pnid   = _node_id("param", ep.url, pname, "path")
@@ -462,8 +844,8 @@ class AttackSurfaceGraph:
                 except Exception:
                     pass
 
-        # ── 4. Findings ───────────────────────────────────────────────────────
-        finding_ids: Dict[str, str] = {}  # finding.id → node_id
+        # -- 4. Findings -------------------------------------------------------
+        finding_ids: Dict[str, str] = {}  # finding.id -> node_id
 
         for finding in result.findings:
             if finding.status == "likely_false_positive":
@@ -490,7 +872,7 @@ class AttackSurfaceGraph:
             ))
             finding_ids[finding.id] = nid
 
-            # JS → EXPOSES → SECRET
+            # JS -> EXPOSES -> SECRET
             # Strip prefixes to find the JS node
             raw_url = finding.file_url
             for pfx in ("html:", "inline:", "sourcemap://", "local://"):
@@ -518,7 +900,7 @@ class AttackSurfaceGraph:
                 if page_nid:
                     g.add_edge(page_nid, nid, EdgeType.EXPOSES)
 
-            # SECRET → RELATED_TO → ENDPOINT (same source file or page)
+            # SECRET -> RELATED_TO -> ENDPOINT (same source file or page)
             for ep_url, ep_nid in ep_ids.items():
                 ep_node = g.node(ep_nid)
                 if not ep_node:
@@ -536,7 +918,7 @@ class AttackSurfaceGraph:
                 elif ep_page and ep_page == finding.source_page:
                     g.add_edge(nid, ep_nid, EdgeType.RELATED_TO)
 
-        # ── 5. Infrastructure as HOST nodes ───────────────────────────────────
+        # -- 5. Infrastructure as HOST nodes -----------------------------------
         for infra in result.infrastructure:
             nid = _node_id("host", infra.value)
             existing = g.node(nid)
