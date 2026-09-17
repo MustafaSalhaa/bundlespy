@@ -910,6 +910,17 @@ def run_scan(args) -> int:
         errors         = errors,
     )
 
+    # ── Attack surface graph ───────────────────────────────────────────────────
+    # Build the relationship graph from the completed scan result.
+    # This is O(n) and adds no network I/O — pure in-memory assembly.
+    try:
+        from .storage.graph import AttackSurfaceGraph
+        result.graph = AttackSurfaceGraph.from_scan_result(result)
+        extras["graph"] = result.graph
+    except Exception as _ge:
+        import logging as _gl
+        _gl.getLogger("bundlespy.cli").warning("Graph build failed: %s", _ge)
+
     # ── Coverage metrics ──────────────────────────────────────────────────────
     from .analysis.coverage import compute_coverage
     coverage = compute_coverage(
