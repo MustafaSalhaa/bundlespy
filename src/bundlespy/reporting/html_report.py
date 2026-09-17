@@ -1236,30 +1236,6 @@ function buildPathSummary(path, originLabel) {{
   return '<div class="te-summary-bar">' + crumbs.join('') + '</div>';
 }}
 
-// Build a single chain row (node card)
-function buildChainRow(kind, label, isOrigin, isLast) {{
-  const kindLabel = KIND_LABELS[kind] || kind || 'Node';
-  const dotCls    = 'te-chain-dot td-' + (kind || 'PAGE');
-  const lineCls   = 'te-chain-line tl-' + (kind || 'PAGE');
-  const connector = '<div class="te-chain-left"><div class="' + dotCls + '"></div>' + (isLast ? '' : '<div class="' + lineCls + '"></div>') + '</div>';
-  const card      = '<div class="te-node-card tn-' + kind + (isOrigin ? ' is-origin' : '') + (isLast ? ' is-last' : '') + '">'
-    + '<div class="te-node-type">' + escHtml(kindLabel) + '</div>'
-    + '<div class="te-node-label" title="' + escAttr(label) + '">' + escHtml(shortLabel(label, 70)) + '</div>'
-    + '</div>';
-  return '<div class="te-chain-row"><div class="te-chain-left">' + connector.replace(/<div class="te-chain-left">/, '').replace(/<\/div>$/, '') + '</div><div class="te-chain-right">' + card + '</div></div>';
-}}
-
-// Build a relationship connector row
-function buildRelRow(edgeKind, evidence) {{
-  const isStrong = STRONG_RELS.has(edgeKind);
-  const relTxt   = REL_LABELS[edgeKind] || edgeKind || '';
-  const evBlock  = evidence ? '<div class="te-evidence">' + escHtml(evidence.length > 120 ? evidence.slice(0,120) + '…' : evidence) + '</div>' : '';
-  return '<div class="te-rel-row">'
-    + '<div class="te-chain-left"><div class="te-chain-dot" style="opacity:0;width:10px"></div><div class="te-chain-line" style="border-color:var(--border-subtle)"></div></div>'
-    + '<div class="te-chain-right"><span class="te-rel-label' + (isStrong ? ' strong' : '') + '">' + escHtml(relTxt.toUpperCase()) + '</span>' + evBlock + '</div>'
-    + '</div>';
-}}
-
 function buildOriginCard(tr, idx) {{
   const paths     = tr.paths     || [];
   const secrets   = tr.secrets   || [];
