@@ -986,6 +986,7 @@ class Crawler:
         common_paths:    bool = False,
         wayback:         bool = False,
         max_sitemap_depth: int = 3,
+        status_cb        = None,   # callable(str) — UI status line hook
     ):
         self.target_url        = target_url
         self.fetcher           = fetcher
@@ -996,6 +997,7 @@ class Crawler:
         self.common_paths      = common_paths
         self.wayback           = wayback
         self.max_sitemap_depth = max_sitemap_depth
+        self._status_cb        = status_cb  # called with a short status string each phase
 
         # Core dedup sets
         self.visited_pages:      Set[str] = set()
@@ -1019,6 +1021,14 @@ class Crawler:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _status(self, msg: str) -> None:
+        """Emit a sub-phase status line via the UI callback (if wired up)."""
+        if self._status_cb:
+            try:
+                self._status_cb(msg)
+            except Exception:
+                pass
+
     def _register(self, record: DiscoveryRecord) -> bool:
         is_new = self.route_registry.register(record)
         if is_new:
@@ -1035,21 +1045,25 @@ class Crawler:
         base = self._base_url()
 
         # Phase 1: robots.txt — routes, JS paths, sitemap hints
+        self._status("Reading robots.txt")
         self._discover_from_robots(base)
 
         # Phase 2: sitemaps — recursive, unified with robots-discovered sitemaps
+        self._status("Parsing sitemaps")
         self._discover_from_sitemaps(base)
 
         # Phase 3: asset manifests — all major build tools
+        self._status("Checking asset manifests")
         self._discover_from_manifests(base)
 
         # Phase 4: optional Wayback historical URLs
         if self.wayback:
             self._discover_from_wayback(base)
 
-        # Phase 5: common JS probes (only when --common-paths flag is set)
-        # Uses HEAD to check existence before fetching body — avoids slow downloads
+        # Phase 5: common JS probes (--common-paths flag extends the list;
+        #           basic JS probing always runs via _probe_common_pages)
         if self.common_paths:
+            self._status(f"Probing {len(COMMON_JS_PATHS)} common JS paths")
             import time as _time
             import requests as _req
             _js_probe_start = _time.monotonic()
@@ -1069,14 +1083,20 @@ class Crawler:
                 except Exception:
                     pass
 
-        # Phase 6: common page probes — queue the live ones
+        # Phase 6: common page probes — always runs, HEAD-based, 60s budget
         queue: deque = deque()
         queue.append((self.target_url, 0))
         self.visited_pages.add(self.target_url)
 
+        self._status(f"Probing {len(COMMON_PAGE_PATHS)} common routes")
         self._probe_common_pages(base, queue)
+        probed_live = len([r for r in self.discovery_records if r.source == "probe"])
+        self._status(f"Probes complete  {probed_live} live routes found")
 
         # Phase 7: sitemap-discovered pages → queue
+        sitemap_count = len([r for r in self.discovery_records if r.source == "sitemap"])
+        if sitemap_count:
+            self._status(f"Queuing {sitemap_count} sitemap URLs")
         for record in self.discovery_records:
             if record.source == "sitemap" and not record.is_historical:
                 url = record.url
@@ -1085,12 +1105,14 @@ class Crawler:
                     queue.append((url, 1))
 
         # Phase 8: main crawl
+        self._status(f"Crawling pages (depth {self.max_depth}, max {self.max_pages})")
         while queue and self.pages_crawled < self.max_pages:
             url, depth = queue.popleft()
             self._crawl_page(url, depth, queue)
 
         # Phase 9: validate historical URLs against live site (optional, lightweight)
         if self.wayback:
+            self._status("Validating historical URLs")
             self._validate_historical()
 
         logger.info(
@@ -1102,12 +1124,10 @@ class Crawler:
         """
         Probe common page paths using HEAD requests (fast, no body).
         Falls back to GET only when HEAD returns 405.
-        Hard time budget: max 60 seconds total across all probes — the main
-        crawl is more valuable than exhaustive path bruteforcing.
-        Only runs when --common-paths is set.
+        Hard time budget: max 60 seconds total across all probes.
+        Always runs by default. --common-paths flag has no effect on this method;
+        the flag only controls the extended JS probe list.
         """
-        if not self.common_paths:
-            return
 
         import time as _time
         budget_start = _time.monotonic()
