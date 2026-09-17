@@ -806,76 +806,114 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .neighbor-item:hover{{color:var(--accent)}}
 /* ── Trace Engine ── */
-.trace-toolbar{{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}}
-.trace-mode-group{{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px;gap:2px}}
-.trace-mode-btn{{padding:5px 16px;border-radius:16px;border:none;background:none;color:var(--text2);font-size:12px;cursor:pointer;transition:all .2s;font-family:inherit;font-weight:500}}
-.trace-mode-btn:hover{{color:var(--text)}}
-.trace-mode-btn.active{{background:var(--accent);color:#0d1117;font-weight:700;box-shadow:0 2px 8px rgba(88,166,255,.3)}}
-.trace-search{{flex:1;max-width:300px;padding:7px 12px 7px 32px;background:var(--surface2);border:1px solid var(--border2);border-radius:20px;color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .2s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e7681' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:10px center}}
-.trace-search:focus{{border-color:var(--accent)}}
-.trace-count-label{{font-size:11px;color:var(--text3);margin-left:auto}}
-.trace-origin-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden;transition:border-color .2s}}
-.trace-origin-card:hover{{border-color:var(--border2)}}
-.trace-origin-card.has-secrets{{border-left:3px solid var(--red)}}
-.trace-origin-card.has-endpoints{{border-left:3px solid var(--purple)}}
-.toc-header{{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;user-select:none}}
-.toc-header:hover{{background:rgba(255,255,255,.02)}}
-.toc-origin-icon{{width:28px;height:28px;border-radius:6px;background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--accent);flex-shrink:0}}
-.toc-origin-info{{flex:1;min-width:0}}
-.toc-origin-url{{font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.toc-origin-sub{{font-size:11px;color:var(--text3);margin-top:1px}}
-.toc-badges{{display:flex;align-items:center;gap:6px;flex-shrink:0}}
-.tbadge{{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:10px;font-weight:600;white-space:nowrap}}
-.tbadge-path{{background:rgba(88,166,255,.1);color:var(--accent);border:1px solid rgba(88,166,255,.2)}}
-.tbadge-secret{{background:rgba(248,81,73,.1);color:var(--red);border:1px solid rgba(248,81,73,.2)}}
-.tbadge-endpoint{{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.2)}}
-.toc-chevron{{color:var(--text3);font-size:11px;transition:transform .25s;flex-shrink:0}}
-.toc-chevron.open{{transform:rotate(90deg)}}
-.toc-body{{display:none;border-top:1px solid var(--border);padding:0}}
-.toc-body.open{{display:block}}
-.toc-paths-wrap{{padding:14px 16px;display:flex;flex-direction:column;gap:10px}}
-.toc-path{{background:#0a0d13;border:1px solid var(--border);border-radius:6px;overflow:hidden}}
-.toc-path-header{{padding:7px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}}
-.toc-path-num{{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px}}
-.toc-path-depth{{font-size:10px;color:var(--text3)}}
-.toc-path-flags{{margin-left:auto;display:flex;gap:4px}}
-.toc-flag{{font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600}}
-.toc-flag-secret{{background:rgba(248,81,73,.15);color:var(--red)}}
-.toc-flag-endpoint{{background:rgba(167,139,250,.15);color:var(--purple)}}
-.toc-timeline{{padding:10px 12px;display:flex;flex-direction:column;gap:0}}
-.tt-row{{display:flex;align-items:flex-start;gap:0;position:relative}}
-.tt-connector{{display:flex;flex-direction:column;align-items:center;width:24px;flex-shrink:0}}
-.tt-dot{{width:10px;height:10px;border-radius:50%;border:2px solid;flex-shrink:0;margin-top:3px;z-index:1}}
-.tt-line{{width:2px;flex:1;min-height:16px;background:var(--border2);margin:2px 0}}
-.tt-row:last-child .tt-line{{display:none}}
-.tt-content{{padding:2px 0 12px 8px;flex:1;min-width:0}}
-.tt-node-row{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}}
-.tt-node-chip{{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.tt-edge-label{{font-size:10px;color:var(--text3);background:var(--border);padding:2px 6px;border-radius:3px;font-family:'SF Mono','Fira Code',Consolas,monospace;white-space:nowrap}}
-.tt-evidence{{font-size:10px;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}}
-.nc-PAGE{{background:rgba(88,166,255,.12);color:#60a5fa;border:1px solid rgba(88,166,255,.2)}}
-.nc-JS{{background:rgba(63,185,80,.12);color:#34d399;border:1px solid rgba(63,185,80,.2)}}
-.nc-ENDPOINT{{background:rgba(167,139,250,.12);color:#a78bfa;border:1px solid rgba(167,139,250,.2)}}
-.nc-SECRET{{background:rgba(248,81,73,.12);color:#f87171;border:1px solid rgba(248,81,73,.2)}}
-.nc-WORKER{{background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)}}
-.nc-HOST{{background:rgba(251,146,60,.12);color:#fb923c;border:1px solid rgba(251,146,60,.2)}}
-.nc-CHUNK{{background:rgba(34,211,238,.12);color:#22d3ee;border:1px solid rgba(34,211,238,.2)}}
-.nc-PARAMETER{{background:rgba(148,163,184,.1);color:#94a3b8;border:1px solid rgba(148,163,184,.2)}}
-.nc-SOURCEMAP{{background:rgba(134,239,172,.1);color:#86efac;border:1px solid rgba(134,239,172,.2)}}
-.nc-CONFIG{{background:rgba(192,132,252,.12);color:#c084fc;border:1px solid rgba(192,132,252,.2)}}
-.nd-dot-PAGE{{border-color:#60a5fa;background:rgba(88,166,255,.2)}}
-.nd-dot-JS{{border-color:#34d399;background:rgba(63,185,80,.2)}}
-.nd-dot-ENDPOINT{{border-color:#a78bfa;background:rgba(167,139,250,.2)}}
-.nd-dot-SECRET{{border-color:#f87171;background:rgba(248,81,73,.2)}}
-.nd-dot-WORKER{{border-color:#fbbf24;background:rgba(251,191,36,.2)}}
-.nd-dot-HOST{{border-color:#fb923c;background:rgba(251,146,60,.2)}}
-.nd-dot-CHUNK{{border-color:#22d3ee;background:rgba(34,211,238,.2)}}
-.nd-dot-PARAMETER{{border-color:#94a3b8;background:rgba(148,163,184,.2)}}
-.nd-dot-SOURCEMAP{{border-color:#86efac;background:rgba(134,239,172,.2)}}
-.nd-dot-CONFIG{{border-color:#c084fc;background:rgba(192,132,252,.2)}}
-.trace-empty-state{{text-align:center;padding:60px 20px;color:var(--text3)}}
-.trace-empty-icon{{font-size:36px;display:block;margin-bottom:10px;opacity:.4}}
-.trace-truncated-warn{{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--orange);padding:6px 12px;background:rgba(240,136,62,.06);border-top:1px solid rgba(240,136,62,.15)}}
+.te-toolbar{{display:flex;align-items:center;gap:12px;margin-bottom:24px;flex-wrap:wrap}}
+.te-toggle{{display:flex;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;overflow:hidden}}
+.te-toggle-btn{{padding:7px 20px;border:none;background:none;color:var(--text3);font-size:12px;font-weight:500;cursor:pointer;transition:all .18s;font-family:inherit;letter-spacing:.01em}}
+.te-toggle-btn:hover{{color:var(--text)}}
+.te-toggle-btn.active{{background:var(--surface);color:var(--text);font-weight:600;box-shadow:inset 0 0 0 1px var(--border2)}}
+.te-search-wrap{{position:relative;flex:1;max-width:340px}}
+.te-search-wrap svg{{position:absolute;left:10px;top:50%;transform:translateY(-50%);pointer-events:none;opacity:.4}}
+.te-search{{width:100%;padding:7px 12px 7px 34px;background:var(--surface2);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .18s}}
+.te-search:focus{{border-color:var(--accent)}}
+.te-stat{{font-size:11px;color:var(--text3);margin-left:auto;white-space:nowrap}}
+/* Origin group card */
+.te-origin{{background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden;transition:box-shadow .18s}}
+.te-origin:hover{{box-shadow:0 0 0 1px var(--border2)}}
+.te-origin.risk-critical{{border-left:3px solid #f87171}}
+.te-origin.risk-high{{border-left:3px solid #fb923c}}
+.te-origin.risk-low{{border-left:3px solid var(--border2)}}
+.te-origin-hd{{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;user-select:none}}
+.te-origin-hd:hover{{background:rgba(255,255,255,.018)}}
+.te-pg-icon{{width:32px;height:32px;border-radius:7px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.18);display:flex;align-items:center;justify-content:center;flex-shrink:0}}
+.te-pg-icon svg{{opacity:.8}}
+.te-origin-text{{flex:1;min-width:0}}
+.te-origin-url{{font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-.01em}}
+.te-origin-sub{{font-size:11px;color:var(--text3);margin-top:2px}}
+.te-pills{{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap}}
+.te-pill{{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;padding:3px 8px;border-radius:5px;white-space:nowrap;letter-spacing:.02em}}
+.te-pill-path{{background:rgba(88,166,255,.08);color:#58a6ff;border:1px solid rgba(88,166,255,.18)}}
+.te-pill-secret{{background:rgba(248,81,73,.1);color:#f87171;border:1px solid rgba(248,81,73,.2)}}
+.te-pill-ep{{background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)}}
+.te-chevron{{color:var(--text3);font-size:10px;flex-shrink:0;transition:transform .2s}}
+.te-chevron.open{{transform:rotate(90deg)}}
+.te-origin-body{{display:none;border-top:1px solid var(--border)}}
+.te-origin-body.open{{display:block}}
+/* Path summary bar */
+.te-summary-bar{{padding:10px 18px;background:#0a0d13;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-x:auto}}
+.te-sum-node{{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap;flex-shrink:0}}
+.te-sum-arrow{{color:var(--text3);font-size:11px;flex-shrink:0}}
+.te-sum-rel{{font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--text3);text-transform:uppercase;flex-shrink:0;padding:0 2px}}
+/* Paths container */
+.te-paths{{padding:16px 18px;display:flex;flex-direction:column;gap:12px}}
+/* Individual path card */
+.te-path{{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#0a0d13}}
+.te-path-hd{{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.02)}}
+.te-path-num{{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em}}
+.te-path-len{{font-size:10px;color:var(--text3)}}
+.te-path-flags{{display:flex;gap:4px;margin-left:auto}}
+.te-path-flag{{font-size:10px;font-weight:600;padding:1px 7px;border-radius:4px}}
+.te-path-flag.secret{{background:rgba(248,81,73,.12);color:#f87171}}
+.te-path-flag.endpoint{{background:rgba(167,139,250,.12);color:#a78bfa}}
+/* Chain layout */
+.te-chain{{padding:14px 16px;display:flex;flex-direction:column;gap:0}}
+.te-chain-row{{display:flex;gap:0}}
+.te-chain-left{{width:36px;display:flex;flex-direction:column;align-items:center;flex-shrink:0}}
+.te-chain-dot{{width:12px;height:12px;border-radius:50%;border:2px solid;margin-top:2px;flex-shrink:0;position:relative;z-index:1}}
+.te-chain-line{{width:2px;flex:1;min-height:20px;margin:3px 0}}
+.te-chain-row:last-child .te-chain-line{{display:none}}
+.te-chain-right{{padding-bottom:18px;flex:1;min-width:0}}
+.te-chain-row:last-child .te-chain-right{{padding-bottom:4px}}
+/* Node card inside chain */
+.te-node-card{{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border-radius:6px;border:1px solid;max-width:100%;overflow:hidden;cursor:default}}
+.te-node-card:hover{{filter:brightness(1.08)}}
+.te-node-type{{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.7;flex-shrink:0}}
+.te-node-label{{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.te-node-extra{{font-size:10px;opacity:.6;flex-shrink:0}}
+/* Relationship connector between nodes */
+.te-rel-row{{display:flex;align-items:center;gap:8px;padding:3px 0 3px 4px;margin-left:-2px}}
+.te-rel-line-seg{{width:2px;height:8px;background:var(--border2);flex-shrink:0}}
+.te-rel-label{{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);background:var(--border);padding:2px 7px;border-radius:4px;font-family:'SF Mono','Fira Code',Consolas,monospace}}
+.te-rel-label.strong{{background:rgba(88,166,255,.08);color:var(--accent);border:1px solid rgba(88,166,255,.15)}}
+/* Evidence line */
+.te-evidence{{font-size:10px;color:var(--text3);margin-top:4px;padding:4px 8px;background:rgba(255,255,255,.02);border-radius:4px;border-left:2px solid var(--border2);word-break:break-all;line-height:1.5}}
+/* Node colour system */
+.tn-PAGE{{background:rgba(88,166,255,.1);border-color:rgba(88,166,255,.25);color:#60a5fa}}
+.tn-JS{{background:rgba(63,185,80,.1);border-color:rgba(63,185,80,.25);color:#34d399}}
+.tn-ENDPOINT{{background:rgba(167,139,250,.1);border-color:rgba(167,139,250,.25);color:#a78bfa}}
+.tn-SECRET{{background:rgba(248,81,73,.12);border-color:rgba(248,81,73,.3);color:#f87171}}
+.tn-WORKER{{background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.25);color:#fbbf24}}
+.tn-HOST{{background:rgba(251,146,60,.1);border-color:rgba(251,146,60,.25);color:#fb923c}}
+.tn-CHUNK{{background:rgba(34,211,238,.08);border-color:rgba(34,211,238,.2);color:#22d3ee}}
+.tn-PARAMETER{{background:rgba(148,163,184,.08);border-color:rgba(148,163,184,.2);color:#94a3b8}}
+.tn-SOURCEMAP{{background:rgba(134,239,172,.08);border-color:rgba(134,239,172,.2);color:#86efac}}
+.tn-CONFIG{{background:rgba(192,132,252,.1);border-color:rgba(192,132,252,.25);color:#c084fc}}
+.td-PAGE{{border-color:#60a5fa;background:rgba(88,166,255,.25)}}
+.td-JS{{border-color:#34d399;background:rgba(63,185,80,.25)}}
+.td-ENDPOINT{{border-color:#a78bfa;background:rgba(167,139,250,.25)}}
+.td-SECRET{{border-color:#f87171;background:rgba(248,81,73,.3)}}
+.td-WORKER{{border-color:#fbbf24;background:rgba(251,191,36,.25)}}
+.td-HOST{{border-color:#fb923c;background:rgba(251,146,60,.25)}}
+.td-CHUNK{{border-color:#22d3ee;background:rgba(34,211,238,.2)}}
+.td-PARAMETER{{border-color:#94a3b8;background:rgba(148,163,184,.2)}}
+.td-SOURCEMAP{{border-color:#86efac;background:rgba(134,239,172,.2)}}
+.td-CONFIG{{border-color:#c084fc;background:rgba(192,132,252,.2)}}
+.tl-PAGE{{background:rgba(88,166,255,.15)}}
+.tl-JS{{background:rgba(63,185,80,.15)}}
+.tl-ENDPOINT{{background:rgba(167,139,250,.15)}}
+.tl-SECRET{{background:rgba(248,81,73,.2)}}
+.tl-WORKER{{background:rgba(251,191,36,.15)}}
+.tl-HOST{{background:rgba(251,146,60,.15)}}
+.tl-CHUNK{{background:rgba(34,211,238,.12)}}
+.tl-PARAMETER{{background:rgba(148,163,184,.12)}}
+.tl-SOURCEMAP{{background:rgba(134,239,172,.12)}}
+.tl-CONFIG{{background:rgba(192,132,252,.15)}}
+/* Truncation warning */
+.te-truncated{{display:flex;align-items:center;gap:7px;padding:8px 18px;font-size:11px;color:var(--orange);background:rgba(240,136,62,.05);border-top:1px solid rgba(240,136,62,.12)}}
+/* Empty */
+.te-empty{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:72px 24px;color:var(--text3);text-align:center}}
+.te-empty-icon{{width:48px;height:48px;border-radius:12px;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;margin-bottom:14px;opacity:.5}}
+.te-empty-title{{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:5px}}
+.te-empty-sub{{font-size:12px;color:var(--text3)}}
 /* ── Notice ── */
 .notice{{background:rgba(63,185,80,.05);border:1px solid rgba(63,185,80,.15);border-radius:var(--radius);padding:10px 14px;font-size:12px;color:var(--text2);margin-top:14px;line-height:1.7}}
 /* ── Empty ── */
@@ -1010,13 +1048,16 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <!-- TRACE ENGINE -->
     <div id="section-trace" class="section">
       <div class="section-title">Trace Engine <span class="count">attack path analysis</span></div>
-      <div class="trace-toolbar">
-        <div class="trace-mode-group">
-          <button id="btn-downstream" class="trace-mode-btn active" onclick="setTraceMode('downstream',this)">&#x2193; Downstream</button>
-          <button id="btn-upstream"   class="trace-mode-btn"        onclick="setTraceMode('upstream',this)">&#x2191; Upstream</button>
+      <div class="te-toolbar">
+        <div class="te-toggle">
+          <button id="btn-downstream" class="te-toggle-btn active" onclick="setTraceMode('downstream',this)">&#x2193; Downstream</button>
+          <button id="btn-upstream"   class="te-toggle-btn"        onclick="setTraceMode('upstream',this)">&#x2191; Upstream</button>
         </div>
-        <input id="trace-search" class="trace-search" type="text" placeholder="Search by page URL…" oninput="renderTraces(currentTraceMode)">
-        <span class="trace-count-label" id="trace-count-label"></span>
+        <div class="te-search-wrap">
+          <svg class="te-search-icon" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 10l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <input id="trace-search" class="te-search" type="text" placeholder="Filter by page URL…" oninput="renderTraces(currentTraceMode)">
+        </div>
+        <span class="te-count-label" id="trace-count-label"></span>
       </div>
       <div id="trace-list"></div>
     </div>
@@ -1130,7 +1171,22 @@ function filterF(sev, btn) {{
 let currentTraceMode = 'downstream';
 let traceInitDone = false;
 
-const NODE_ICONS = {{PAGE:'P',JS:'JS',ENDPOINT:'EP',SECRET:'S',WORKER:'W',PARAMETER:'Pm',HOST:'H',CHUNK:'C',SOURCEMAP:'M',CONFIG:'Cf'}};
+// Strong relationship types that deserve bold styling
+const STRONG_RELS = new Set(['LOADS','CALLS','EXPOSES','IMPORTS','RECOVERS']);
+
+// Human-readable relationship labels
+const REL_LABELS = {{
+  LOADS:'Loads',IMPORTS:'Imports',CALLS:'Calls',EXPOSES:'Exposes',
+  ACCEPTS:'Accepts',OBSERVED_ON:'Observed on',RELATED_TO:'Related to',
+  HOSTS:'Hosts',REFERENCES:'References',RECOVERS:'Recovers'
+}};
+
+// Node type full names
+const KIND_LABELS = {{
+  PAGE:'Page',JS:'JS Asset',ENDPOINT:'Endpoint',SECRET:'Secret',
+  WORKER:'Worker',PARAMETER:'Parameter',HOST:'Host',
+  CHUNK:'Chunk',SOURCEMAP:'Source Map',CONFIG:'Config'
+}};
 
 function initTrace() {{
   if (!traceInitDone) {{ traceInitDone = true; renderTraces('downstream'); }}
@@ -1138,7 +1194,7 @@ function initTrace() {{
 
 function setTraceMode(mode, btn) {{
   currentTraceMode = mode;
-  document.querySelectorAll('.trace-mode-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.te-toggle-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderTraces(mode);
 }}
@@ -1147,7 +1203,7 @@ function renderTraces(mode) {{
   const container = document.getElementById('trace-list');
   const lbl = document.getElementById('trace-count-label');
   if (!TRACE_DATA || TRACE_DATA.length === 0) {{
-    container.innerHTML = '<div class="trace-empty-state"><span class="trace-empty-icon">&#x21E2;</span><p>No trace data — scan a target with graph enabled.</p></div>';
+    container.innerHTML = '<div class="te-empty"><div class="te-empty-icon">&#x21E2;</div><div class="te-empty-title">No trace data available</div><div class="te-empty-sub">Scan a target with graph analysis enabled to generate attack path traces.</div></div>';
     if(lbl) lbl.textContent = '';
     return;
   }}
@@ -1155,83 +1211,176 @@ function renderTraces(mode) {{
   const filtered = TRACE_DATA.filter(tr => tr.direction === mode && (!q || (tr.origin_label||'').toLowerCase().includes(q)));
   if(lbl) lbl.textContent = filtered.length + ' origin' + (filtered.length !== 1 ? 's' : '');
   if (filtered.length === 0) {{
-    container.innerHTML = '<div class="trace-empty-state"><span class="trace-empty-icon">&#x21E2;</span><p>No ' + mode + ' traces' + (q ? ' matching "' + escHtml(q) + '"' : '') + '.</p></div>';
+    container.innerHTML = '<div class="te-empty"><div class="te-empty-icon">&#x21E2;</div><div class="te-empty-title">No matching origins</div><div class="te-empty-sub">No ' + mode + ' traces' + (q ? ' matching <strong>' + escHtml(q) + '</strong>' : '') + '.</div></div>';
     return;
   }}
   container.innerHTML = filtered.map((tr, idx) => buildOriginCard(tr, idx)).join('');
+}}
+
+// Build the breadcrumb summary for a single path
+function buildPathSummary(path, originLabel) {{
+  if (!path || path.length === 0) return '';
+  const crumbs = [];
+  // Start node
+  const startKind = (path[0]||{{}}).from_kind || 'PAGE';
+  const startLabel = (path[0]||{{}}).from_label || originLabel || '—';
+  crumbs.push('<span class="te-sum-node tn-' + startKind + '">' + escHtml(shortLabel(startLabel, 22)) + '</span>');
+  path.forEach(step => {{
+    const rel = step.edge_kind || '';
+    const relTxt = REL_LABELS[rel] || rel.toLowerCase().replace(/_/g,' ') || '→';
+    crumbs.push('<span class="te-sum-arrow">→</span>');
+    crumbs.push('<span class="te-sum-rel">' + escHtml(relTxt) + '</span>');
+    crumbs.push('<span class="te-sum-arrow">→</span>');
+    crumbs.push('<span class="te-sum-node tn-' + (step.to_kind||'') + '">' + escHtml(shortLabel(step.to_label||'', 22)) + '</span>');
+  }});
+  return '<div class="te-summary-bar">' + crumbs.join('') + '</div>';
+}}
+
+// Build a single chain row (node card)
+function buildChainRow(kind, label, isOrigin, isLast) {{
+  const kindLabel = KIND_LABELS[kind] || kind || 'Node';
+  const dotCls    = 'te-chain-dot td-' + (kind || 'PAGE');
+  const lineCls   = 'te-chain-line tl-' + (kind || 'PAGE');
+  const connector = '<div class="te-chain-left"><div class="' + dotCls + '"></div>' + (isLast ? '' : '<div class="' + lineCls + '"></div>') + '</div>';
+  const card      = '<div class="te-node-card tn-' + kind + (isOrigin ? ' is-origin' : '') + (isLast ? ' is-last' : '') + '">'
+    + '<div class="te-node-type">' + escHtml(kindLabel) + '</div>'
+    + '<div class="te-node-label" title="' + escAttr(label) + '">' + escHtml(shortLabel(label, 70)) + '</div>'
+    + '</div>';
+  return '<div class="te-chain-row"><div class="te-chain-left">' + connector.replace(/<div class="te-chain-left">/, '').replace(/<\/div>$/, '') + '</div><div class="te-chain-right">' + card + '</div></div>';
+}}
+
+// Build a relationship connector row
+function buildRelRow(edgeKind, evidence) {{
+  const isStrong = STRONG_RELS.has(edgeKind);
+  const relTxt   = REL_LABELS[edgeKind] || edgeKind || '';
+  const evBlock  = evidence ? '<div class="te-evidence">' + escHtml(evidence.length > 120 ? evidence.slice(0,120) + '…' : evidence) + '</div>' : '';
+  return '<div class="te-rel-row">'
+    + '<div class="te-chain-left"><div class="te-chain-dot" style="opacity:0;width:10px"></div><div class="te-chain-line" style="border-color:var(--border-subtle)"></div></div>'
+    + '<div class="te-chain-right"><span class="te-rel-label' + (isStrong ? ' strong' : '') + '">' + escHtml(relTxt.toUpperCase()) + '</span>' + evBlock + '</div>'
+    + '</div>';
 }}
 
 function buildOriginCard(tr, idx) {{
   const paths     = tr.paths     || [];
   const secrets   = tr.secrets   || [];
   const endpoints = tr.endpoints || [];
-  const hasSecret  = secrets.length   > 0;
-  const hasEP      = endpoints.length > 0;
-  const borderCls  = hasSecret ? ' has-secrets' : hasEP ? ' has-endpoints' : '';
-  const pathBadge  = '<span class="tbadge tbadge-path">&#x21E2; ' + paths.length + ' path' + (paths.length!==1?'s':'') + '</span>';
-  const secBadge   = hasSecret  ? '<span class="tbadge tbadge-secret">&#x26A0; ' + secrets.length   + ' secret'   + (secrets.length>1?'s':'')   + '</span>' : '';
-  const epBadge    = hasEP      ? '<span class="tbadge tbadge-endpoint">&#x21C4; ' + endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') + '</span>' : '';
-  const sub        = [paths.length + ' path' + (paths.length!==1?'s':''), secrets.length ? secrets.length+' secret'+(secrets.length>1?'s':'') : '', endpoints.length ? endpoints.length+' endpoint'+(endpoints.length>1?'s':'') : ''].filter(Boolean).join(' · ');
-  const truncWarn  = tr.truncated ? '<div class="trace-truncated-warn">&#x26A0; Trace truncated — max depth reached</div>' : '';
+  const hasSecret = secrets.length   > 0;
+  const hasEP     = endpoints.length > 0;
 
+  // Risk level for left border accent
+  const riskCls = hasSecret ? ' risk-critical' : hasEP ? ' risk-high' : ' risk-low';
+
+  // Summary pills
+  const pills = '<div class="te-pills">'
+    + '<span class="te-pill-path">&#x21E2; ' + paths.length + ' path' + (paths.length!==1?'s':'') + '</span>'
+    + (hasSecret  ? '<span class="te-pill-secret">&#x26A0; ' + secrets.length   + ' secret'   + (secrets.length>1?'s':'')   + '</span>' : '')
+    + (hasEP      ? '<span class="te-pill-ep">&#x21C4; ' + endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') + '</span>' : '')
+    + '</div>';
+
+  const subTxt = [
+    paths.length + ' path' + (paths.length!==1?'s':''),
+    hasSecret  ? secrets.length   + ' secret'   + (secrets.length>1?'s':'')   : '',
+    hasEP      ? endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') : ''
+  ].filter(Boolean).join(' · ');
+
+  const truncWarn = tr.truncated
+    ? '<div class="te-truncated">&#x26A0;&nbsp; Trace truncated — maximum depth reached. Some paths may be incomplete.</div>'
+    : '';
+
+  // Build paths HTML
   let pathsHtml = '';
   paths.forEach((path, pi) => {{
     if (!path || path.length === 0) return;
-    const pathHasSecret  = path.some(s => s.to_kind === 'SECRET');
-    const pathHasEP      = path.some(s => s.to_kind === 'ENDPOINT');
-    const flags = (pathHasSecret  ? '<span class="toc-flag toc-flag-secret">Secret</span>'   : '')
-                + (pathHasEP      ? '<span class="toc-flag toc-flag-endpoint">Endpoint</span>' : '');
+    const pathHasSecret = path.some(s => s.to_kind === 'SECRET');
+    const pathHasEP     = path.some(s => s.to_kind === 'ENDPOINT');
+    const flags = (pathHasSecret ? '<span class="te-path-flag secret">Secret</span>'   : '')
+                + (pathHasEP     ? '<span class="te-path-flag endpoint">Endpoint</span>' : '');
 
-    let timelineHtml = '';
     const originKind  = (path[0]||{{}}).from_kind  || 'PAGE';
     const originLabel = (path[0]||{{}}).from_label || tr.origin_label || '—';
-    timelineHtml += ttRow(originKind, originLabel, '', '', true);
-    path.forEach(step => {{
-      timelineHtml += ttRow(step.to_kind||'', step.to_label||'', step.edge_kind||'', step.evidence||'', false);
+
+    // Summary breadcrumb
+    const summaryBar = buildPathSummary(path, originLabel);
+
+    // Full chain
+    let chainHtml = '';
+    const totalNodes = path.length + 1;
+    // Origin node
+    chainHtml += '<div class="te-chain-row">'
+      + '<div class="te-chain-left"><div class="te-chain-dot td-' + originKind + '"></div><div class="te-chain-line tl-' + originKind + '"></div></div>'
+      + '<div class="te-chain-right"><div class="te-node-card tn-' + originKind + ' is-origin">'
+      + '<div class="te-node-type">' + escHtml(KIND_LABELS[originKind]||originKind) + '</div>'
+      + '<div class="te-node-label" title="' + escAttr(originLabel) + '">' + escHtml(shortLabel(originLabel, 70)) + '</div>'
+      + '</div></div></div>';
+
+    path.forEach((step, si) => {{
+      const isLastNode = (si === path.length - 1);
+      const toKind  = step.to_kind  || '';
+      const toLabel = step.to_label || '';
+      const edge    = step.edge_kind || '';
+      const ev      = step.evidence || '';
+
+      // Relationship row
+      const isStrong = STRONG_RELS.has(edge);
+      const relTxt   = REL_LABELS[edge] || edge || '';
+      const evBlock  = ev ? '<div class="te-evidence">' + escHtml(ev.length > 120 ? ev.slice(0,120)+'…' : ev) + '</div>' : '';
+      chainHtml += '<div class="te-rel-row">'
+        + '<div class="te-chain-left"><div class="te-chain-dot" style="visibility:hidden;width:10px;height:10px"></div><div class="te-chain-line tl-' + (toKind||'PAGE') + '"></div></div>'
+        + '<div class="te-chain-right"><span class="te-rel-label' + (isStrong ? ' strong' : '') + '">' + escHtml(relTxt.toUpperCase()) + '</span>' + evBlock + '</div>'
+        + '</div>';
+
+      // Target node
+      chainHtml += '<div class="te-chain-row">'
+        + '<div class="te-chain-left"><div class="te-chain-dot td-' + toKind + '"></div>' + (isLastNode ? '' : '<div class="te-chain-line tl-' + toKind + '"></div>') + '</div>'
+        + '<div class="te-chain-right"><div class="te-node-card tn-' + toKind + (isLastNode ? ' is-last' : '') + '">'
+        + '<div class="te-node-type">' + escHtml(KIND_LABELS[toKind]||toKind) + '</div>'
+        + '<div class="te-node-label" title="' + escAttr(toLabel) + '">' + escHtml(shortLabel(toLabel, 70)) + '</div>'
+        + '</div></div></div>';
     }});
 
-    pathsHtml += '<div class="toc-path">'
-      + '<div class="toc-path-header"><span class="toc-path-num">Path ' + (pi+1) + '</span><span class="toc-path-depth">' + path.length + ' step' + (path.length!==1?'s':'') + '</span><div class="toc-path-flags">' + flags + '</div></div>'
-      + '<div class="toc-timeline">' + timelineHtml + '</div>'
+    pathsHtml += '<div class="te-path">'
+      + '<div class="te-path-hd">'
+      + '<span class="te-path-num">Path ' + (pi+1) + '</span>'
+      + '<span class="te-path-len">' + path.length + ' step' + (path.length!==1?'s':'') + '</span>'
+      + '<div class="te-path-flags">' + flags + '</div>'
+      + '</div>'
+      + summaryBar
+      + '<div class="te-chain">' + chainHtml + '</div>'
       + '</div>';
   }});
 
-  return '<div class="trace-origin-card' + borderCls + '" id="toc-' + idx + '">'
-    + '<div class="toc-header" onclick="toggleToc(' + idx + ')">'
-    + '<div class="toc-origin-icon">P</div>'
-    + '<div class="toc-origin-info"><div class="toc-origin-url" title="' + escAttr(tr.origin_label||'') + '">' + escHtml(tr.origin_label||'—') + '</div><div class="toc-origin-sub">' + escHtml(sub) + '</div></div>'
-    + '<div class="toc-badges">' + pathBadge + secBadge + epBadge + '</div>'
-    + '<span class="toc-chevron" id="toc-chev-' + idx + '">&#x25B6;</span>'
+  const bodyId = 'te-body-' + idx;
+  const chevId = 'te-chev-' + idx;
+
+  return '<div class="te-origin' + riskCls + '" id="te-origin-' + idx + '">'
+    + '<div class="te-origin-hd" onclick="toggleOrigin(' + idx + ')">'
+    + '<svg class="te-pg-icon" viewBox="0 0 20 20" fill="none"><rect x="3" y="2" width="14" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="7" x2="14" y2="7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="10" x2="14" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="13" x2="11" y2="13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+    + '<div class="te-origin-text">'
+    + '<div class="te-origin-url" title="' + escAttr(tr.origin_label||'') + '">' + escHtml(tr.origin_label||'—') + '</div>'
+    + '<div class="te-origin-sub">' + escHtml(subTxt) + '</div>'
     + '</div>'
-    + '<div class="toc-body" id="toc-body-' + idx + '">'
+    + pills
+    + '<span class="te-chevron" id="' + chevId + '">&#x25B6;</span>'
+    + '</div>'
+    + '<div class="te-origin-body" id="' + bodyId + '">'
     + truncWarn
-    + '<div class="toc-paths-wrap">' + pathsHtml + '</div>'
+    + '<div class="te-paths">' + pathsHtml + '</div>'
     + '</div>'
     + '</div>';
 }}
 
-function ttRow(kind, label, edgeKind, evidence, isOrigin) {{
-  const dotCls   = 'tt-dot nd-dot-' + (kind || 'PAGE');
-  const chipCls  = 'tt-node-chip nc-' + (kind || 'PAGE');
-  const icon     = NODE_ICONS[kind] || '?';
-  const edgeSpan = edgeKind && !isOrigin ? '<span class="tt-edge-label">' + escHtml(edgeKind.toLowerCase().replace(/_/g,' ')) + '</span>' : '';
-  const evSpan   = evidence && !isOrigin ? '<div class="tt-evidence" title="' + escAttr(evidence) + '">' + escHtml(evidence.length > 60 ? evidence.slice(0,60)+'…' : evidence) + '</div>' : '';
-  const shortLabel = label.length > 55 ? label.slice(0,55)+'…' : label;
-  return '<div class="tt-row">'
-    + '<div class="tt-connector"><div class="' + dotCls + '"></div><div class="tt-line"></div></div>'
-    + '<div class="tt-content">'
-    + '<div class="tt-node-row"><span class="' + chipCls + '" title="' + escAttr(label) + '"><b>' + icon + '</b>&nbsp;' + escHtml(shortLabel) + '</span>' + edgeSpan + '</div>'
-    + evSpan
-    + '</div>'
-    + '</div>';
-}}
-
-function toggleToc(idx) {{
-  const body = document.getElementById('toc-body-' + idx);
-  const chev = document.getElementById('toc-chev-' + idx);
+function toggleOrigin(idx) {{
+  const body = document.getElementById('te-body-' + idx);
+  const chev = document.getElementById('te-chev-' + idx);
+  if (!body) return;
   const open = body.classList.contains('open');
   body.classList.toggle('open', !open);
   if(chev) {{ chev.classList.toggle('open', !open); chev.innerHTML = open ? '&#x25B6;' : '&#x25BC;'; }}
+}}
+
+function shortLabel(s, max) {{
+  s = String(s||'');
+  return s.length > max ? s.slice(0, max) + '…' : s;
 }}
 
 function escHtml(s) {{
