@@ -129,6 +129,15 @@ def phase(label):
     _p(f"  {A.GREY}›{A.RESET}  {label}")
 
 
+def phase_sub(label):
+    """
+    Sub-phase line — indented one level deeper than phase(), used for
+    live status updates within a running phase (e.g. crawl sub-steps).
+    Shows a dim bullet so it's clearly subordinate to the parent phase.
+    """
+    _p(f"       {A.GREY}·{A.RESET}  {A.GREY}{label}{A.RESET}")
+
+
 def phase_done(label, detail=""):
     det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
     _p(f"  {A.GREEN}✓{A.RESET}  {label}{det}")
