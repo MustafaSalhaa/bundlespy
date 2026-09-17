@@ -505,11 +505,12 @@ def generate(
     g_stats    = result.graph.stats().get("by_type", {}) if result.graph else {}
 
     # Pre-compute filter buttons (Python 3.10: no backslash in f-string expressions)
-    _btn_crit   = f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterFindings(\'CRITICAL\',this)">Critical ({len(critical)})</button>' if critical else ""
-    _btn_high   = f'<button class="filter-btn" data-sev="HIGH" onclick="filterFindings(\'HIGH\',this)">High ({len(high)})</button>' if high else ""
-    _btn_med    = f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterFindings(\'MEDIUM\',this)">Medium ({len(medium)})</button>' if medium else ""
-    _btn_low    = f'<button class="filter-btn" data-sev="LOW" onclick="filterFindings(\'LOW\',this)">Low ({len(low)})</button>' if low else ""
-    _btn_info   = f'<button class="filter-btn" data-sev="INFO" onclick="filterFindings(\'INFO\',this)">Info ({len(info_f)})</button>' if info_f else ""
+    _q = "'"  # single quote helper — backslash not allowed in f-string on Python 3.10
+    _btn_crit   = (f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterFindings({_q}CRITICAL{_q},this)">Critical ({len(critical)})</button>' if critical else "")
+    _btn_high   = (f'<button class="filter-btn" data-sev="HIGH" onclick="filterFindings({_q}HIGH{_q},this)">High ({len(high)})</button>' if high else "")
+    _btn_med    = (f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterFindings({_q}MEDIUM{_q},this)">Medium ({len(medium)})</button>' if medium else "")
+    _btn_low    = (f'<button class="filter-btn" data-sev="LOW" onclick="filterFindings({_q}LOW{_q},this)">Low ({len(low)})</button>' if low else "")
+    _btn_info   = (f'<button class="filter-btn" data-sev="INFO" onclick="filterFindings({_q}INFO{_q},this)">Info ({len(info_f)})</button>' if info_f else "")
     _sev_badge  = (
         '<span class="scan-badge critical-badge">CRITICAL FINDINGS</span>' if critical else
         '<span class="scan-badge high-badge">HIGH FINDINGS</span>' if high else
@@ -528,6 +529,14 @@ def generate(
     _val_used      = bool(validation_results)
     _subs_used     = bool(subdomains)
     _passive_used  = bool(passive_stats)
+
+    _so, _sc = "'", "'"  # quote helpers for onclick JS strings
+    _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ')"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
+    _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ')"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else '')
+    _nav_srcmaps  = '<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ')"><span class="nav-icon">⎔</span>Source Maps</button>'
+    _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
+    _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
+    _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -801,12 +810,12 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Discovery</div>
-      {'<button class="nav-item" onclick="show(\'headless\')"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else ''}
-      {'<button class="nav-item" onclick="show(\'auth\')"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else ''}
-      {'<button class="nav-item" onclick="show(\'sourcemaps\')"><span class="nav-icon">⎔</span>Source Maps</button>' if True else ''}
-      {'<button class="nav-item" onclick="show(\'graphql\')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else ''}
-      {'<button class="nav-item" onclick="show(\'validation\')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else ''}
-      {'<button class="nav-item" onclick="show(\'subdomains\')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">{len(subdomains)}</span></button>' if _subs_used else ''}
+      {_nav_headless}
+      {_nav_auth}
+      {_nav_srcmaps}
+      {_nav_graphql}
+      {_nav_val}
+      {_nav_subs}
     </div>
     <div class="nav-group">
       <div class="nav-label">Quality</div>
