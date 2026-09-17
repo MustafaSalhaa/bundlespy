@@ -806,41 +806,76 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .neighbor-item:hover{{color:var(--accent)}}
 /* ── Trace Engine ── */
-.trace-controls{{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}}
-.trace-mode-btn{{padding:5px 14px;border-radius:20px;border:1px solid var(--border2);background:none;color:var(--text2);font-size:11px;cursor:pointer;transition:all .15s;font-family:inherit}}
-.trace-mode-btn:hover{{border-color:var(--accent);color:var(--accent)}}
-.trace-mode-btn.active{{background:rgba(88,166,255,.12);border-color:var(--accent);color:var(--accent);font-weight:600}}
-.trace-search{{flex:1;max-width:280px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-sm);color:var(--text);font-size:11px;font-family:inherit}}
-.trace-search:focus{{outline:none;border-color:var(--accent)}}
-.trace-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden}}
-.trace-card-header{{padding:11px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:10px}}
-.trace-card-header:hover{{background:rgba(255,255,255,.02)}}
-.trace-origin{{font-weight:600;font-size:13px;color:var(--accent);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.trace-meta{{display:flex;align-items:center;gap:8px;flex-shrink:0}}
-.trace-badge{{font-size:10px;padding:2px 6px;border-radius:10px;font-weight:500}}
-.trace-badge.paths{{background:rgba(88,166,255,.1);color:var(--accent);border:1px solid rgba(88,166,255,.2)}}
-.trace-badge.secrets{{background:rgba(248,81,73,.1);color:var(--red);border:1px solid rgba(248,81,73,.2)}}
-.trace-badge.endpoints{{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.2)}}
-.trace-toggle{{color:var(--text3);font-size:12px;transition:transform .2s}}
-.trace-toggle.open{{transform:rotate(90deg)}}
-.trace-body{{display:none;border-top:1px solid var(--border);padding:14px 16px}}
-.trace-body.open{{display:block}}
-.trace-path{{margin-bottom:14px;padding:10px 12px;background:#0a0d13;border:1px solid var(--border);border-radius:var(--radius-sm)}}
-.trace-path-label{{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;font-weight:600;margin-bottom:8px}}
-.trace-step{{display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;font-size:11px}}
-.trace-step:last-child{{margin-bottom:0}}
-.trace-step-depth{{color:var(--text3);width:16px;flex-shrink:0;font-size:10px;text-align:right;padding-top:1px}}
-.trace-step-arrow{{color:var(--border2);flex-shrink:0}}
-.trace-node{{font-weight:600}}
-.trace-node.PAGE{{color:var(--accent)}}.trace-node.JS{{color:var(--green)}}.trace-node.ENDPOINT{{color:var(--purple)}}
-.trace-node.SECRET{{color:var(--red)}}.trace-node.WORKER{{color:var(--yellow)}}.trace-node.HOST{{color:var(--orange)}}
-.trace-node.CHUNK{{color:var(--cyan)}}.trace-node.PARAMETER{{color:var(--text2)}}
-.trace-node.SOURCEMAP{{color:#86efac}}.trace-node.CONFIG{{color:#c084fc}}
-.trace-edge-kind{{font-size:10px;color:var(--text3);background:var(--border);padding:1px 5px;border-radius:3px;margin-left:4px}}
-.trace-evidence{{font-size:10px;color:var(--text3);margin-left:auto;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.trace-truncated{{font-size:11px;color:var(--orange);padding:4px 0;font-style:italic}}
-.trace-empty{{text-align:center;padding:40px 20px;color:var(--text3)}}
-.trace-empty-icon{{font-size:24px;display:block;margin-bottom:8px}}
+.trace-toolbar{{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}}
+.trace-mode-group{{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px;gap:2px}}
+.trace-mode-btn{{padding:5px 16px;border-radius:16px;border:none;background:none;color:var(--text2);font-size:12px;cursor:pointer;transition:all .2s;font-family:inherit;font-weight:500}}
+.trace-mode-btn:hover{{color:var(--text)}}
+.trace-mode-btn.active{{background:var(--accent);color:#0d1117;font-weight:700;box-shadow:0 2px 8px rgba(88,166,255,.3)}}
+.trace-search{{flex:1;max-width:300px;padding:7px 12px 7px 32px;background:var(--surface2);border:1px solid var(--border2);border-radius:20px;color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .2s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e7681' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:10px center}}
+.trace-search:focus{{border-color:var(--accent)}}
+.trace-count-label{{font-size:11px;color:var(--text3);margin-left:auto}}
+.trace-origin-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden;transition:border-color .2s}}
+.trace-origin-card:hover{{border-color:var(--border2)}}
+.trace-origin-card.has-secrets{{border-left:3px solid var(--red)}}
+.trace-origin-card.has-endpoints{{border-left:3px solid var(--purple)}}
+.toc-header{{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;user-select:none}}
+.toc-header:hover{{background:rgba(255,255,255,.02)}}
+.toc-origin-icon{{width:28px;height:28px;border-radius:6px;background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--accent);flex-shrink:0}}
+.toc-origin-info{{flex:1;min-width:0}}
+.toc-origin-url{{font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.toc-origin-sub{{font-size:11px;color:var(--text3);margin-top:1px}}
+.toc-badges{{display:flex;align-items:center;gap:6px;flex-shrink:0}}
+.tbadge{{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:10px;font-weight:600;white-space:nowrap}}
+.tbadge-path{{background:rgba(88,166,255,.1);color:var(--accent);border:1px solid rgba(88,166,255,.2)}}
+.tbadge-secret{{background:rgba(248,81,73,.1);color:var(--red);border:1px solid rgba(248,81,73,.2)}}
+.tbadge-endpoint{{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.2)}}
+.toc-chevron{{color:var(--text3);font-size:11px;transition:transform .25s;flex-shrink:0}}
+.toc-chevron.open{{transform:rotate(90deg)}}
+.toc-body{{display:none;border-top:1px solid var(--border);padding:0}}
+.toc-body.open{{display:block}}
+.toc-paths-wrap{{padding:14px 16px;display:flex;flex-direction:column;gap:10px}}
+.toc-path{{background:#0a0d13;border:1px solid var(--border);border-radius:6px;overflow:hidden}}
+.toc-path-header{{padding:7px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}}
+.toc-path-num{{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px}}
+.toc-path-depth{{font-size:10px;color:var(--text3)}}
+.toc-path-flags{{margin-left:auto;display:flex;gap:4px}}
+.toc-flag{{font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600}}
+.toc-flag-secret{{background:rgba(248,81,73,.15);color:var(--red)}}
+.toc-flag-endpoint{{background:rgba(167,139,250,.15);color:var(--purple)}}
+.toc-timeline{{padding:10px 12px;display:flex;flex-direction:column;gap:0}}
+.tt-row{{display:flex;align-items:flex-start;gap:0;position:relative}}
+.tt-connector{{display:flex;flex-direction:column;align-items:center;width:24px;flex-shrink:0}}
+.tt-dot{{width:10px;height:10px;border-radius:50%;border:2px solid;flex-shrink:0;margin-top:3px;z-index:1}}
+.tt-line{{width:2px;flex:1;min-height:16px;background:var(--border2);margin:2px 0}}
+.tt-row:last-child .tt-line{{display:none}}
+.tt-content{{padding:2px 0 12px 8px;flex:1;min-width:0}}
+.tt-node-row{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}}
+.tt-node-chip{{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.tt-edge-label{{font-size:10px;color:var(--text3);background:var(--border);padding:2px 6px;border-radius:3px;font-family:'SF Mono','Fira Code',Consolas,monospace;white-space:nowrap}}
+.tt-evidence{{font-size:10px;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}}
+.nc-PAGE{{background:rgba(88,166,255,.12);color:#60a5fa;border:1px solid rgba(88,166,255,.2)}}
+.nc-JS{{background:rgba(63,185,80,.12);color:#34d399;border:1px solid rgba(63,185,80,.2)}}
+.nc-ENDPOINT{{background:rgba(167,139,250,.12);color:#a78bfa;border:1px solid rgba(167,139,250,.2)}}
+.nc-SECRET{{background:rgba(248,81,73,.12);color:#f87171;border:1px solid rgba(248,81,73,.2)}}
+.nc-WORKER{{background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)}}
+.nc-HOST{{background:rgba(251,146,60,.12);color:#fb923c;border:1px solid rgba(251,146,60,.2)}}
+.nc-CHUNK{{background:rgba(34,211,238,.12);color:#22d3ee;border:1px solid rgba(34,211,238,.2)}}
+.nc-PARAMETER{{background:rgba(148,163,184,.1);color:#94a3b8;border:1px solid rgba(148,163,184,.2)}}
+.nc-SOURCEMAP{{background:rgba(134,239,172,.1);color:#86efac;border:1px solid rgba(134,239,172,.2)}}
+.nc-CONFIG{{background:rgba(192,132,252,.12);color:#c084fc;border:1px solid rgba(192,132,252,.2)}}
+.nd-dot-PAGE{{border-color:#60a5fa;background:rgba(88,166,255,.2)}}
+.nd-dot-JS{{border-color:#34d399;background:rgba(63,185,80,.2)}}
+.nd-dot-ENDPOINT{{border-color:#a78bfa;background:rgba(167,139,250,.2)}}
+.nd-dot-SECRET{{border-color:#f87171;background:rgba(248,81,73,.2)}}
+.nd-dot-WORKER{{border-color:#fbbf24;background:rgba(251,191,36,.2)}}
+.nd-dot-HOST{{border-color:#fb923c;background:rgba(251,146,60,.2)}}
+.nd-dot-CHUNK{{border-color:#22d3ee;background:rgba(34,211,238,.2)}}
+.nd-dot-PARAMETER{{border-color:#94a3b8;background:rgba(148,163,184,.2)}}
+.nd-dot-SOURCEMAP{{border-color:#86efac;background:rgba(134,239,172,.2)}}
+.nd-dot-CONFIG{{border-color:#c084fc;background:rgba(192,132,252,.2)}}
+.trace-empty-state{{text-align:center;padding:60px 20px;color:var(--text3)}}
+.trace-empty-icon{{font-size:36px;display:block;margin-bottom:10px;opacity:.4}}
+.trace-truncated-warn{{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--orange);padding:6px 12px;background:rgba(240,136,62,.06);border-top:1px solid rgba(240,136,62,.15)}}
 /* ── Notice ── */
 .notice{{background:rgba(63,185,80,.05);border:1px solid rgba(63,185,80,.15);border-radius:var(--radius);padding:10px 14px;font-size:12px;color:var(--text2);margin-top:14px;line-height:1.7}}
 /* ── Empty ── */
@@ -974,13 +1009,14 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 
     <!-- TRACE ENGINE -->
     <div id="section-trace" class="section">
-      <div class="section-title">Trace Engine
-        <span class="count">downstream &amp; upstream path analysis</span>
-      </div>
-      <div class="trace-controls">
-        <button id="btn-downstream" class="trace-mode-btn active" onclick="setTraceMode('downstream',this)">⬇ Downstream</button>
-        <button id="btn-upstream"   class="trace-mode-btn"        onclick="setTraceMode('upstream',this)">⬆ Upstream</button>
-        <input  id="trace-search"   class="trace-search" type="text" placeholder="Filter by origin URL…" oninput="renderTraces(currentTraceMode)">
+      <div class="section-title">Trace Engine <span class="count">attack path analysis</span></div>
+      <div class="trace-toolbar">
+        <div class="trace-mode-group">
+          <button id="btn-downstream" class="trace-mode-btn active" onclick="setTraceMode('downstream',this)">&#x2193; Downstream</button>
+          <button id="btn-upstream"   class="trace-mode-btn"        onclick="setTraceMode('upstream',this)">&#x2191; Upstream</button>
+        </div>
+        <input id="trace-search" class="trace-search" type="text" placeholder="Search by page URL…" oninput="renderTraces(currentTraceMode)">
+        <span class="trace-count-label" id="trace-count-label"></span>
       </div>
       <div id="trace-list"></div>
     </div>
@@ -1094,11 +1130,10 @@ function filterF(sev, btn) {{
 let currentTraceMode = 'downstream';
 let traceInitDone = false;
 
+const NODE_ICONS = {{PAGE:'P',JS:'JS',ENDPOINT:'EP',SECRET:'S',WORKER:'W',PARAMETER:'Pm',HOST:'H',CHUNK:'C',SOURCEMAP:'M',CONFIG:'Cf'}};
+
 function initTrace() {{
-  if (!traceInitDone) {{
-    traceInitDone = true;
-    renderTraces('downstream');
-  }}
+  if (!traceInitDone) {{ traceInitDone = true; renderTraces('downstream'); }}
 }}
 
 function setTraceMode(mode, btn) {{
@@ -1110,71 +1145,93 @@ function setTraceMode(mode, btn) {{
 
 function renderTraces(mode) {{
   const container = document.getElementById('trace-list');
+  const lbl = document.getElementById('trace-count-label');
   if (!TRACE_DATA || TRACE_DATA.length === 0) {{
-    container.innerHTML = '<div class="trace-empty"><span class="trace-empty-icon">⇢</span><p>No trace data available — graph may be empty or Trace Engine not enabled.</p></div>';
+    container.innerHTML = '<div class="trace-empty-state"><span class="trace-empty-icon">&#x21E2;</span><p>No trace data — scan a target with graph enabled.</p></div>';
+    if(lbl) lbl.textContent = '';
     return;
   }}
-  const filter = (document.getElementById('trace-search') || {{}}).value || '';
-  const filtered = TRACE_DATA.filter(tr => {{
-    if (tr.direction !== mode) return false;
-    if (filter && !tr.origin_label.toLowerCase().includes(filter.toLowerCase())) return false;
-    return true;
-  }});
+  const q = ((document.getElementById('trace-search')||{{}}).value||'').toLowerCase();
+  const filtered = TRACE_DATA.filter(tr => tr.direction === mode && (!q || (tr.origin_label||'').toLowerCase().includes(q)));
+  if(lbl) lbl.textContent = filtered.length + ' origin' + (filtered.length !== 1 ? 's' : '');
   if (filtered.length === 0) {{
-    container.innerHTML = '<div class="trace-empty"><span class="trace-empty-icon">⇢</span><p>No ' + mode + ' traces found' + (filter ? ' matching "' + filter + '"' : '') + '.</p></div>';
+    container.innerHTML = '<div class="trace-empty-state"><span class="trace-empty-icon">&#x21E2;</span><p>No ' + mode + ' traces' + (q ? ' matching "' + escHtml(q) + '"' : '') + '.</p></div>';
     return;
   }}
-  container.innerHTML = filtered.map((tr, idx) => renderTraceCard(tr, idx)).join('');
+  container.innerHTML = filtered.map((tr, idx) => buildOriginCard(tr, idx)).join('');
 }}
 
-function renderTraceCard(tr, idx) {{
-  const secrets   = (tr.secrets   || []).length;
-  const endpoints = (tr.endpoints || []).length;
-  const paths     = (tr.paths     || []).length;
-  const secBadge  = secrets   ? '<span class="trace-badge secrets">' + secrets   + ' secret'   + (secrets   > 1 ? 's' : '') + '</span>' : '';
-  const epBadge   = endpoints ? '<span class="trace-badge endpoints">' + endpoints + ' endpoint' + (endpoints > 1 ? 's' : '') + '</span>' : '';
-  const pathBadge = '<span class="trace-badge paths">' + paths + ' path' + (paths !== 1 ? 's' : '') + '</span>';
-  const truncNote = tr.truncated ? '<div class="trace-truncated">⚠ Result truncated — max depth or node limit reached</div>' : '';
+function buildOriginCard(tr, idx) {{
+  const paths     = tr.paths     || [];
+  const secrets   = tr.secrets   || [];
+  const endpoints = tr.endpoints || [];
+  const hasSecret  = secrets.length   > 0;
+  const hasEP      = endpoints.length > 0;
+  const borderCls  = hasSecret ? ' has-secrets' : hasEP ? ' has-endpoints' : '';
+  const pathBadge  = '<span class="tbadge tbadge-path">&#x21E2; ' + paths.length + ' path' + (paths.length!==1?'s':'') + '</span>';
+  const secBadge   = hasSecret  ? '<span class="tbadge tbadge-secret">&#x26A0; ' + secrets.length   + ' secret'   + (secrets.length>1?'s':'')   + '</span>' : '';
+  const epBadge    = hasEP      ? '<span class="tbadge tbadge-endpoint">&#x21C4; ' + endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') + '</span>' : '';
+  const sub        = [paths.length + ' path' + (paths.length!==1?'s':''), secrets.length ? secrets.length+' secret'+(secrets.length>1?'s':'') : '', endpoints.length ? endpoints.length+' endpoint'+(endpoints.length>1?'s':'') : ''].filter(Boolean).join(' · ');
+  const truncWarn  = tr.truncated ? '<div class="trace-truncated-warn">&#x26A0; Trace truncated — max depth reached</div>' : '';
 
   let pathsHtml = '';
-  (tr.paths || []).forEach((path, pi) => {{
+  paths.forEach((path, pi) => {{
     if (!path || path.length === 0) return;
-    let stepsHtml = '';
-    // Show the origin node first
-    const first = path[0];
-    stepsHtml += '<div class="trace-step"><span class="trace-step-depth">0</span><span class="trace-step-arrow">●</span><span class="trace-node ' + (first.from_kind || '') + '">' + escHtml(first.from_label || '') + '</span><span class="trace-edge-kind" style="background:none;color:var(--text3);font-size:9px">' + (first.from_kind || '') + '</span></div>';
+    const pathHasSecret  = path.some(s => s.to_kind === 'SECRET');
+    const pathHasEP      = path.some(s => s.to_kind === 'ENDPOINT');
+    const flags = (pathHasSecret  ? '<span class="toc-flag toc-flag-secret">Secret</span>'   : '')
+                + (pathHasEP      ? '<span class="toc-flag toc-flag-endpoint">Endpoint</span>' : '');
+
+    let timelineHtml = '';
+    const originKind  = (path[0]||{{}}).from_kind  || 'PAGE';
+    const originLabel = (path[0]||{{}}).from_label || tr.origin_label || '—';
+    timelineHtml += ttRow(originKind, originLabel, '', '', true);
     path.forEach(step => {{
-      stepsHtml += '<div class="trace-step">'
-        + '<span class="trace-step-depth">' + step.depth + '</span>'
-        + '<span class="trace-step-arrow">→</span>'
-        + '<span class="trace-node ' + (step.to_kind || '') + '">' + escHtml(step.to_label || '') + '</span>'
-        + '<span class="trace-edge-kind">' + escHtml(step.edge_kind || '') + '</span>'
-        + (step.evidence ? '<span class="trace-evidence" title="' + escAttr(step.evidence) + '">' + escHtml(step.evidence.length > 40 ? step.evidence.slice(0,40) + '…' : step.evidence) + '</span>' : '')
-        + '</div>';
+      timelineHtml += ttRow(step.to_kind||'', step.to_label||'', step.edge_kind||'', step.evidence||'', false);
     }});
-    pathsHtml += '<div class="trace-path"><div class="trace-path-label">Path ' + (pi+1) + '</div>' + stepsHtml + '</div>';
+
+    pathsHtml += '<div class="toc-path">'
+      + '<div class="toc-path-header"><span class="toc-path-num">Path ' + (pi+1) + '</span><span class="toc-path-depth">' + path.length + ' step' + (path.length!==1?'s':'') + '</span><div class="toc-path-flags">' + flags + '</div></div>'
+      + '<div class="toc-timeline">' + timelineHtml + '</div>'
+      + '</div>';
   }});
 
-  return '<div class="trace-card" id="trace-card-' + idx + '">'
-    + '<div class="trace-card-header" onclick="toggleTrace(' + idx + ')">'
-    + '<span class="trace-origin" title="' + escAttr(tr.origin_label || '') + '">' + escHtml(tr.origin_label || '—') + '</span>'
-    + '<span class="trace-meta">' + pathBadge + secBadge + epBadge + '</span>'
-    + '<span class="trace-toggle" id="trace-toggle-' + idx + '">▶</span>'
+  return '<div class="trace-origin-card' + borderCls + '" id="toc-' + idx + '">'
+    + '<div class="toc-header" onclick="toggleToc(' + idx + ')">'
+    + '<div class="toc-origin-icon">P</div>'
+    + '<div class="toc-origin-info"><div class="toc-origin-url" title="' + escAttr(tr.origin_label||'') + '">' + escHtml(tr.origin_label||'—') + '</div><div class="toc-origin-sub">' + escHtml(sub) + '</div></div>'
+    + '<div class="toc-badges">' + pathBadge + secBadge + epBadge + '</div>'
+    + '<span class="toc-chevron" id="toc-chev-' + idx + '">&#x25B6;</span>'
     + '</div>'
-    + '<div class="trace-body" id="trace-body-' + idx + '">'
-    + truncNote
-    + (pathsHtml || '<div style="color:var(--text3);font-size:11px;padding:4px 0">No paths traced.</div>')
+    + '<div class="toc-body" id="toc-body-' + idx + '">'
+    + truncWarn
+    + '<div class="toc-paths-wrap">' + pathsHtml + '</div>'
     + '</div>'
     + '</div>';
 }}
 
-function toggleTrace(idx) {{
-  const body    = document.getElementById('trace-body-'   + idx);
-  const toggle  = document.getElementById('trace-toggle-' + idx);
-  const isOpen  = body.classList.contains('open');
-  body.classList.toggle('open', !isOpen);
-  toggle.classList.toggle('open', !isOpen);
-  toggle.textContent = isOpen ? '▶' : '▼';
+function ttRow(kind, label, edgeKind, evidence, isOrigin) {{
+  const dotCls   = 'tt-dot nd-dot-' + (kind || 'PAGE');
+  const chipCls  = 'tt-node-chip nc-' + (kind || 'PAGE');
+  const icon     = NODE_ICONS[kind] || '?';
+  const edgeSpan = edgeKind && !isOrigin ? '<span class="tt-edge-label">' + escHtml(edgeKind.toLowerCase().replace(/_/g,' ')) + '</span>' : '';
+  const evSpan   = evidence && !isOrigin ? '<div class="tt-evidence" title="' + escAttr(evidence) + '">' + escHtml(evidence.length > 60 ? evidence.slice(0,60)+'…' : evidence) + '</div>' : '';
+  const shortLabel = label.length > 55 ? label.slice(0,55)+'…' : label;
+  return '<div class="tt-row">'
+    + '<div class="tt-connector"><div class="' + dotCls + '"></div><div class="tt-line"></div></div>'
+    + '<div class="tt-content">'
+    + '<div class="tt-node-row"><span class="' + chipCls + '" title="' + escAttr(label) + '"><b>' + icon + '</b>&nbsp;' + escHtml(shortLabel) + '</span>' + edgeSpan + '</div>'
+    + evSpan
+    + '</div>'
+    + '</div>';
+}}
+
+function toggleToc(idx) {{
+  const body = document.getElementById('toc-body-' + idx);
+  const chev = document.getElementById('toc-chev-' + idx);
+  const open = body.classList.contains('open');
+  body.classList.toggle('open', !open);
+  if(chev) {{ chev.classList.toggle('open', !open); chev.innerHTML = open ? '&#x25B6;' : '&#x25BC;'; }}
 }}
 
 function escHtml(s) {{
