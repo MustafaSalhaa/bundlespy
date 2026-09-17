@@ -1260,7 +1260,7 @@ a:hover {{ text-decoration: underline; }}
       </button>
       <button class="nav-item" onclick="show('graph',this)">
         <span class="nav-icon">&#9671;</span>Attack Surface
-        <span class="nav-badge">{g_stats.get("NODE",len(self._nodes)) if result.graph else 0}</span>
+        <span class="nav-badge">{result.graph.stats()["nodes"] if result.graph else 0}</span>
       </button>
       <button class="nav-item" onclick="show('trace',this)">
         <span class="nav-icon">&#8623;</span>Trace Engine
