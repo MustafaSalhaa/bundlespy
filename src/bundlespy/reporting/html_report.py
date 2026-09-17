@@ -228,6 +228,13 @@ def generate(result: ScanResult, show_sensitive: bool = False) -> str:
     if result.graph:
         g_stats = result.graph.stats().get("by_type", {})
 
+    # Pre-compute filter buttons (backslash not allowed in f-string expressions on Python < 3.12)
+    _btn_critical = f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterFindings(\'CRITICAL\',this)">Critical ({len(critical)})</button>' if critical else ''
+    _btn_high     = f'<button class="filter-btn" data-sev="HIGH" onclick="filterFindings(\'HIGH\',this)">High ({len(high)})</button>' if high else ''
+    _btn_medium   = f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterFindings(\'MEDIUM\',this)">Medium ({len(medium)})</button>' if medium else ''
+    _btn_low      = f'<button class="filter-btn" data-sev="LOW" onclick="filterFindings(\'LOW\',this)">Low ({len(low)})</button>' if low else ''
+    _btn_info     = f'<button class="filter-btn" data-sev="INFO" onclick="filterFindings(\'INFO\',this)">Info ({len(info)})</button>' if info else ''
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -695,11 +702,11 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;
       </div>
       <div class="findings-filter">
         <button class="filter-btn active" data-sev="ALL" onclick="filterFindings('ALL',this)">All ({len(real)})</button>
-        {'<button class="filter-btn" data-sev="CRITICAL" onclick="filterFindings(\'CRITICAL\',this)">Critical ('+str(len(critical))+')</button>' if critical else ''}
-        {'<button class="filter-btn" data-sev="HIGH" onclick="filterFindings(\'HIGH\',this)">High ('+str(len(high))+')</button>' if high else ''}
-        {'<button class="filter-btn" data-sev="MEDIUM" onclick="filterFindings(\'MEDIUM\',this)">Medium ('+str(len(medium))+')</button>' if medium else ''}
-        {'<button class="filter-btn" data-sev="LOW" onclick="filterFindings(\'LOW\',this)">Low ('+str(len(low))+')</button>' if low else ''}
-        {'<button class="filter-btn" data-sev="INFO" onclick="filterFindings(\'INFO\',this)">Info ('+str(len(info))+')</button>' if info else ''}
+        {_btn_critical}
+        {_btn_high}
+        {_btn_medium}
+        {_btn_low}
+        {_btn_info}
       </div>
       <div id="findings-list">
         {_findings_html(findings)}
