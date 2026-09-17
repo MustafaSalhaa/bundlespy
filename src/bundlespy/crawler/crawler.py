@@ -1047,10 +1047,27 @@ class Crawler:
         if self.wayback:
             self._discover_from_wayback(base)
 
-        # Phase 5: common JS probes (if enabled)
+        # Phase 5: common JS probes (only when --common-paths flag is set)
+        # Uses HEAD to check existence before fetching body — avoids slow downloads
         if self.common_paths:
+            import time as _time
+            import requests as _req
+            _js_probe_start = _time.monotonic()
+            MAX_JS_PROBE_SECONDS = 45
             for path in COMMON_JS_PATHS:
-                self._fetch_js(base + path, self.target_url)
+                if _time.monotonic() - _js_probe_start > MAX_JS_PROBE_SECONDS:
+                    break
+                url = base + path
+                norm = _normalize_js_url(url)
+                if norm in self.visited_js:
+                    continue
+                try:
+                    r = _req.head(url, timeout=3, verify=False, allow_redirects=True,
+                                  headers={"User-Agent": self.fetcher.user_agent})
+                    if r.status_code in range(200, 300):
+                        self._fetch_js(url, self.target_url)
+                except Exception:
+                    pass
 
         # Phase 6: common page probes — queue the live ones
         queue: deque = deque()
@@ -1082,12 +1099,52 @@ class Crawler:
         )
 
     def _probe_common_pages(self, base: str, queue: deque) -> None:
-        """Probe common page paths. Queue the ones that respond with 2xx HTML."""
+        """
+        Probe common page paths using HEAD requests (fast, no body).
+        Falls back to GET only when HEAD returns 405.
+        Hard time budget: max 60 seconds total across all probes — the main
+        crawl is more valuable than exhaustive path bruteforcing.
+        Only runs when --common-paths is set.
+        """
+        if not self.common_paths:
+            return
+
+        import time as _time
+        budget_start = _time.monotonic()
+        MAX_PROBE_SECONDS = 60   # never spend more than 60s probing
+
         for path in COMMON_PAGE_PATHS:
+            # Hard time budget — bail out, let main crawl take over
+            if _time.monotonic() - budget_start > MAX_PROBE_SECONDS:
+                logger.debug("Probe time budget exhausted, stopping common page probes")
+                break
+
             probe_url = base + path
             if probe_url in self.visited_pages:
                 continue
-            content, status, ct, _ = self.fetcher.get(probe_url)
+
+            # Use HEAD first — 10x faster, no body transfer
+            try:
+                import requests as _req
+                resp = _req.head(
+                    probe_url,
+                    timeout=3,       # short timeout for probes only
+                    verify=False,
+                    allow_redirects=True,
+                    headers={"User-Agent": self.fetcher.user_agent},
+                )
+                status = resp.status_code
+                ct     = resp.headers.get("Content-Type", "")
+                # Some servers don't support HEAD — fall back to GET
+                if status == 405:
+                    content, status, ct, _ = self.fetcher.get(probe_url)
+                elif status not in range(200, 300):
+                    continue
+                else:
+                    content = True   # HEAD success — we don't need the body here
+            except Exception:
+                continue
+
             if content and status in range(200, 300):
                 ct_low = (ct or "").lower()
                 if "html" in ct_low or "text" in ct_low or not ct:
