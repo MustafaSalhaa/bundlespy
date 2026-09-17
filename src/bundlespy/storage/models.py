@@ -4,7 +4,7 @@ All findings, JS files, endpoints, and infrastructure items use these.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import datetime
 import hashlib
 
@@ -104,3 +104,6 @@ class ScanResult:
     endpoints: List[Endpoint]
     infrastructure: List[InfrastructureItem]
     errors: List[str]
+    # Attack surface graph — populated after scan, None until built
+    # Import lazily to avoid circular imports
+    graph: Optional[Any] = field(default=None, repr=False)
