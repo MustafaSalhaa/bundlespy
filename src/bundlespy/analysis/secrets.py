@@ -44,6 +44,67 @@ FP_INDICATORS = [
     "undefined", "null", "none", "n/a", "na", "tbd",
 ]
 
+# ── Third-party / CDN library fingerprints ────────────────────────────────────
+# When a match comes from a file URL that looks like a known third-party library
+# we suppress findings — real application secrets don't live in jQuery/Bootstrap.
+# Patterns are matched against the file_url (case-insensitive).
+LIBRARY_URL_PATTERNS = [
+    # jQuery variants
+    r"jquery(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"jquery[-_.]?ui(?:[-_.\d]+)?(?:\.min)?\.js",
+    # Bootstrap
+    r"bootstrap(?:\.bundle)?(?:[-_.\d]+)?(?:\.min)?\.js",
+    # React — with or without version suffix, with or without .production/.development
+    r"react(?:[-_.\d]+)?(?:\.production\.min|\.development|\.min)?\.js",
+    r"react-dom(?:[-_.\d]+)?(?:\.production\.min|\.development|\.min)?\.js",
+    # Vue
+    r"vue(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"vue(?:[-_.\d]+)?(?:\.runtime)?(?:\.min)?\.js",
+    # Angular
+    r"angular(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"@angular/core",
+    # Lodash / Underscore
+    r"lodash(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"underscore(?:[-_.\d]+)?(?:\.min)?\.js",
+    # Moment / Day.js
+    r"moment(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"dayjs(?:[-_.\d]+)?(?:\.min)?\.js",
+    # Axios / Fetch polyfills
+    r"axios(?:[-_.\d]+)?(?:\.min)?\.js",
+    # Chart / D3
+    r"(?:chart|d3)(?:[-_.\d]+)?(?:\.min)?\.js",
+    # Polyfills
+    r"polyfill(?:[-_.\d]+)?(?:\.min)?\.js",
+    r"core-js(?:[-_.\d]+)?(?:\.min)?\.js",
+    # CDN path patterns
+    r"/(?:cdn-cgi|cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net|unpkg\.com|ajax\.googleapis\.com)/",
+]
+
+_LIBRARY_URL_RE = re.compile(
+    "(?i)(" + "|".join(LIBRARY_URL_PATTERNS) + ")"
+)
+
+
+def _is_library_url(file_url: str) -> bool:
+    """Return True if file_url looks like a third-party CDN / known library."""
+    return bool(_LIBRARY_URL_RE.search(file_url))
+
+
+# ── JS method-chain / property-access guard ───────────────────────────────────
+# Matches patterns like  s.checkPosition  or  o.isImmediatePropagationStopped
+# directly adjacent to the match start.  Used to veto short prefix matches
+# (e.g. the legacy Vault "s." prefix) that fire inside minified JS.
+_JS_METHOD_CHAIN_RE = re.compile(
+    r"""
+    (?:                         # prefix — char immediately before the match
+        [A-Za-z0-9_$]          #   a JS identifier char → this is a property access
+    )
+    \.                          # the dot
+    [A-Za-z_$][A-Za-z0-9_$]*   # a JS identifier after the dot
+    """,
+    re.VERBOSE,
+)
+
 # ── Keyword context patterns (context-aware detection) ────────────────────────
 
 # Left-hand keywords that indicate a secret assignment
@@ -136,6 +197,7 @@ class SecretRule:
     description: str
     remediation: str
     fp_notes: str
+    min_length: int = 0   # minimum matched-value length; 0 means no minimum
 
 
 @dataclass
@@ -334,6 +396,7 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
                 description = raw["description"],
                 remediation = raw["remediation"],
                 fp_notes    = raw.get("fp_notes", ""),
+                min_length  = int(raw.get("min_length", 0)),
             ))
         except re.error as e:
             logger.warning("Invalid regex in rule %s: %s", raw.get("id"), e)
@@ -397,6 +460,12 @@ class SecretScanner:
         seen: Dict[str, Finding],
         findings: List[Finding],
     ) -> None:
+        # Determine once per file whether it looks like a third-party library.
+        # If so we still scan but library matches are suppressed unless they
+        # appear inside a clear credential-assignment context — real app secrets
+        # occasionally land in vendored bundles so we never skip entirely.
+        is_lib = _is_library_url(file_url)
+
         for rule in self.rules:
             for match in rule.pattern.finditer(content):
                 raw_value = match.group(0)
@@ -408,9 +477,28 @@ class SecretScanner:
                     except IndexError:
                         pass
 
-                # Context-aware boost: check if surrounded by key/secret keywords
+                # ── min_length enforcement ────────────────────────────────────
+                if rule.min_length > 0 and len(raw_value) < rule.min_length:
+                    logger.debug(
+                        "min_length skip: rule=%s value_len=%d min=%d",
+                        rule.id, len(raw_value), rule.min_length,
+                    )
+                    continue
+
+                # ── Context-aware boost: keyword proximity ────────────────────
                 ctx_window = content[max(0, match.start()-80):match.start()]
                 context_boost = bool(LH_KEYWORDS.search(ctx_window))
+
+                # ── Library suppression ───────────────────────────────────────
+                # In library files, only emit if there's a clear LH keyword
+                # context — this way a real hardcoded key inside a vendor bundle
+                # still surfaces, but noise from identifier collisions is gone.
+                if is_lib and not context_boost:
+                    logger.debug(
+                        "library suppress: rule=%s url=%s",
+                        rule.id, file_url,
+                    )
+                    continue
 
                 self._emit(
                     rule_id     = rule.id,
