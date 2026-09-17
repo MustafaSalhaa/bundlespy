@@ -128,11 +128,15 @@ def _setup_logging(verbose: bool, debug: bool, quiet: bool) -> None:
 
 
 def _write_reports(
-    result:      ScanResult,
-    formats:     list,
-    output_dir:  str,
-    started:     datetime,
-    report_name: str = "",
+    result:             ScanResult,
+    formats:            list,
+    output_dir:         str,
+    started:            datetime,
+    report_name:        str  = "",
+    extras:             dict = None,
+    validation_results: list = None,
+    graphql_schemas:    list = None,
+    subdomains:         list = None,
 ) -> dict:
     """Write file reports. Returns dict of format -> path."""
     ts       = started.strftime("%Y%m%d_%H%M%S")
@@ -152,7 +156,14 @@ def _write_reports(
         paths["json"] = str(p)
 
     if "html" in formats:
-        out = generate_html(result)
+        out = generate_html(
+            result,
+            extras             = extras or {},
+            validation_results = validation_results or [],
+            graphql_schemas    = graphql_schemas or [],
+            subdomains         = subdomains or [],
+            report_paths       = paths,
+        )
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
         p   = Path(d) / f"{stem}.html"
@@ -954,7 +965,10 @@ def run_scan(args) -> int:
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
     if file_formats:
-        file_paths = _write_reports(result, file_formats, args.output, started, report_name=getattr(args, "report_name", ""))
+        file_paths = _write_reports(result, file_formats, args.output, started,
+                                    report_name=getattr(args, "report_name", ""),
+                                    extras=extras, validation_results=validation_results,
+                                    graphql_schemas=graphql_schemas, subdomains=subdomains)
 
     if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
         print_report(
@@ -1016,7 +1030,9 @@ def run_local(args) -> int:
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
     if file_formats:
-        file_paths = _write_reports(result, file_formats, args.output, started, report_name=getattr(args, "report_name", ""))
+        file_paths = _write_reports(result, file_formats, args.output, started,
+                                    report_name=getattr(args, "report_name", ""),
+                                    extras=extras)
 
     if "terminal" in formats:
         print_report(
