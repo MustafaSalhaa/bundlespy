@@ -1394,13 +1394,13 @@ function initGraph() {{
   svg.call(gZoom);
 
   const R = {{PAGE:14,JS:12,ENDPOINT:10,SECRET:12,WORKER:10,PARAMETER:6,HOST:11,CHUNK:9,SOURCEMAP:8,CONFIG:8}};
-  const LD = {{LOADS:55,IMPORTS:45,CALLS:65,EXPOSES:55,ACCEPTS:35,OBSERVED_ON:70,RELATED_TO:60,HOSTS:75}};
+  const LD = {{LOADS:110,IMPORTS:90,CALLS:120,EXPOSES:110,ACCEPTS:80,OBSERVED_ON:130,RELATED_TO:115,HOSTS:140}};
 
   const sim = d3.forceSimulation(nodes)
     .alphaDecay(0.04)
     .velocityDecay(0.55)
-    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||60).strength(.7))
-    .force('charge', d3.forceManyBody().strength(-120).distanceMax(250))
+    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||110).strength(.7))
+    .force('charge', d3.forceManyBody().strength(-180).distanceMax(320))
     .force('center', d3.forceCenter(W/2, H/2).strength(0.08))
     .force('col', d3.forceCollide(d=>(R[d.kind]||10)+4))
     .force('x', d3.forceX(W/2).strength(0.04))
