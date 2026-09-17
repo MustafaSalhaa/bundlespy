@@ -1394,13 +1394,17 @@ function initGraph() {{
   svg.call(gZoom);
 
   const R = {{PAGE:14,JS:12,ENDPOINT:10,SECRET:12,WORKER:10,PARAMETER:6,HOST:11,CHUNK:9,SOURCEMAP:8,CONFIG:8}};
-  const LD = {{LOADS:90,IMPORTS:70,CALLS:110,EXPOSES:90,ACCEPTS:50,OBSERVED_ON:120,RELATED_TO:100,HOSTS:130}};
+  const LD = {{LOADS:55,IMPORTS:45,CALLS:65,EXPOSES:55,ACCEPTS:35,OBSERVED_ON:70,RELATED_TO:60,HOSTS:75}};
 
   const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||100).strength(.4))
-    .force('charge', d3.forceManyBody().strength(-200))
-    .force('center', d3.forceCenter(W/2, H/2))
-    .force('col', d3.forceCollide(d=>(R[d.kind]||10)+6));
+    .alphaDecay(0.04)
+    .velocityDecay(0.55)
+    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||60).strength(.7))
+    .force('charge', d3.forceManyBody().strength(-120).distanceMax(250))
+    .force('center', d3.forceCenter(W/2, H/2).strength(0.08))
+    .force('col', d3.forceCollide(d=>(R[d.kind]||10)+4))
+    .force('x', d3.forceX(W/2).strength(0.04))
+    .force('y', d3.forceY(H/2).strength(0.04));
 
   const link = g.append('g').selectAll('line').data(edges).join('line')
     .attr('stroke', e => {{ const s = byId[e.source.id||e.source]; return s ? (NC[s.kind]||'#475569') : '#475569'; }})
