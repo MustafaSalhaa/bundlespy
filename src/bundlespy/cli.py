@@ -29,7 +29,7 @@ from .reporting.html_report import generate as generate_html
 from .reporting.csv_report import generate as generate_csv
 from .reporting.burp_export import generate_burp_xml, generate_url_list
 from .ui.printer import (
-    print_header, phase, phase_done, phase_warn, phase_error,
+    print_header, phase, phase_sub, phase_done, phase_warn, phase_error,
 )
 from .ui.theme import A
 
@@ -345,10 +345,17 @@ def run_scan(args) -> int:
     if not args.passive and not _skip_crawler:
         if not args.quiet:
             phase("Crawling target")
+
+        def _crawl_status(msg: str) -> None:
+            """Sub-phase callback — prints live crawl status under the main phase line."""
+            if not args.quiet:
+                phase_sub(msg)
+
         crawler = Crawler(
             target_url=target, fetcher=fetcher, scope=scope,
             max_depth=args.depth, max_pages=args.max_pages,
             max_js_files=args.max_js, common_paths=args.common_paths,
+            status_cb=_crawl_status,
         )
         try:
             crawler.crawl()
