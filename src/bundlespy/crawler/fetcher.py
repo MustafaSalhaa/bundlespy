@@ -243,7 +243,7 @@ class AsyncFetcher:
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    def _build_session(self) -> aiohttp.ClientSession:
+    def _build_session(self):
         ssl_ctx: object
         if self.ssl_verify:
             ssl_ctx = ssl.create_default_context()
