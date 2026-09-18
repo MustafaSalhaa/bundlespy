@@ -78,26 +78,22 @@ def _val(text: str, color: str = "") -> str:
 
 def _section(title: str, count: str = "", color: str = "") -> None:
     """
-    Print an accent-bar section header.
+    Print a clean typographic section header - Vercel/Stripe CLI style.
 
     Renders:
-      2sp + bright-cyan vertical bar + space + bold-white TITLE + dim fill + right count
+      2sp + bold-bright-white TITLE + padding + dim count right-aligned
 
     Signature preserved: _section(title, count="", color="")
     """
-    c = color or SECTION_COLOR.get(title.lower(), SECTION_COLOR["default"])
-    w = _w()
-    bar   = A.B_CYAN + "▌" + A.RESET  # left half block
-    label = A.BOLD + A.BRIGHT_WHITE + title + A.RESET
-    # visible lengths
-    bar_vis   = 1
+    w         = _w()
+    label     = A.BOLD + A.BRIGHT_WHITE + title + A.RESET
     label_vis = len(title)
-    count_vis = len(count) + 2 if count else 0  # " N"
-    # fill: bar(1) + sp(1) + label + sp(1) + fill + count
-    fill_len = max(0, w - 2 - bar_vis - 1 - label_vis - 2 - count_vis)
-    fill = A.DIM + "  " + "─" * fill_len + A.RESET
-    cnt  = ("  " + A.DIM + count + A.RESET) if count else ""
-    _p(f"  {bar} {label}{fill}{cnt}")
+    count_vis = len(count) if count else 0
+    # 2sp indent + label + gap + count
+    gap_len   = max(1, w - 2 - label_vis - count_vis)
+    gap       = " " * gap_len
+    cnt       = (A.DIM + count + A.RESET) if count else ""
+    _p(f"  {label}{gap}{cnt}")
     _p()
 
 
@@ -143,32 +139,57 @@ def print_header(
     author: str = "Mustafa Salha",
 ) -> None:
     """
-    Print the scan header - no box, pure typographic power.
+    Print the scan header - Vercel/Stripe CLI aesthetic with pyfiglet ASCII banner.
+    ASCII art tool name, version right-aligned on last banner line. Target below. Meta row + rule.
     """
     ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
     w  = _w()
     rc = A.RESET
 
     _p("")
-    # Top accent line - full width dim
-    _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
+
+    # ASCII art banner via pyfiglet (slant font), fallback to plain BUNDLESPY
+    try:
+        import pyfiglet
+        raw = pyfiglet.figlet_format("BUNDLESPY", font="slant").rstrip("\n")
+        banner_lines = raw.splitlines()
+    except Exception:
+        banner_lines = ["BUNDLESPY"]
+
+    # Print banner lines - all dim green except last, which carries the version
+    ver_label = A.DIM + f"v{version}" + rc
+    for i, line in enumerate(banner_lines):
+        if not line.strip():
+            # preserve blank lines inside the art as-is
+            _p("")
+            continue
+        if i == len(banner_lines) - 1:
+            # Last art line: version right-aligned on the same row
+            vis_len = len(line)
+            gap_len = max(1, w - 2 - vis_len - len(f"v{version}"))
+            gap     = " " * gap_len
+            _p(f"  {A.BANNER_GREEN_3}{line}{rc}{gap}{ver_label}")
+        elif i == 0:
+            _p(f"  {A.BANNER_GREEN_1}{line}{rc}")
+        else:
+            _p(f"  {A.BANNER_GREEN_2}{line}{rc}")
+
     _p("")
 
-    # Tool name - large, confident
-    _p(f"  {A.B_BRIGHT_WHITE}BUNDLESPY{rc}  {A.DIM}v{version}{rc}")
-    _p("")
-
-    # Target - most important info, highlighted
-    target_display = target[:w - 12] if len(target) > w - 12 else target
-    _p(f"  {A.DIM}TARGET{rc}")
+    # Target URL - bright cyan, no label needed
+    target_display = target[:w - 4] if len(target) > w - 4 else target
     _p(f"  {A.B_CYAN}{A.BOLD}{target_display}{rc}")
+
     _p("")
 
-    # Meta row
-    _p(f"  {A.DIM}MODE   {rc}{A.BRIGHT_WHITE}{mode}{rc}    {A.DIM}SCOPE  {rc}{A.BRIGHT_WHITE}{scope}{rc}    {A.DIM}STARTED  {rc}{A.BRIGHT_WHITE}{ts}{rc}")
-    _p("")
+    # Meta row: dim labels, bright white values, all inline
+    _p(
+        f"  {A.DIM}Mode{rc}    {A.BRIGHT_WHITE}{mode}{rc}"
+        f"    {A.DIM}Scope{rc}    {A.BRIGHT_WHITE}{scope}{rc}"
+        f"    {A.DIM}{ts}{rc}"
+    )
 
-    # Bottom accent line
+    # Single thin dim rule below (no rule above)
     _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
     _p("")
 
@@ -1000,7 +1021,7 @@ def print_validation_results(results):
 # ---------------------------------------------------------------------------
 
 def print_summary(result, extras=None, report_paths=None):
-    """Print the final scan-complete summary - no boxes, no emoji."""
+    """Print the final scan-complete summary - mirrors header style."""
     extras       = extras or {}
     report_paths = report_paths or {}
 
@@ -1020,33 +1041,41 @@ def print_summary(result, extras=None, report_paths=None):
     rc = A.RESET
 
     _p("")
-    # Accent divider - same style as _section but for the summary block
+
+    # Thin dim rule at top - mirrors the one at the bottom of the header
     _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
     _p("")
 
-    # SCAN COMPLETE label
-    dur_str = f"  {A.DIM}{duration}{rc}" if duration else ""
-    _p(f"  {A.B_GREEN}SCAN COMPLETE{rc}{dur_str}")
+    # "SCAN COMPLETE" bold green left, duration right-aligned on same line
+    complete_label   = A.B_GREEN + A.BOLD + "SCAN COMPLETE" + rc
+    complete_vis     = len("SCAN COMPLETE")
+    dur_vis          = len(duration)
+    complete_gap_len = max(1, w - 2 - complete_vis - dur_vis)
+    complete_gap     = " " * complete_gap_len
+    dur_str          = A.DIM + duration + rc if duration else ""
+    _p(f"  {complete_label}{complete_gap}{dur_str}")
+
     _p("")
 
-    # Key stats: compact inline
+    # Key stats inline
     js_count = len([js for js in result.js_files if not js.url.startswith("sourcemap://")])
-    _p(f"  {A.DIM}target{rc}     {A.BRIGHT_WHITE}{result.target_url[:60]}{rc}")
-    _p(f"  {A.DIM}pages{rc}      {A.BRIGHT_WHITE}{result.pages_crawled}{rc}         "
-       f"{A.DIM}js files{rc}   {A.BRIGHT_WHITE}{js_count}{rc}         "
-       f"{A.DIM}endpoints{rc}  {A.BRIGHT_WHITE}{len(result.endpoints)}{rc}")
+    _p(f"  {A.DIM}target{rc}      {A.BRIGHT_WHITE}{result.target_url[:60]}{rc}")
+    _p(f"  {A.DIM}pages{rc}       {A.BRIGHT_WHITE}{result.pages_crawled}{rc}"
+       f"         {A.DIM}js files{rc}    {A.BRIGHT_WHITE}{js_count}{rc}"
+       f"         {A.DIM}endpoints{rc}   {A.BRIGHT_WHITE}{len(result.endpoints)}{rc}")
 
     if extras.get("recovered_sources"):
-        _p(f"  {A.DIM}recovered{rc}  {A.B_GREEN}{extras['recovered_sources']} source files{rc}")
+        _p(f"  {A.DIM}recovered{rc}   {A.B_GREEN}{extras['recovered_sources']} source files{rc}")
     if extras.get("chunks_found"):
-        _p(f"  {A.DIM}chunks{rc}     {A.BRIGHT_WHITE}{extras['chunks_found']}{rc}")
+        _p(f"  {A.DIM}chunks{rc}      {A.BRIGHT_WHITE}{extras['chunks_found']}{rc}")
     if extras.get("subdomains"):
-        _p(f"  {A.DIM}subdomains{rc} {A.BRIGHT_WHITE}{extras['subdomains']}{rc}")
+        _p(f"  {A.DIM}subdomains{rc}  {A.BRIGHT_WHITE}{extras['subdomains']}{rc}")
     if result.infrastructure:
-        _p(f"  {A.DIM}infra{rc}      {A.BRIGHT_WHITE}{len(result.infrastructure)}{rc}")
+        _p(f"  {A.DIM}infra{rc}       {A.BRIGHT_WHITE}{len(result.infrastructure)}{rc}")
     lib_f = extras.get("lib_findings", [])
     if lib_f:
-        _p(f"  {A.DIM}vuln libs{rc}  {A.B_BRIGHT_RED}{len(lib_f)}{rc}")
+        _p(f"  {A.DIM}vuln libs{rc}   {A.B_BRIGHT_RED}{len(lib_f)}{rc}")
+
     _p("")
 
     # Severity tiles
