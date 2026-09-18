@@ -1,67 +1,65 @@
-# BundleSpy
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue)](https://www.python.org/) [![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![PyPI](https://img.shields.io/pypi/v/bundlespy)](https://pypi.org/project/bundlespy) [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20kali-lightgrey)](https://www.kali.org/)
 
-JavaScript Intelligence and Secret Exposure Scanner for authorized penetration testing and security assessments.
+```
+██████╗ ██╗   ██╗███╗   ██╗██████╗ ██╗     ███████╗███████╗██████╗ ██╗   ██╗
+██╔══██╗██║   ██║████╗  ██║██╔══██╗██║     ██╔════╝██╔════╝██╔══██╗╚██╗ ██╔╝
+██████╔╝██║   ██║██╔██╗ ██║██║  ██║██║     █████╗  ███████╗██████╔╝ ╚████╔╝ 
+██╔══██╗██║   ██║██║╚██╗██║██║  ██║██║     ██╔══╝  ╚════██║██╔═══╝   ╚██╔╝  
+██████╔╝╚██████╔╝██║ ╚████║██████╔╝███████╗███████╗███████║██║        ██║   
+╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝╚══════╝╚═╝        ╚═╝   
+```
 
-BundleSpy crawls a target web application, collects JavaScript files, and analyzes them for exposed secrets, hardcoded credentials, internal API endpoints, private IP addresses, cloud storage references, and infrastructure details. It goes beyond basic crawling - recovering original source from source maps, discovering hidden webpack chunks, pulling historical JS from web archives, intercepting real browser network traffic, and validating findings against provider APIs.
+**JavaScript attack surface scanner for authorized penetration testing**
 
----
-
-## Why it exists
-
-Modern web applications serve large JavaScript bundles that often contain more than intended: AWS keys accidentally left in environment configs, internal API routes baked into React builds, Firebase tokens, database URLs from development environments, staging hostnames, and JWT tokens hardcoded during testing.
-
-These don't require authentication to find - they're sitting in files the browser downloads on every visit. BundleSpy automates that discovery and goes deeper than a standard crawler by recovering original source code, finding lazy-loaded chunks, intercepting real network traffic via a full browser engine, and pulling historical versions from web archives.
+BundleSpy crawls a target web application, collects JavaScript files, and extracts secrets, endpoints, credentials, and infrastructure details that developers accidentally left in the code. It goes beyond a standard crawler by recovering original source from source maps, discovering hidden webpack chunks, pulling historical JS from web archives, intercepting real browser network traffic, and validating findings against provider APIs.
 
 ---
 
 ## What it finds
 
-- AWS, Azure, Google Cloud, GitHub, GitLab, Stripe, Slack, Twilio, SendGrid credentials
-- JWT tokens - decoded locally, algorithm and expiry checked
-- Hardcoded passwords and generic API keys
-- Private key headers (RSA, EC, OpenSSH)
-- Database connection strings (PostgreSQL, MySQL, MongoDB, Redis)
-- AWS S3, Azure Blob, and Google Cloud Storage URLs
-- Internal API endpoints and application routes
-- Private IP addresses and internal hostnames
-- Staging and development environment references
-- GraphQL schemas, queries, mutations, and sensitive fields
-- Subdomains from JS content and Certificate Transparency logs
-- Historical JS secrets from Wayback Machine and CommonCrawl
-- Real XHR, fetch, and WebSocket calls intercepted from a live browser session
+| What | Examples |
+|------|---------|
+| Cloud credentials | AWS keys, Azure secrets, GCP tokens, GitHub tokens, GitLab tokens |
+| Payment and messaging | Stripe keys, Slack tokens, Twilio, SendGrid |
+| JWT tokens | Decoded locally - algorithm, expiry, claims |
+| Private keys | RSA, EC, OpenSSH |
+| Database strings | PostgreSQL, MySQL, MongoDB, Redis connection URLs |
+| Cloud storage | S3 bucket URLs, Azure Blob, Google Cloud Storage |
+| API endpoints | Internal routes, admin paths, hidden API surfaces |
+| Infrastructure | Private IPs, internal hostnames, staging environments |
+| GraphQL | Full schema via introspection - queries, mutations, sensitive fields |
+| Subdomains | Extracted from JS content and CT logs via crt.sh |
+| Historical secrets | Old JS from Wayback Machine and CommonCrawl |
+| Live traffic | XHR, fetch, WebSocket calls intercepted from real browser session |
 
----
-
-## Safety model
-
-BundleSpy is built around one principle: discover and analyze, do not exploit.
-
-Network safety is not optional. The tool blocks all requests to:
-- Private IP ranges (10.x, 172.16-31.x, 192.168.x)
-- Loopback (127.x, ::1)
-- Link-local and cloud metadata endpoints (169.254.169.254)
-- Internal hostnames (.local, .internal, .corp, .lan)
-- Non-HTTP schemes (file://, ftp://, gopher://, etc.)
-
-DNS resolution is checked before every request to prevent DNS rebinding attacks. Destructive HTTP methods (POST, PUT, DELETE) are never sent automatically.
+> 📸 **[SCREENSHOT: Run `bundlespy scan https://example.com` and capture the full terminal output - banner, discovery phase, findings list, and summary. Dark terminal background.]**
 
 ---
 
 ## Installation
 
-```bash
-# Recommended
-pipx install bundlespy
+### Recommended
 
-# Or from source
-git clone https://github.com/MustafaSalhaa/bundlespy.git
-cd bundlespy
-pip install -e . --break-system-packages --no-build-isolation
+```bash
+pipx install bundlespy
 ```
 
-**For headless browser mode (optional):**
+### From source (Kali Linux)
+
 ```bash
-pip install playwright --break-system-packages
+git clone https://github.com/MustafaSalhaa/bundlespy.git
+cd bundlespy
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+```
+
+> **Kali Linux note:** The system Python is externally managed (PEP 668). Always use a venv - plain `pip install` will fail.
+
+### Headless browser support (optional)
+
+```bash
+pip install playwright
 playwright install chromium
 ```
 
@@ -70,263 +68,206 @@ playwright install chromium
 ## Quick start
 
 ```bash
-# Offline demo - see what output looks like
-bundlespy demo
-
 # Basic scan
 bundlespy scan https://example.com
 
 # Full scan with all features
 bundlespy scan https://example.com --source-maps --chunks --validate --graphql --format html,json --output ./reports/
 
-# Advanced headless scan - visits every page, intercepts all network traffic
+# Headless - visits every page, intercepts all network traffic
 bundlespy scan https://example.com --headless --max-pages 9999
 
-# Passive mode - zero requests to target
+# Passive - zero requests to target, pulls from web archives
 bundlespy scan https://example.com --passive --format html --output ./reports/
 
-# Scan local JS files
+# Authenticated scan - post-login JS surface
+bundlespy scan https://app.example.com \
+  --cookie "session=abc123" \
+  --headless --source-maps --chunks --validate --graphql \
+  --format html --output ./reports/
+
+# Scan local build before deployment
 bundlespy local ./dist/
-```
 
----
-
-## Commands
-
-### `bundlespy scan`
-
-Active scan against a live target.
-
-```bash
-bundlespy scan https://example.com [options]
-```
-
-### `bundlespy local`
-
-Scan local JS/TS files without any network requests. Useful for CI/CD and pre-deployment secret scanning.
-
-```bash
-bundlespy local ./dist/
-bundlespy local ./build/ --format html --output ./reports/
-```
-
-### `bundlespy demo`
-
-Offline demo with synthetic data. No network requests.
-
-```bash
+# Offline demo
 bundlespy demo
 ```
 
 ---
 
-## All options
+## Features
 
-```
-Crawl:
-  --depth N           Crawl depth (default: 2)
-  --max-pages N       Max pages to crawl, also controls headless page limit (default: 100)
-  --max-js N          Max JS files to fetch (default: 200)
-  --rate N            Requests per second (default: 2)
-  --timeout N         Request timeout in seconds (default: 10)
-  --common-paths      Try common JS paths like /app.js, /main.js
-  --subdomains        Include subdomains in scope
-  --exclude HOST      Exclude hostnames from scope
+### Source map recovery (`--source-maps`)
 
-Features:
-  --source-maps       Download and analyze source maps to recover original source code
-  --chunks            Discover and scan webpack/Vite lazy-loaded chunks
-  --passive           Pull historical JS from Wayback Machine and CommonCrawl (no target requests)
-  --headless          Advanced headless browser - multi-page, network-intercepting, interaction-aware
-  --validate          Probe discovered endpoints with safe GET/HEAD requests
-  --graphql           Run GraphQL introspection on detected endpoints
-  --harvest-subs      Collect subdomains from JS content and CT logs
-  --validate-secrets  Validate detected secrets against provider APIs (read-only)
-  --stealth           WAF evasion - UA rotation, jitter delays, full browser headers
+Many production apps ship with source maps that expose full original source - comments, internal routes, dev notes, everything the minifier stripped. BundleSpy detects `.map` references, downloads them, recovers the original files, and feeds them through the secret and endpoint analyzers.
 
-Output:
-  --format FORMATS    terminal, json, html, csv, burp (comma-separated, default: terminal)
-  --output DIR        Directory for report files
-  -v, --verbose       Show detailed discovery information
-  -q, --quiet         Findings and errors only
-  --no-color          Disable ANSI colors
-
-Other:
-  --yes               Skip authorization prompt (for CI/CD use)
-```
-
----
-
-## Feature details
-
-### Source map exploitation (`--source-maps`)
-
-Many production apps ship with source maps that expose the full original source code - comments, internal routes, developer notes, and everything the minifier removed. BundleSpy detects `.map` file references, downloads them safely, recovers the original source files, and feeds them through the secret and endpoint analyzers.
-
-```bash
-bundlespy scan https://example.com --source-maps
-```
+> 📸 **[SCREENSHOT: Source map recovery output showing list of recovered files and a secret found in original source]**
 
 ### Webpack chunk discovery (`--chunks`)
 
-Modern React/Angular/Vue apps split into dozens or hundreds of lazy-loaded chunks. A normal crawler only sees the initial bundle. BundleSpy parses webpack and Vite runtime manifests to enumerate all chunk IDs, then fetches and analyzes each one automatically.
+React, Angular, and Vue apps split code into dozens or hundreds of lazy-loaded chunks. A normal crawler only sees the initial bundle. BundleSpy parses webpack and Vite runtime manifests to enumerate all chunk IDs, then fetches and analyzes each one.
 
-```bash
-bundlespy scan https://example.com --chunks
-```
+> 📸 **[SCREENSHOT: Chunk discovery showing chunk IDs enumerated and JS files fetched]**
 
 ### Passive mode (`--passive`)
 
-Pulls historical JS URLs from Wayback Machine and CommonCrawl without making any direct requests to the target. Old JS files from 1-2 years ago often contain credentials that are still valid. Zero noise on the target.
+Pulls historical JS URLs from Wayback Machine and CommonCrawl without making any direct requests to the target. JS files from 1-2 years ago often contain credentials that are still valid today. Zero noise on the target.
 
-```bash
-bundlespy scan https://example.com --passive
-```
-
-Note: passive mode skips the active crawler entirely. Run a separate active scan if you want both.
+> 📸 **[SCREENSHOT: Passive mode output showing archive URLs collected and any findings]**
 
 ### Headless browser (`--headless`)
 
-BundleSpy's headless engine goes beyond basic browser automation. It does not just visit the root page and stop.
-
-What it does:
-- Visits every discovered route across the full application
-- Intercepts all XHR, fetch, and WebSocket calls at the network level in real time
-- Extracts routes from React Router, Vue Router, Angular Router, and Next.js
-- Fills forms intelligently with test values to trigger validation and autocomplete API calls
-- Scrolls pages to capture lazy-loaded and infinite-scroll content
-- Captures dynamically injected webpack chunks that a static crawler never sees
-- All intercepted API calls become high-confidence endpoints (0.95) in the report
+Full Playwright-based browser engine. Visits every discovered route. Intercepts XHR, fetch, and WebSocket calls at the network level in real time. Fills forms with test values to trigger API calls. Scrolls for lazy and infinite-scroll content. All intercepted calls become high-confidence endpoints (0.95).
 
 ```bash
 pip install playwright && playwright install chromium
-
-# Standard headless scan
-bundlespy scan https://example.com --headless
-
-# No page limit - crawl everything the browser finds
 bundlespy scan https://example.com --headless --max-pages 9999
-
-# Combine with stealth for WAF-protected targets
-bundlespy scan https://example.com --headless --stealth
 ```
 
-### Endpoint validation (`--validate`)
+> 📸 **[SCREENSHOT: Headless scan output - pages visited counter, intercepted network calls, endpoints discovered]**
 
-After discovering endpoints from JS content, BundleSpy probes each one with a safe GET or HEAD request and reports status codes, content types, and interesting findings. Never makes POST, PUT, or DELETE requests. Rate limited and scope enforced.
+### Async fetching (`--concurrency N`)
 
-```bash
-bundlespy scan https://example.com --validate
-```
-
-### GraphQL introspection (`--graphql`)
-
-When GraphQL endpoints are detected, BundleSpy runs a safe introspection query to map the full schema - types, queries, mutations, and fields. Flags sensitive field names like `password`, `token`, `ssn`, and `credit_card`.
-
-```bash
-bundlespy scan https://example.com --graphql
-```
-
-### Subdomain harvesting (`--harvest-subs`)
-
-Passively collects subdomains from JS file content, discovered URLs, and Certificate Transparency logs via crt.sh. No DNS brute-forcing. No active probing.
-
-```bash
-bundlespy scan https://example.com --harvest-subs
-```
+AsyncFetcher fires up to N parallel requests using aiohttp and asyncio (default: 10). Up to 10x faster than sequential fetching on JS-heavy targets. Bounded by semaphore, rate-limited, and SSRF-protected - no unbounded parallelism.
 
 ### Secret validation (`--validate-secrets`)
 
-For high-confidence findings, optionally validates secrets against provider APIs using read-only requests. Supported providers: GitHub, Stripe, Slack, SendGrid. Never logs or displays secret values. Clearly distinguishes `detected` from `validated`.
+For high-confidence findings, validates against provider APIs using read-only requests. Supported: GitHub, Stripe, Slack, SendGrid. Never logs or displays secret values. Clearly distinguishes `detected` from `validated`.
 
-```bash
-bundlespy scan https://example.com --validate-secrets
-```
+### GraphQL introspection (`--graphql`)
+
+When GraphQL endpoints are detected, runs a safe introspection query to map the full schema - types, queries, mutations, fields. Flags sensitive field names like `password`, `token`, `ssn`, `credit_card`.
 
 ### Stealth mode (`--stealth`)
 
-Rotates through 22 real browser User-Agents (Chrome, Firefox, Safari, Edge, Brave, Opera, mobile), sends full browser header sets including Sec-Fetch and Sec-CH-UA headers, adds random jitter to request delays, and spoofs Referer headers to match the target origin.
+Rotates through 22 real browser User-Agents (Chrome, Firefox, Safari, Edge, Brave, Opera, mobile). Sends full browser header sets including Sec-Fetch and Sec-CH-UA. Adds random jitter to request delays. Spoofs Referer headers to match the target origin.
+
+> **Note:** does not bypass TLS fingerprinting (JA3). Cloudflare high security mode will still block it.
+
+### Authenticated scanning (`--cookie`, `--header`)
+
+Scan as a logged-in user to reach post-login JS bundles containing internal API routes, admin endpoints, and staging references.
 
 ```bash
-bundlespy scan https://example.com --stealth
-bundlespy scan https://example.com --headless --stealth
+# Get your session cookie from DevTools - Application tab - Cookies
+bundlespy scan https://app.example.com \
+  --cookie "session=abc123; csrf=xyz" \
+  --header "Authorization: Bearer eyJ..."
 ```
-
-Does not bypass TLS fingerprinting (JA3) used by advanced WAFs like Cloudflare in high security mode.
 
 ### Burp Suite export (`--format burp`)
 
-Exports discovered endpoints and JS file URLs into Burp Suite sitemap XML format and a plain URL list for immediate use in manual testing.
+Exports discovered endpoints and JS URLs into Burp Suite sitemap XML and a plain URL list for immediate use in manual testing.
 
-```bash
-bundlespy scan https://example.com --format html,json,burp --output ./reports/
-```
-### Authenticated scanning (`--cookie`, `--header`)
+---
 
-By default BundleSpy scans as an anonymous user. If the target requires authentication to access the interesting JS, API routes, or admin panels, pass your session cookie and any required headers.
+## Safety model
 
-**How to get your session cookie:**
-1. Log into the target in your browser
-2. Open DevTools (F12) → Application tab → Cookies
-3. Copy the cookie name and value
-4. Pass it to BundleSpy with `--cookie`
+BundleSpy is built around one principle: discover and analyze, never exploit.
 
-```bash
-# Cookie only
-bundlespy scan https://app.example.com --cookie "session=abc123"
+All requests are blocked to:
+- Private IP ranges (10.x, 172.16-31.x, 192.168.x)
+- Loopback (127.x, ::1)
+- Link-local and cloud metadata endpoints (169.254.169.254)
+- Internal hostnames (.local, .internal, .corp, .lan)
+- Non-HTTP schemes (file://, ftp://, gopher://)
 
-# Multiple cookies (same format as browser)
-bundlespy scan https://app.example.com --cookie "session=abc123; csrf=xyz; remember_me=1"
+DNS resolution is checked before every request to prevent DNS rebinding. POST, PUT, and DELETE are never sent automatically. Destructive UI actions are blocked in headless mode (delete, purchase, payment flows, account changes, password resets). Concurrency is bounded by semaphore. Response size is capped at 10MB.
 
-# Cookie + Authorization header
-bundlespy scan https://app.example.com \
-  --cookie "session=abc123" \
-  --header "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+---
 
-# Multiple custom headers
-bundlespy scan https://app.example.com \
-  --cookie "session=abc123" \
-  --header "X-Api-Key: mykey" \
-  --header "X-Tenant-Id: company1"
+## All options
 
-# Full authenticated scan with all features
-bundlespy scan https://app.example.com \
-  --cookie "session=abc123" \
-  --headless --source-maps --chunks --validate --graphql \
-  --format html --output ./reports/
-```
+**Crawl**
 
-The cookie and headers are sent on every request including headless browser mode. The terminal output shows `Authenticated` in the mode line when credentials are active.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--depth N` | 2 | Crawl depth |
+| `--max-pages N` | 100 | Max pages to crawl (also controls headless page limit) |
+| `--max-js N` | 200 | Max JS files to fetch |
+| `--rate N` | 2 | Requests per second |
+| `--concurrency N` | 10 | Concurrent async HTTP requests |
+| `--timeout N` | 10 | Request timeout in seconds |
+| `--common-paths` | off | Try common JS paths (/app.js, /main.js, etc.) |
+| `--subdomains` | off | Include subdomains in scope |
+| `--exclude HOST` | - | Exclude hostnames from scope |
 
-**Why this matters:** Authenticated JS bundles often contain internal API routes, admin endpoints, staging environment references, and hardcoded credentials that are never exposed to anonymous users. Scanning as an authenticated user gives you the full attack surface.
+**Features**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--source-maps` | off | Download and analyze source maps |
+| `--chunks` | off | Discover and scan webpack/Vite lazy chunks |
+| `--passive` | off | Pull historical JS from web archives (zero target requests) |
+| `--headless` | off | Advanced headless browser with network interception |
+| `--validate` | off | Probe discovered endpoints with safe GET/HEAD |
+| `--graphql` | off | Run GraphQL introspection on detected endpoints |
+| `--harvest-subs` | off | Collect subdomains from JS content and CT logs |
+| `--validate-secrets` | off | Validate secrets against provider APIs (read-only) |
+| `--stealth` | off | WAF evasion - UA rotation, jitter, full browser headers |
+| `--cookie VALUE` | - | Session cookie for authenticated scanning |
+| `--header KEY:VALUE` | - | Custom header (repeatable) |
+
+**Output**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--format FORMATS` | terminal | terminal, json, html, csv, burp (comma-separated) |
+| `--output DIR` | - | Directory for report files |
+| `-v` | off | Verbose - show detailed discovery info |
+| `-q` | off | Quiet - findings and errors only |
+| `--no-color` | off | Disable ANSI colors |
+
+**Other**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--yes` | off | Skip authorization prompt (for CI/CD) |
 
 ---
 
 ## Output formats
 
-- **terminal** - clean professional output with severity hierarchy and redacted values. Default.
-- **json** - structured output with all findings, endpoints, infrastructure, and JS inventory.
-- **html** - standalone self-contained report. No external dependencies, works offline.
-- **csv** - one row per finding, ready for Excel or a bug tracker.
-- **burp** - Burp Suite sitemap XML and plain URL list.
+- `terminal` - clean output with severity hierarchy and redacted values (default)
+- `json` - structured output with all findings, endpoints, infrastructure, JS inventory
+- `html` - standalone self-contained report, no external dependencies, works offline
+- `csv` - one row per finding, ready for Excel or a bug tracker
+- `burp` - Burp Suite sitemap XML and plain URL list
 
-Combine formats:
-```bash
-bundlespy scan https://example.com --format terminal,html,json,csv,burp --output ./reports/
-```
+> 📸 **[SCREENSHOT: HTML report opened in browser - show the findings dashboard with severity breakdown and one finding expanded]**
+
+---
+
+## Use cases
+
+**Bug bounty JS recon**
+
+Run after subdomain enumeration. Use `--passive` first for zero noise, then `--headless --source-maps --chunks` for full coverage.
+
+**External penetration test**
+
+Run early in the engagement. JS files reveal internal API structure, staging environments, and credentials left from development. `--headless --max-pages 9999` maps the full API surface.
+
+**API discovery**
+
+Combine `--validate` and `--graphql` to map the full API before manual testing. `--headless` intercepts real calls the frontend makes.
+
+**CI/CD pre-deployment**
+
+`bundlespy local ./dist/` catches secrets before they go live. No network requests, fast, fits in any pipeline.
 
 ---
 
 ## Detection engine
 
-Rules live in `rules/secrets.yaml`. 35 rules covering:
-AWS, Azure, Google Cloud, GitHub, GitLab, Stripe, Slack, Twilio, SendGrid, JWT, RSA keys, database connection strings, cloud storage URLs, internal IPs, internal hostnames, and more.
+Rules live in `rules/secrets.yaml`. 35 rules covering AWS, Azure, Google Cloud, GitHub, GitLab, Stripe, Slack, Twilio, SendGrid, JWT, RSA keys, database connection strings, cloud storage URLs, internal IPs, and internal hostnames.
 
-Each finding gets a confidence score (0.0 to 1.0) and a status:
+Each finding gets a confidence score (0.0 to 1.0) and one of four statuses:
+
 - `likely_secret` - high confidence, strong signals
 - `candidate` - matched pattern, needs manual review
 - `likely_false_positive` - low confidence, placeholder indicators present
-- `validated` - confirmed active via provider API (when `--validate-secrets` is used)
+- `validated` - confirmed active via provider API (requires `--validate-secrets`)
 
 ---
 
@@ -337,23 +278,7 @@ cd bundlespy
 pytest tests/unit/ -v
 ```
 
-44 tests covering network safety, SSRF protection, secret detection, entropy scoring, false positive detection, and redaction.
-
----
-
-## Use cases
-
-**Bug bounty JS recon** - run against in-scope targets after subdomain enumeration. Use `--passive` first for zero noise, then `--headless --source-maps --chunks` for full coverage.
-
-**External penetration test** - run early in an engagement. JS files reveal internal API structure, staging environments, and credentials left from development. `--headless --max-pages 9999` maps the full API surface.
-
-**API discovery** - use endpoint intelligence output to map the application's API surface before manual testing. `--graphql` maps the full GraphQL schema automatically. `--headless` intercepts real API calls the frontend makes.
-
-**Cloud exposure** - S3 bucket names, Azure blob URLs, and Firebase configs appear frequently in frontend bundles.
-
-**CI/CD pre-deployment scanning** - use `bundlespy local ./dist/` to catch secrets before they go live.
-
-**Passive recon** - use `--passive` to collect historical JS without touching the target at all.
+44 tests covering network safety, SSRF protection, secret detection, entropy scoring, false positive filtering, async fetching, and redaction.
 
 ---
 
@@ -361,7 +286,7 @@ pytest tests/unit/ -v
 
 ```
 src/bundlespy/
-- cli.py                    CLI - scan, local, demo commands
+- cli.py                    CLI entry point
 - config.py                 Configuration and defaults
 - banner.py                 ASCII banner
 - safety/
@@ -369,7 +294,7 @@ src/bundlespy/
   - authorization.py        Authorization confirmation prompt
 - crawler/
   - crawler.py              Bounded, rate-limited page and JS crawler
-  - fetcher.py              Safe HTTP client with stealth support
+  - fetcher.py              Sync and async HTTP clients with stealth support
   - scope.py                Scope enforcement
 - discovery/
   - html.py                 JS URL and link extraction from HTML
@@ -379,6 +304,7 @@ src/bundlespy/
   - headless.py             Advanced headless browser engine
   - subdomains.py           Passive subdomain harvesting
   - local_scanner.py        Local file system scanning
+  - registry.py             JS file registry and deduplication
 - analysis/
   - secrets.py              35-rule secret detection engine
   - endpoints.py            API path and URL extractor
@@ -388,74 +314,51 @@ src/bundlespy/
   - graphql.py              GraphQL introspection
   - secret_validator.py     Provider API validation
 - reporting/
-  - terminal.py             Professional terminal output
+  - terminal.py             Terminal output
   - json_report.py          JSON export
   - html_report.py          Standalone HTML report
   - csv_report.py           CSV export
   - burp_export.py          Burp Suite XML and URL list
 - ui/
-  - theme.py                Color system, severity colors, NO_COLOR support
-  - renderer.py             Terminal width, dividers, tables, truncation
-  - printer.py              All terminal output - findings, endpoints, summary
+  - theme.py                Color system, severity colors
+  - renderer.py             Terminal width, dividers, tables
+  - printer.py              All terminal output logic
 - utils/
-  - stealth.py              UA rotation, browser headers, jitter delays
+  - stealth.py              UA rotation, browser headers, jitter
+  - url_normalizer.py       URL deduplication and normalization
 - storage/models.py         All data models
-- rules/secrets.yaml        Detection rules
-
-rules/
-- secrets.yaml              35 detection rules
+- rules/secrets.yaml        35 detection rules
 ```
 
 ---
 
 ## Known limitations
 
-- Headless mode does not bypass TLS fingerprinting (JA3) - Cloudflare high security mode will block it
+- Headless does not bypass TLS fingerprinting (JA3) - Cloudflare high security mode will block it
 - Passive mode may return empty results for new or low-traffic domains
-- Secret detection confidence depends on code context - always verify findings manually
+- Secret detection depends on code context - always verify findings manually
 - Endpoint extraction from heavily obfuscated bundles may miss some paths
-- `--passive` skips the active crawler entirely - run separately if you want both
+- `--passive` skips the active crawler entirely - run a separate scan if you want both
 
 ---
 
-## Stealth and WAF evasion
-
-```bash
-bundlespy scan https://example.com --stealth
-```
-
-Stealth mode enables:
-- Rotation through 22 real browser User-Agents
-- Full browser header sets (Accept, Accept-Language, Sec-Fetch, Sec-CH-UA)
-- Random jitter on request delays instead of a fixed rate
-- Referrer spoofing to match the target origin
-
-This covers most WAF fingerprinting based on headers and request patterns. It does not bypass TLS fingerprinting (JA3) used by Cloudflare in high security mode.
-
----
-
-## Authorized use only
+## Authorized use
 
 BundleSpy is for systems you own or have explicit written authorization to test:
+
 - Your own web applications
 - Authorized penetration testing engagements
 - Approved bug bounty programs (within stated scope)
 - Internal security reviews
 - CI/CD pre-deployment scanning on your own builds
 
-You are responsible for ensuring your use complies with applicable laws, contracts, and program rules.
+You are responsible for compliance with applicable laws, contracts, and program rules.
 
 ---
 
-## License
-
-MIT
+**Author:** Mustafa Salha - Penetration Tester, Abu Dhabi, UAE
+**GitHub:** https://github.com/MustafaSalhaa
+**PyPI:** https://pypi.org/project/bundlespy
+**License:** MIT
 
 ---
-
-## Author
-
-Mustafa Salha
-Penetration Tester, Abu Dhabi, UAE
-GitHub: https://github.com/MustafaSalhaa
-PyPI: https://pypi.org/project/bundlespy
