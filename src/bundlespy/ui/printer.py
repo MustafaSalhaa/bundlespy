@@ -347,33 +347,21 @@ def _print_attack_surface_tree(result, extras: dict) -> None:
         _p("")
 
     # ── Pages ─────────────────────────────────────────────────────────────────
-    # Collect unique page paths from all endpoint categories
-    crawled = result.pages_crawled or 0
-    seen_pages: dict = {}
-    for ep in result.endpoints:
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(ep.url)
-            path   = parsed.path or "/"
-            # Normalize: strip trailing slash unless root
-            path = path.rstrip("/") or "/"
-            if path not in seen_pages:
-                seen_pages[path] = ""
-        except Exception:
-            pass
-    # Always include root
-    if "/" not in seen_pages and crawled > 0:
-        seen_pages["/"] = ""
-    page_items = list(seen_pages.items())[:20]
-
+    # Pages = only ROUTE category endpoints (actual crawled HTML pages)
+    crawled   = result.pages_crawled or 0
+    page_eps  = by_cat.get("ROUTE", [])
     _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
-    if page_items:
-        for i, (path, _) in enumerate(page_items):
-            is_last = (i == len(page_items) - 1)
+    if page_eps:
+        items = _tree_items(page_eps)
+        for i, (path, _) in enumerate(items):
+            is_last = (i == len(items) - 1)
             prefix  = "└─" if is_last else "├─"
             _p(f"  {A.DIM}{prefix}{rc} {path}")
     elif crawled > 0:
+        # Crawler visited pages but none categorized as ROUTE - show root at min
         _p(f"  {A.DIM}└─ /{rc}")
+        if crawled > 1:
+            _p(f"  {A.DIM}└─ ... {crawled} pages crawled{rc}")
     else:
         _p(f"  {A.DIM}└─ NOT RUN{rc}")
     _p("")
@@ -698,7 +686,7 @@ def _print_discovery(result, extras: dict) -> None:
     _p(f"  {_label('Secrets')}{sec_c}{len(secrets)} detected{A.RESET}")
     if secrets:
         hc_c = A.B_BRIGHT_RED if high_conf else A.DIM
-        _p(f"  {_label('High confidence', 16)}{hc_c}{high_conf}{A.RESET}")
+        _p(f"  {_label('High confidence', 18)}{hc_c}{high_conf}{A.RESET}")
         val_c = A.B_BRIGHT_RED if validated else A.DIM
         _p(f"  {_label('Validated')}{val_c}{validated}{A.RESET}")
     if pub_ids:
@@ -1208,21 +1196,11 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
     bar_w  = min(20, max(10, w - 50))
     rc     = A.RESET
 
-    def _bar(current, total, color=None) -> str:
-        if total <= 0:
-            pct = 1.0
-        else:
-            pct = min(1.0, current / total)
-        filled = int(pct * bar_w)
-        empty  = bar_w - filled
-        c = color or (A.B_CYAN if pct >= 1.0 else A.B_YELLOW)
-        return (c + "█" * filled + rc + A.DIM + "░" * empty + rc)
-
-    # Progress bars
-    _p(f"  {A.DIM}{'Pages':<14}{rc}{_bar(p.visited, p.discovered)}  {A.BRIGHT_WHITE}{p.visited}/{p.discovered}{rc}")
-    _p(f"  {A.DIM}{'JavaScript':<14}{rc}{_bar(j.analyzed, j.discovered)}  {A.BRIGHT_WHITE}{j.analyzed}/{j.discovered}{rc}")
+    # Coverage counts
+    _p(f"  {A.DIM}{'Pages':<14}{rc}{A.BRIGHT_WHITE}{p.visited}/{p.discovered}{rc}")
+    _p(f"  {A.DIM}{'JavaScript':<14}{rc}{A.BRIGHT_WHITE}{j.analyzed}/{j.discovered}{rc}")
     if r.discovered > 0:
-        _p(f"  {A.DIM}{'Routes':<14}{rc}{_bar(r.visited, r.discovered)}  {A.BRIGHT_WHITE}{r.visited}/{r.discovered}{rc}")
+        _p(f"  {A.DIM}{'Routes':<14}{rc}{A.BRIGHT_WHITE}{r.visited}/{r.discovered}{rc}")
     _p("")
 
     # Runtime - NOT RUN vs COMPLETE vs count
