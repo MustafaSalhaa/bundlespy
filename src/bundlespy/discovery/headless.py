@@ -23,6 +23,7 @@ import queue
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -84,6 +85,36 @@ SKIP_FORM_CONTEXTS = {
 }
 
 
+# ── Interaction safety classification ────────────────────────────────────────
+
+class InteractionClass(Enum):
+    SAFE        = "SAFE"        # UI-reveal only: tabs, accordions, hover
+    CAUTION     = "CAUTION"     # may trigger a read XHR; execute with observation
+    DESTRUCTIVE = "DESTRUCTIVE" # blocked unconditionally
+
+# Mutation methods that indicate a state-changing side effect
+STATE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+# CAUTION keyword signals - element may trigger a write but isn't obviously destructive
+CAUTION_KEYWORDS = {
+    "save", "update", "upload", "apply", "confirm", "continue",
+    "next", "submit", "create", "add", "edit", "change", "proceed",
+}
+
+
+@dataclass
+class InteractionEvent:
+    """Record of a single engine interaction and its observed effects."""
+    element_label:  str                 # descriptive label (tag + text)
+    classification: InteractionClass
+    page_url:       str
+    pre_requests:   int                 # network request count before action
+    post_requests:  int                 # network request count after action
+    mutation_methods: List[str]         # HTTP methods of NEW requests triggered
+    side_effect:    str                 # "NONE" | "READ_XHR" | "STATE_MUTATION"
+    halted:         bool = False        # True if engine stopped further interaction
+
+
 # ── Form fill values ──────────────────────────────────────────────────────────
 
 FORM_FILL_VALUES = {
@@ -139,87 +170,6 @@ window.XMLHttpRequest.prototype.send = function(...args) {
 window.__bspy_stable = function(quietMs) {
     return (Date.now() - window.__bspy_last_active) >= quietMs;
 };
-"""
-
-# ── Extra intercept JS additions (EventSource, sendBeacon, history, dynamic imports) ──
-
-INTERCEPT_JS_ADDITIONS = """
-(function() {
-    // Initialise extra-events array once
-    if (!window.__bs_extra_events) {
-        window.__bs_extra_events = [];
-    }
-
-    function _record(type, url) {
-        try {
-            window.__bs_extra_events.push({
-                type: type,
-                url: String(url),
-                timestamp: Date.now()
-            });
-        } catch(e) {}
-    }
-
-    // ── EventSource ────────────────────────────────────────────────────────
-    if (window.EventSource) {
-        const _origES = window.EventSource;
-        window.EventSource = function(url, init) {
-            _record('eventsource', url);
-            return new _origES(url, init);
-        };
-        window.EventSource.prototype = _origES.prototype;
-        try {
-            Object.keys(_origES).forEach(function(k) {
-                try { window.EventSource[k] = _origES[k]; } catch(e) {}
-            });
-        } catch(e) {}
-    }
-
-    // ── navigator.sendBeacon ───────────────────────────────────────────────
-    if (navigator.sendBeacon) {
-        const _origBeacon = navigator.sendBeacon.bind(navigator);
-        navigator.sendBeacon = function(url, data) {
-            _record('beacon', url);
-            return _origBeacon(url, data);
-        };
-    }
-
-    // ── history.pushState / replaceState ───────────────────────────────────
-    (function() {
-        function wrapHistory(method) {
-            var orig = history[method];
-            if (!orig) return;
-            history[method] = function(state, title, url) {
-                if (url) _record('history_' + method.replace('State', '').toLowerCase(), url);
-                return orig.apply(this, arguments);
-            };
-        }
-        try { wrapHistory('pushState'); } catch(e) {}
-        try { wrapHistory('replaceState'); } catch(e) {}
-    })();
-
-    // ── Dynamic import() — MutationObserver approach ──────────────────────
-    if (!window.__bundlespy_dynamic_imports) {
-        window.__bundlespy_dynamic_imports = [];
-    }
-    try {
-        var _importObs = new MutationObserver(function(muts) {
-            muts.forEach(function(m) {
-                m.addedNodes && m.addedNodes.forEach(function(node) {
-                    if (node.nodeName === 'SCRIPT') {
-                        var src = node.src || node.getAttribute('src');
-                        var type = (node.type || '').toLowerCase();
-                        if (src && (type === 'module' || src.match(/chunk|lazy|split|async/i))) {
-                            window.__bundlespy_dynamic_imports.push(src);
-                            _record('dynamic_import', src);
-                        }
-                    }
-                });
-            });
-        });
-        _importObs.observe(document.documentElement, { childList: true, subtree: true });
-    } catch(e) {}
-})();
 """
 
 
@@ -308,7 +258,25 @@ document.createElement = function(tag, ...a) {
     }
     return el;
 };
-""" + STABILITY_INIT_JS + INTERCEPT_JS_ADDITIONS
+
+// History/pushState tracking for SPA navigation
+(function() {
+    window.__bspy_nav_history = [];
+    const _origPush = history.pushState.bind(history);
+    const _origReplace = history.replaceState.bind(history);
+    history.pushState = function(s, t, url) {
+        if (url) { try { window.__bspy_nav_history.push(String(url)); } catch(e) {} }
+        return _origPush(s, t, url);
+    };
+    history.replaceState = function(s, t, url) {
+        if (url) { try { window.__bspy_nav_history.push(String(url)); } catch(e) {} }
+        return _origReplace(s, t, url);
+    };
+    window.addEventListener('popstate', function() {
+        try { window.__bspy_nav_history.push(location.pathname); } catch(e) {}
+    });
+})();
+""" + STABILITY_INIT_JS
 
 
 # ── SPA route extraction JS ───────────────────────────────────────────────────
@@ -599,271 +567,6 @@ class PageStabilizer:
             self.wait(max_ms=1000, quiet_ms=150)
 
 
-# ── Destructive keyword regex (extended, for _check_destructive) ──────────────
-
-_DESTRUCTIVE_PATTERN = re.compile(
-    r'\b(?:'
-    r'delete|remove|destroy|purge|wipe'
-    r'|unsubscribe|cancel\s+account|close\s+account'
-    r'|purchase|buy|checkout|pay(?:\s+now)?|confirm\s+order|place\s+order'
-    r'|submit\s+payment|charge|debit|payment'
-    r'|reset\s+password|change\s+password|change\s+email'
-    r'|revoke|logout|sign\s+out'
-    r'|deletion|transfer|send\s+money|wire\s+transfer'
-    r')\b',
-    re.IGNORECASE
-)
-
-
-def _check_destructive(element_text: str) -> bool:
-    """
-    Return True if element_text matches any destructive keyword.
-    Case-insensitive. Safe to call with empty/None strings.
-    """
-    if not element_text:
-        return False
-    return bool(_DESTRUCTIVE_PATTERN.search(element_text))
-
-
-# ── Interaction state tracker ─────────────────────────────────────────────────
-
-@dataclass
-class InteractionTracker:
-    """Tracks statistics for a single _interact_advanced() run."""
-    attempted:              int  = 0
-    executed:               int  = 0
-    navigations:            int  = 0
-    dom_changes:            int  = 0
-    network_activity:       int  = 0
-    new_intelligence:       int  = 0
-    skipped_destructive:    int  = 0
-    infinite_scroll_stopped: bool = False
-    redirect_loop_stopped:  bool = False
-
-
-# ── Advanced interaction engine ───────────────────────────────────────────────
-
-def _interact_advanced(page, seen_states: Set[str], max_interactions: int = 50) -> InteractionTracker:
-    """
-    Extended safe interaction engine.
-
-    Handles pagination, lazy-load triggers, hash navigation,
-    tabs/accordions/details, infinite scroll, and loop prevention.
-
-    Parameters
-    ----------
-    page:
-        Playwright Page object.
-    seen_states:
-        A mutable set of DOM fingerprints (hashes). The caller must pass
-        the SAME set across multiple calls so cross-page dedup works.
-    max_interactions:
-        Hard cap on total click/scroll actions performed.
-
-    Returns
-    -------
-    InteractionTracker with statistics about the run.
-    """
-    tracker = InteractionTracker()
-
-    try:
-        from playwright.sync_api import TimeoutError as PWTimeoutError  # type: ignore
-    except ImportError:
-        PWTimeoutError = Exception
-
-    # ── helpers ──────────────────────────────────────────────────────────────
-
-    def _fingerprint() -> str:
-        """SHA-1 of trimmed body text — fast DOM state fingerprint."""
-        try:
-            txt = page.evaluate("document.body && document.body.innerText || ''")
-            return hashlib.sha1(txt[:4096].encode("utf-8", "replace")).hexdigest()
-        except Exception:
-            return ""
-
-    def _check_state_duplicate() -> bool:
-        fp = _fingerprint()
-        if not fp:
-            return False
-        if fp in seen_states:
-            return True
-        seen_states.add(fp)
-        return False
-
-    def _safe_click(el) -> bool:
-        """Click el if visible, enabled, and non-destructive. Returns True on success."""
-        nonlocal tracker
-        try:
-            if not el.is_visible() or not el.is_enabled():
-                return False
-            label = ""
-            try:
-                label = (el.inner_text() or "").strip()
-            except Exception:
-                pass
-            try:
-                label += " " + (el.get_attribute("aria-label") or "")
-            except Exception:
-                pass
-            if _check_destructive(label):
-                tracker.skipped_destructive += 1
-                return False
-            tracker.attempted += 1
-            el.click(timeout=1000)
-            tracker.executed += 1
-            return True
-        except Exception:
-            return False
-
-    def _mini_wait(max_ms: int = 600) -> None:
-        """Brief adaptive wait for network/DOM to settle."""
-        try:
-            page.wait_for_timeout(min(max_ms, 600))
-        except Exception:
-            pass
-
-    # ── Phase 1: Pagination ───────────────────────────────────────────────────
-    PAGINATION_PATTERN = re.compile(
-        r'next|→|›|load\s+more|show\s+more|page\s+\d+',
-        re.IGNORECASE
-    )
-    PAGINATION_SELECTORS = [
-        "a", "button", "[role='button']", "[role='link']",
-    ]
-    paginations_done = 0
-    try:
-        for sel in PAGINATION_SELECTORS:
-            if paginations_done >= 5 or tracker.executed >= max_interactions:
-                break
-            try:
-                elements = page.query_selector_all(sel)[:30]
-                for el in elements:
-                    if paginations_done >= 5 or tracker.executed >= max_interactions:
-                        break
-                    try:
-                        txt = (el.inner_text() or "").strip()
-                        if PAGINATION_PATTERN.search(txt):
-                            if _safe_click(el):
-                                paginations_done += 1
-                                _mini_wait(800)
-                                tracker.navigations += 1
-                                if _check_state_duplicate():
-                                    tracker.redirect_loop_stopped = True
-                                    break
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── Phase 2: Lazy-load / infinite scroll ──────────────────────────────────
-    try:
-        prev_scroll_y: Optional[int] = None
-        stale_scroll_attempts = 0
-        scroll_steps = 10
-        for step in range(scroll_steps):
-            if tracker.executed >= max_interactions:
-                break
-            frac = (step + 1) / scroll_steps
-            try:
-                page.evaluate(
-                    f"window.scrollTo({{top: document.body.scrollHeight * {frac}, behavior: 'smooth'}});"
-                )
-                _mini_wait(500)
-                current_y = page.evaluate("window.scrollY || 0")
-                if prev_scroll_y is not None and current_y == prev_scroll_y:
-                    stale_scroll_attempts += 1
-                    if stale_scroll_attempts >= 3:
-                        tracker.infinite_scroll_stopped = True
-                        break
-                else:
-                    stale_scroll_attempts = 0
-                prev_scroll_y = current_y
-                try:
-                    reqs = page.evaluate("window.__bspy_requests || 0")
-                    if reqs > tracker.network_activity:
-                        tracker.network_activity = reqs
-                        tracker.new_intelligence += 1
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── Phase 3: Hash / anchor navigation ─────────────────────────────────────
-    clicked_hashes: Set[str] = set()
-    try:
-        anchors = page.query_selector_all("a[href^='#']")[:40]
-        for el in anchors:
-            if len(clicked_hashes) >= 20 or tracker.executed >= max_interactions:
-                break
-            try:
-                href = el.get_attribute("href") or ""
-                if not href or href == "#" or href in clicked_hashes:
-                    continue
-                if _safe_click(el):
-                    clicked_hashes.add(href)
-                    _mini_wait(400)
-                    if _check_state_duplicate():
-                        tracker.redirect_loop_stopped = True
-                        break
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── Phase 4: Tabs, accordions, details, role=button ──────────────────────
-    interactive_selectors = [
-        "[role='tab']",
-        "[role='button']:not(button)",
-        "[aria-selected='false']",
-        "[aria-expanded='false']",
-        ".accordion-button",
-        "details > summary",
-        "[data-toggle='tab']",
-        "[data-bs-toggle='tab']",
-        ".nav-link:not(.active)",
-    ]
-    for sel in interactive_selectors:
-        if tracker.executed >= max_interactions:
-            break
-        try:
-            elements = page.query_selector_all(sel)[:8]
-            for el in elements:
-                if tracker.executed >= max_interactions:
-                    break
-                if _safe_click(el):
-                    _mini_wait(600)
-                    try:
-                        tracker.dom_changes += page.evaluate(
-                            "window.__bspy_mutations || 0"
-                        )
-                    except Exception:
-                        pass
-                    if _check_state_duplicate():
-                        tracker.redirect_loop_stopped = True
-                        break
-        except Exception:
-            pass
-
-    # ── Scroll back to top ────────────────────────────────────────────────────
-    try:
-        page.evaluate("window.scrollTo(0, 0);")
-    except Exception:
-        pass
-
-    logger.debug(
-        "_interact_advanced: attempted=%d executed=%d skipped_destructive=%d "
-        "navigations=%d infinite_scroll_stopped=%s redirect_loop_stopped=%s",
-        tracker.attempted, tracker.executed, tracker.skipped_destructive,
-        tracker.navigations, tracker.infinite_scroll_stopped,
-        tracker.redirect_loop_stopped,
-    )
-    return tracker
-
-
 # ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 def _parse_cookie_string(cookie_str: str, domain: str) -> List[dict]:
@@ -925,7 +628,6 @@ class HeadlessEngine:
     - Resource blocking
     - Priority queue
     - Authenticated scanning with cookie injection + session verification
-    - Extended interaction engine with pagination, lazy-load, hash nav, infinite-scroll protection
     """
 
     def __init__(
@@ -965,8 +667,9 @@ class HeadlessEngine:
         self.api_calls:  List[dict]    = []
         self.ws_urls:    List[str]     = []
         self.routes:     Set[str]      = set()
-        self.pages_visited: int        = 0
-        self.auth_result: Optional[dict] = None  # populated during run()
+        self.pages_visited: int           = 0
+        self.auth_result: Optional[dict]  = None   # populated during run()
+        self.interaction_log: List[InteractionEvent] = []  # evidence trail
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
@@ -1042,8 +745,8 @@ class HeadlessEngine:
             pass
 
     def _is_destructive(self, text: str) -> bool:
-        # Use the enhanced regex-based check
-        return _check_destructive(text)
+        lower = (text or "").lower().strip()
+        return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
 
     def _extract_routes(self, page) -> Set[str]:
         try:
@@ -1072,14 +775,6 @@ class HeadlessEngine:
         try:
             r = page.evaluate("window.__bundlespy_workers || []")
             return [x["url"] for x in r if isinstance(x, dict) and "url" in x]
-        except Exception:
-            return []
-
-    def _extract_extra_events(self, page) -> List[dict]:
-        """Extract EventSource, sendBeacon, history, and dynamic import events."""
-        try:
-            r = page.evaluate("window.__bs_extra_events || []")
-            return r if isinstance(r, list) else []
         except Exception:
             return []
 
@@ -1125,79 +820,284 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("Worker fetch failed %s: %s", worker_url, e)
 
-    def _interact(self, page, stabilizer: PageStabilizer) -> None:
-        """
-        Safe interaction engine. Adaptive waits after each action.
-        """
-        # Phase 1: Adaptive scroll
-        try:
-            heights = [0.25, 0.5, 0.75, 1.0, 0]
-            for frac in heights:
-                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {frac});")
-                stabilizer.wait_after_interaction(max_ms=500)
-        except Exception:
-            pass
+    # ── Evidence-based safety layer ───────────────────────────────────────────
 
-        # Phase 2: Tabs, accordions, toggles
+    def _snapshot_network(self, page) -> int:
+        """Return total network request count at this moment."""
+        try:
+            reqs = page.evaluate("(window.__bundlespy_requests || []).length")
+            return int(reqs) if reqs is not None else 0
+        except Exception:
+            return 0
+
+    def _delta_network(self, page, pre_count: int) -> List[str]:
+        """
+        Return HTTP methods of requests that fired AFTER pre_count.
+        These are the side effects of the last interaction.
+        """
+        try:
+            all_reqs = page.evaluate("window.__bundlespy_requests || []") or []
+            new_reqs = all_reqs[pre_count:]
+            return [r.get("method", "GET").upper() for r in new_reqs
+                    if isinstance(r, dict)]
+        except Exception:
+            return []
+
+    def _classify_element(self, el) -> InteractionClass:
+        """
+        3-tier element classification. Destructive is blocked unconditionally.
+        Caution is allowed but executed under observation.
+        Safe executes freely.
+        """
+        try:
+            text = (el.inner_text() or "").lower().strip()
+        except Exception:
+            text = ""
+        try:
+            role  = (el.get_attribute("role") or "").lower()
+            tag   = el.evaluate("el => el.tagName.toLowerCase()") or ""
+            label = (el.get_attribute("aria-label") or "").lower()
+            cls   = (el.get_attribute("class") or "").lower()
+            typ   = (el.get_attribute("type") or "").lower()
+        except Exception:
+            role = tag = label = cls = typ = ""
+
+        # Tier 1: Destructive - hard block
+        if any(kw in text for kw in DESTRUCTIVE_KEYWORDS):
+            return InteractionClass.DESTRUCTIVE
+        if any(kw in label for kw in DESTRUCTIVE_KEYWORDS):
+            return InteractionClass.DESTRUCTIVE
+        if typ in ("submit", "reset") and any(kw in text for kw in CAUTION_KEYWORDS):
+            return InteractionClass.DESTRUCTIVE
+
+        # Tier 2: Caution - execute under observation
+        if any(kw in text for kw in CAUTION_KEYWORDS):
+            return InteractionClass.CAUTION
+        if any(kw in label for kw in CAUTION_KEYWORDS):
+            return InteractionClass.CAUTION
+        if typ == "submit":
+            return InteractionClass.CAUTION
+
+        # Tier 3: Safe - UI-reveal elements
+        return InteractionClass.SAFE
+
+    def _safe_interact_element(
+        self,
+        page,
+        el,
+        stabilizer: PageStabilizer,
+        page_url: str,
+        action_label: str,
+        halt_on_mutation: bool = True,
+    ) -> Optional[InteractionEvent]:
+        """
+        Classify -> execute -> observe. Returns an InteractionEvent.
+        If a STATE_MUTATION is detected and halt_on_mutation is True,
+        marks the event as halted so the caller can stop the interaction loop.
+        Returns None if the element was blocked (DESTRUCTIVE).
+        """
+        cls = self._classify_element(el)
+
+        if cls == InteractionClass.DESTRUCTIVE:
+            logger.debug("Blocked DESTRUCTIVE element: %s", action_label)
+            return None
+
+        pre = self._snapshot_network(page)
+
+        try:
+            el.click(timeout=1000)
+        except Exception:
+            return None
+
+        wait_ms = 1200 if cls == InteractionClass.CAUTION else 800
+        stabilizer.wait_after_interaction(max_ms=wait_ms)
+
+        new_methods  = self._delta_network(page, pre)
+        post         = self._snapshot_network(page)
+
+        mutation_methods = [m for m in new_methods if m in STATE_MUTATION_METHODS]
+
+        if mutation_methods:
+            side_effect = "STATE_MUTATION"
+        elif new_methods:
+            side_effect = "READ_XHR"
+        else:
+            side_effect = "NONE"
+
+        halted = bool(mutation_methods) and halt_on_mutation
+
+        event = InteractionEvent(
+            element_label   = action_label,
+            classification  = cls,
+            page_url        = page_url,
+            pre_requests    = pre,
+            post_requests   = post,
+            mutation_methods= mutation_methods,
+            side_effect     = side_effect,
+            halted          = halted,
+        )
+
+        with self._lock:
+            self.interaction_log.append(event)
+
+        if halted:
+            logger.warning(
+                "STATE_MUTATION detected after '%s' on %s (%s) - halting interaction branch",
+                action_label, page_url, ", ".join(mutation_methods),
+            )
+
+        return event
+
+    def _interact(self, page, stabilizer: PageStabilizer) -> Set[str]:
+        """
+        Evidence-based interaction engine.
+
+        Every interaction goes through 3 layers:
+          1. Pre-execution classification  (SAFE / CAUTION / DESTRUCTIVE)
+          2. Execution
+          3. Post-execution mutation observation
+
+        If a supposedly SAFE or CAUTION element triggers a state-mutating
+        request (POST/PUT/PATCH/DELETE), the branch is halted immediately
+        and the event is recorded with full evidence in self.interaction_log.
+
+        Returns set of new routes discovered during all interactions.
+        """
+        discovered_routes: Set[str] = set()
+        page_url = page.url
+
+        # ── Phase 1: Progressive scroll ───────────────────────────────────────
+        # Scroll is read-only; no classification needed. Re-extract after each
+        # step to catch IntersectionObserver / lazy-load triggers.
+        scroll_fracs = [0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0, 0.0]
+        for frac in scroll_fracs:
+            try:
+                page.evaluate(
+                    f"window.scrollTo({{top: document.body.scrollHeight * {frac}, behavior: 'smooth'}});"
+                )
+                stabilizer.wait_after_interaction(max_ms=600)
+                discovered_routes.update(self._extract_routes(page))
+            except Exception:
+                pass
+
+        # ── Phase 2: Tabs, accordions, toggles ───────────────────────────────
+        # These are expected to be SAFE (UI-reveal). If observation shows
+        # a mutation, the branch halts.
         tab_selectors = [
             "[role='tab']", "[role='menuitem']",
             "[data-toggle='tab']", "[data-bs-toggle='tab']",
             ".nav-link:not(.active)", "[aria-selected='false']",
             ".accordion-button", "[aria-expanded='false']",
+            "[data-tab]", "[data-panel]",
         ]
         for sel in tab_selectors:
             try:
-                for el in page.query_selector_all(sel)[:6]:
+                for el in page.query_selector_all(sel)[:8]:
                     try:
                         if not el.is_visible() or not el.is_enabled():
                             continue
-                        if self._is_destructive(el.inner_text()):
-                            continue
-                        el.click(timeout=800)
-                        stabilizer.wait_after_interaction(max_ms=800)
+                        label = f"tab:{sel}:{(el.inner_text() or '')[:40].strip()}"
+                        event = self._safe_interact_element(
+                            page, el, stabilizer, page_url, label,
+                            halt_on_mutation=True,
+                        )
+                        if event is None:
+                            continue  # blocked as DESTRUCTIVE
+                        discovered_routes.update(self._extract_routes(page))
+                        with self._lock:
+                            self.api_calls.extend(self._extract_api_calls(page))
+                        if event.halted:
+                            break  # stop this selector's loop on mutation
                     except Exception:
                         pass
             except Exception:
                 pass
 
-        # Phase 3: Dropdown toggles
+        # ── Phase 3: Dropdown toggles ─────────────────────────────────────────
         try:
-            for el in page.query_selector_all(
+            dropdowns = page.query_selector_all(
                 "button[data-toggle],button[data-bs-toggle],"
                 "button[aria-expanded],.dropdown-toggle"
-            )[:8]:
+            )[:10]
+            for el in dropdowns:
                 try:
                     if not el.is_visible() or not el.is_enabled():
                         continue
-                    if self._is_destructive(el.inner_text()):
+                    label = f"dropdown:{(el.inner_text() or '')[:40].strip()}"
+                    event = self._safe_interact_element(
+                        page, el, stabilizer, page_url, label,
+                        halt_on_mutation=True,
+                    )
+                    if event is None:
                         continue
-                    el.click(timeout=800)
-                    stabilizer.wait_after_interaction(max_ms=600)
+                    discovered_routes.update(self._extract_routes(page))
+                    try:
+                        page.keyboard.press("Escape")
+                        stabilizer.wait_after_interaction(max_ms=300)
+                    except Exception:
+                        pass
+                    if event.halted:
+                        break
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Phase 4: Hover over nav items
+        # ── Phase 4: Nav hover + revealed link harvest ────────────────────────
+        # Hover is read-only. We only collect hrefs from what becomes visible,
+        # never click the sub-links directly.
         try:
-            for el in page.query_selector_all(
-                ".dropdown,.has-submenu,nav > ul > li"
-            )[:6]:
+            nav_items = page.query_selector_all(
+                ".dropdown,.has-submenu,nav > ul > li,[class*='nav-item']"
+            )[:8]
+            for el in nav_items:
                 try:
-                    if el.is_visible():
-                        el.hover(timeout=600)
-                        stabilizer.wait_after_interaction(max_ms=400)
+                    if not el.is_visible():
+                        continue
+                    el.hover(timeout=600)
+                    stabilizer.wait_after_interaction(max_ms=500)
+                    for link in el.query_selector_all("a[href]")[:4]:
+                        href = link.get_attribute("href") or ""
+                        if href.startswith("/") and not self._is_destructive(link.inner_text()):
+                            discovered_routes.add(href.split("?")[0].split("#")[0])
+                    discovered_routes.update(self._extract_routes(page))
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Phase 5: Advanced interactions (pagination, lazy-load, hash nav)
-        try:
-            seen_states: Set[str] = set()
-            _interact_advanced(page, seen_states, max_interactions=30)
-        except Exception:
-            pass
+        # ── Phase 5: Stepper / wizard navigation ──────────────────────────────
+        # These may be CAUTION. Executed under full observation; mutation halts.
+        stepper_selectors = [
+            "button[aria-label*='next' i]", "button[aria-label*='continue' i]",
+            "[class*='stepper'] [class*='step']:not([class*='active'])",
+            "[class*='wizard'] [class*='step']",
+            "li[class*='step']:not([class*='active']):not([class*='complete'])",
+        ]
+        for sel in stepper_selectors:
+            try:
+                for el in page.query_selector_all(sel)[:4]:
+                    try:
+                        if not el.is_visible() or not el.is_enabled():
+                            continue
+                        label = f"stepper:{sel}:{(el.inner_text() or '')[:40].strip()}"
+                        event = self._safe_interact_element(
+                            page, el, stabilizer, page_url, label,
+                            halt_on_mutation=True,
+                        )
+                        if event is None:
+                            continue
+                        discovered_routes.update(self._extract_routes(page))
+                        with self._lock:
+                            self.api_calls.extend(self._extract_api_calls(page))
+                        if event.halted:
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return discovered_routes
 
     def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
         """
@@ -1240,6 +1140,50 @@ class HeadlessEngine:
         except Exception:
             pass
 
+    def _interaction_url_harvest(self, page, stabilizer: PageStabilizer) -> Set[str]:
+        """
+        After all interactions on a page are done, do a final harvest:
+        - Collect all href attributes visible in the DOM (including those revealed by interactions)
+        - Extract data-* route attributes added dynamically
+        - Read window.location history if available
+        """
+        harvested: Set[str] = set()
+        try:
+            # All anchor hrefs now visible in DOM (including inside opened accordions/tabs)
+            hrefs = page.evaluate("""
+                Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.getAttribute('href'))
+                    .filter(h => h && h.startsWith('/') && !h.startsWith('//'))
+                    .map(h => h.split('?')[0].split('#')[0])
+                    .filter(h => h.length > 1);
+            """) or []
+            harvested.update(hrefs)
+
+            # data-href, data-url, data-path attributes
+            data_attrs = page.evaluate("""
+                Array.from(document.querySelectorAll('[data-href],[data-url],[data-path],[href-to],[to]'))
+                    .map(el => el.getAttribute('data-href') || el.getAttribute('data-url') ||
+                               el.getAttribute('data-path') || el.getAttribute('href-to') || el.getAttribute('to'))
+                    .filter(v => v && v.startsWith('/'))
+                    .map(v => v.split('?')[0].split('#')[0])
+                    .filter(v => v.length > 1);
+            """) or []
+            harvested.update(data_attrs)
+
+            # Check pushState history stack if we intercepted it
+            history_routes = page.evaluate("""
+                (function() {
+                    try {
+                        return (window.__bspy_nav_history || []).filter(u => u && u.startsWith('/'));
+                    } catch(e) { return []; }
+                })()
+            """) or []
+            harvested.update(history_routes)
+
+        except Exception:
+            pass
+        return harvested
+
     def _visit_page(self, page, url: str, context_page: str) -> Set[str]:
         """Visit a single page and extract all intelligence."""
 
@@ -1270,42 +1214,18 @@ class HeadlessEngine:
 
             # Interact if enabled
             if self.interact:
-                self._interact(page, stabilizer)
+                interaction_routes = self._interact(page, stabilizer)
+                new_routes = self._extract_routes(page)
+                new_routes.update(interaction_routes)
                 self._observe_forms(page, stabilizer)
+            else:
+                # Extract everything
+                new_routes = self._extract_routes(page)
 
-            # Extract everything
-            new_routes  = self._extract_routes(page)
             api_calls   = self._extract_api_calls(page)
             ws_urls     = self._extract_ws_urls(page)
             worker_urls = self._extract_worker_urls(page)
             iframe_urls = self._extract_iframe_urls(page)
-
-            # Also capture extra events (EventSource, sendBeacon, history, dynamic imports)
-            extra_events = self._extract_extra_events(page)
-            for ev in extra_events:
-                ev_url = ev.get("url", "")
-                ev_type = ev.get("type", "")
-                if ev_url and ev_type in ("eventsource", "beacon"):
-                    safe_ev, _ = validate_url(ev_url)
-                    if safe_ev and self.scope.in_scope(ev_url):
-                        with self._lock:
-                            self.api_calls.append({
-                                "url": ev_url,
-                                "method": "GET" if ev_type == "eventsource" else "POST",
-                                "type": ev_type,
-                            })
-                elif ev_url and ev_type in ("history_push", "history_replace"):
-                    # Treat as a new route
-                    parsed_ev = urlparse(ev_url)
-                    if parsed_ev.path:
-                        new_routes.add(parsed_ev.path)
-                elif ev_url and ev_type == "dynamic_import":
-                    # Dynamic chunk — add as route if same-origin
-                    parsed_target = urlparse(self.target_url)
-                    parsed_ev = urlparse(ev_url)
-                    if not parsed_ev.netloc or parsed_ev.netloc == parsed_target.netloc:
-                        if parsed_ev.path:
-                            new_routes.add(parsed_ev.path)
 
             with self._lock:
                 self.api_calls.extend(api_calls)
@@ -1364,12 +1284,7 @@ class HeadlessEngine:
                 continue
             seen.add(key)
             lower = url.lower()
-            call_type = call.get("type", "")
-            if call_type == "eventsource":
-                cat = "EVENTSOURCE"
-            elif call_type == "beacon":
-                cat = "BEACON"
-            elif any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
+            if any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
                 cat = "AUTH"
             elif any(k in lower for k in ["/admin", "/management"]):
                 cat = "ADMIN"
@@ -1540,24 +1455,6 @@ class HeadlessEngine:
             worker_urls = self._extract_worker_urls(page)
             iframe_urls = self._extract_iframe_urls(page)
 
-            # Extra events (EventSource, sendBeacon, history, dynamic imports)
-            extra_events = self._extract_extra_events(page)
-            for ev in extra_events:
-                ev_url = ev.get("url", "")
-                ev_type = ev.get("type", "")
-                if ev_url and ev_type in ("eventsource", "beacon"):
-                    safe_ev, _ = validate_url(ev_url)
-                    if safe_ev and self.scope.in_scope(ev_url):
-                        api_calls.append({
-                            "url": ev_url,
-                            "method": "GET" if ev_type == "eventsource" else "POST",
-                            "type": ev_type,
-                        })
-                elif ev_url and ev_type in ("history_push", "history_replace"):
-                    parsed_ev = urlparse(ev_url)
-                    if parsed_ev.path:
-                        new_routes.add(parsed_ev.path)
-
             with self._lock:
                 self.api_calls.extend(api_calls)
                 self.ws_urls.extend(ws_urls)
@@ -1574,6 +1471,19 @@ class HeadlessEngine:
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
 
+            # Final DOM harvest for revealed links
+            try:
+                hrefs = page.evaluate("""
+                    Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => a.getAttribute('href'))
+                        .filter(h => h && h.startsWith('/') && !h.startsWith('//'))
+                        .map(h => h.split('?')[0].split('#')[0])
+                        .filter(h => h.length > 1);
+                """) or []
+                new_routes.update(hrefs)
+            except Exception:
+                pass
+
             # Reset interceptor buffers for next page
             try:
                 page.evaluate("""
@@ -1581,7 +1491,6 @@ class HeadlessEngine:
                     window.__bundlespy_ws = [];
                     window.__bundlespy_workers = [];
                     window.__bundlespy_iframes = [];
-                    window.__bs_extra_events = [];
                     window.__bspy_mutations = 0;
                     window.__bspy_requests = 0;
                     window.__bspy_last_active = Date.now();
@@ -1761,7 +1670,8 @@ class HeadlessEngine:
                         _seen_dom_states.add(fp)
 
                     if self.interact:
-                        self._interact(page, stabilizer)
+                        interaction_routes = self._interact(page, stabilizer)
+                        new_routes_found.update(interaction_routes)
                         self._observe_forms(page, stabilizer)
 
                     new_routes = self._flush_page_intel(page, url)
@@ -1808,13 +1718,14 @@ class HeadlessEngine:
             len(self.routes), timings.get("total", 0),
         )
         return {
-            "js_files":   self.js_files,
-            "endpoints":  self.endpoints,
-            "routes":     list(self.routes),
-            "api_calls":  self.api_calls,
-            "stats":      stats,
-            "timings":    timings,
-            "auth_result": self.auth_result,
+            "js_files":        self.js_files,
+            "endpoints":       self.endpoints,
+            "routes":          list(self.routes),
+            "api_calls":       self.api_calls,
+            "stats":           stats,
+            "timings":         timings,
+            "auth_result":     self.auth_result,
+            "interaction_log": self.interaction_log,
         }
 
 def _playwright_available() -> bool:
