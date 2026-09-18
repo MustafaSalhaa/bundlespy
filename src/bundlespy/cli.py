@@ -121,9 +121,11 @@ def _setup_logging(verbose: bool, debug: bool, quiet: bool) -> None:
         level = logging.ERROR
     else:
         level = logging.WARNING
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("  %(message)s"))
     logging.basicConfig(
         level=level,
-        format="  %(message)s",
+        handlers=[handler],
     )
 
 
