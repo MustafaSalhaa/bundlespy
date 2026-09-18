@@ -1424,7 +1424,7 @@ def print_summary(result, extras=None, report_paths=None) -> None:
     if counts.get("CRITICAL") or validated:
         _p(f"  {A.B_BRIGHT_RED}Critical findings present. Immediate action required.{rc}")
     elif counts.get("HIGH"):
-        _p(f"  {A.ORANGE}Review required: {counts['HIGH']} HIGH severity finding{'s' if counts['HIGH'] != 1 else ''}.{rc}")
+        _p(f"  {A.ORANGE}Review required: {counts['HIGH']} High severity finding{'s' if counts['HIGH'] != 1 else ''}.{rc}")
     elif counts.get("MEDIUM"):
         _p(f"  {A.B_YELLOW}Medium severity findings present.{rc}")
     else:
