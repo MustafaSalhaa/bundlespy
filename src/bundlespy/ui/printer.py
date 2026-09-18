@@ -158,21 +158,20 @@ def print_header(
 
     # Print banner lines - all dim green except last, which carries the version
     ver_label = A.DIM + f"v{version}" + rc
+    # Find last non-empty line index for version placement
+    last_nonempty = max((i for i, l in enumerate(banner_lines) if l.strip()), default=0)
+
     for i, line in enumerate(banner_lines):
         if not line.strip():
-            # preserve blank lines inside the art as-is
             _p("")
             continue
-        if i == len(banner_lines) - 1:
-            # Last art line: version right-aligned on the same row
-            vis_len = len(line)
-            gap_len = max(1, w - 2 - vis_len - len(f"v{version}"))
+        if i == last_nonempty:
+            # Last non-empty art line: version right-aligned on same row
+            gap_len = max(1, w - 2 - len(line) - len(f"v{version}"))
             gap     = " " * gap_len
-            _p(f"  {A.BANNER_GREEN_3}{line}{rc}{gap}{ver_label}")
-        elif i == 0:
-            _p(f"  {A.BANNER_GREEN_1}{line}{rc}")
+            _p(f"  {A.BRIGHT_WHITE}{line}{rc}{gap}{ver_label}")
         else:
-            _p(f"  {A.BANNER_GREEN_2}{line}{rc}")
+            _p(f"  {A.BRIGHT_WHITE}{line}{rc}")
 
     _p("")
 
