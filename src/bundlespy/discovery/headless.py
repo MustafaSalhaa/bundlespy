@@ -141,6 +141,87 @@ window.__bspy_stable = function(quietMs) {
 };
 """
 
+# ── Extra intercept JS additions (EventSource, sendBeacon, history, dynamic imports) ──
+
+INTERCEPT_JS_ADDITIONS = """
+(function() {
+    // Initialise extra-events array once
+    if (!window.__bs_extra_events) {
+        window.__bs_extra_events = [];
+    }
+
+    function _record(type, url) {
+        try {
+            window.__bs_extra_events.push({
+                type: type,
+                url: String(url),
+                timestamp: Date.now()
+            });
+        } catch(e) {}
+    }
+
+    // ── EventSource ────────────────────────────────────────────────────────
+    if (window.EventSource) {
+        const _origES = window.EventSource;
+        window.EventSource = function(url, init) {
+            _record('eventsource', url);
+            return new _origES(url, init);
+        };
+        window.EventSource.prototype = _origES.prototype;
+        try {
+            Object.keys(_origES).forEach(function(k) {
+                try { window.EventSource[k] = _origES[k]; } catch(e) {}
+            });
+        } catch(e) {}
+    }
+
+    // ── navigator.sendBeacon ───────────────────────────────────────────────
+    if (navigator.sendBeacon) {
+        const _origBeacon = navigator.sendBeacon.bind(navigator);
+        navigator.sendBeacon = function(url, data) {
+            _record('beacon', url);
+            return _origBeacon(url, data);
+        };
+    }
+
+    // ── history.pushState / replaceState ───────────────────────────────────
+    (function() {
+        function wrapHistory(method) {
+            var orig = history[method];
+            if (!orig) return;
+            history[method] = function(state, title, url) {
+                if (url) _record('history_' + method.replace('State', '').toLowerCase(), url);
+                return orig.apply(this, arguments);
+            };
+        }
+        try { wrapHistory('pushState'); } catch(e) {}
+        try { wrapHistory('replaceState'); } catch(e) {}
+    })();
+
+    // ── Dynamic import() — MutationObserver approach ──────────────────────
+    if (!window.__bundlespy_dynamic_imports) {
+        window.__bundlespy_dynamic_imports = [];
+    }
+    try {
+        var _importObs = new MutationObserver(function(muts) {
+            muts.forEach(function(m) {
+                m.addedNodes && m.addedNodes.forEach(function(node) {
+                    if (node.nodeName === 'SCRIPT') {
+                        var src = node.src || node.getAttribute('src');
+                        var type = (node.type || '').toLowerCase();
+                        if (src && (type === 'module' || src.match(/chunk|lazy|split|async/i))) {
+                            window.__bundlespy_dynamic_imports.push(src);
+                            _record('dynamic_import', src);
+                        }
+                    }
+                });
+            });
+        });
+        _importObs.observe(document.documentElement, { childList: true, subtree: true });
+    } catch(e) {}
+})();
+"""
+
 
 # ── Main intercept JS ─────────────────────────────────────────────────────────
 
@@ -227,7 +308,7 @@ document.createElement = function(tag, ...a) {
     }
     return el;
 };
-""" + STABILITY_INIT_JS
+""" + STABILITY_INIT_JS + INTERCEPT_JS_ADDITIONS
 
 
 # ── SPA route extraction JS ───────────────────────────────────────────────────
@@ -518,6 +599,270 @@ class PageStabilizer:
             self.wait(max_ms=1000, quiet_ms=150)
 
 
+# ── Destructive keyword regex (extended, for _check_destructive) ──────────────
+
+_DESTRUCTIVE_PATTERN = re.compile(
+    r'\b(?:'
+    r'delete|remove|destroy|purge|wipe'
+    r'|unsubscribe|cancel\s+account|close\s+account'
+    r'|purchase|buy|checkout|pay(?:\s+now)?|confirm\s+order|place\s+order'
+    r'|submit\s+payment|charge|debit'
+    r'|reset\s+password|change\s+password|change\s+email'
+    r'|revoke|logout|sign\s+out'
+    r')\b',
+    re.IGNORECASE
+)
+
+
+def _check_destructive(element_text: str) -> bool:
+    """
+    Return True if element_text matches any destructive keyword.
+    Case-insensitive. Safe to call with empty/None strings.
+    """
+    if not element_text:
+        return False
+    return bool(_DESTRUCTIVE_PATTERN.search(element_text))
+
+
+# ── Interaction state tracker ─────────────────────────────────────────────────
+
+@dataclass
+class InteractionTracker:
+    """Tracks statistics for a single _interact_advanced() run."""
+    attempted:              int  = 0
+    executed:               int  = 0
+    navigations:            int  = 0
+    dom_changes:            int  = 0
+    network_activity:       int  = 0
+    new_intelligence:       int  = 0
+    skipped_destructive:    int  = 0
+    infinite_scroll_stopped: bool = False
+    redirect_loop_stopped:  bool = False
+
+
+# ── Advanced interaction engine ───────────────────────────────────────────────
+
+def _interact_advanced(page, seen_states: Set[str], max_interactions: int = 50) -> InteractionTracker:
+    """
+    Extended safe interaction engine.
+
+    Handles pagination, lazy-load triggers, hash navigation,
+    tabs/accordions/details, infinite scroll, and loop prevention.
+
+    Parameters
+    ----------
+    page:
+        Playwright Page object.
+    seen_states:
+        A mutable set of DOM fingerprints (hashes). The caller must pass
+        the SAME set across multiple calls so cross-page dedup works.
+    max_interactions:
+        Hard cap on total click/scroll actions performed.
+
+    Returns
+    -------
+    InteractionTracker with statistics about the run.
+    """
+    tracker = InteractionTracker()
+
+    try:
+        from playwright.sync_api import TimeoutError as PWTimeoutError  # type: ignore
+    except ImportError:
+        PWTimeoutError = Exception
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _fingerprint() -> str:
+        """SHA-1 of trimmed body text — fast DOM state fingerprint."""
+        try:
+            txt = page.evaluate("document.body && document.body.innerText || ''")
+            return hashlib.sha1(txt[:4096].encode("utf-8", "replace")).hexdigest()
+        except Exception:
+            return ""
+
+    def _check_state_duplicate() -> bool:
+        fp = _fingerprint()
+        if not fp:
+            return False
+        if fp in seen_states:
+            return True
+        seen_states.add(fp)
+        return False
+
+    def _safe_click(el) -> bool:
+        """Click el if visible, enabled, and non-destructive. Returns True on success."""
+        nonlocal tracker
+        try:
+            if not el.is_visible() or not el.is_enabled():
+                return False
+            label = ""
+            try:
+                label = (el.inner_text() or "").strip()
+            except Exception:
+                pass
+            try:
+                label += " " + (el.get_attribute("aria-label") or "")
+            except Exception:
+                pass
+            if _check_destructive(label):
+                tracker.skipped_destructive += 1
+                return False
+            tracker.attempted += 1
+            el.click(timeout=1000)
+            tracker.executed += 1
+            return True
+        except Exception:
+            return False
+
+    def _mini_wait(max_ms: int = 600) -> None:
+        """Brief adaptive wait for network/DOM to settle."""
+        try:
+            page.wait_for_timeout(min(max_ms, 600))
+        except Exception:
+            pass
+
+    # ── Phase 1: Pagination ───────────────────────────────────────────────────
+    PAGINATION_PATTERN = re.compile(
+        r'next|→|›|load\s+more|show\s+more|page\s+\d+',
+        re.IGNORECASE
+    )
+    PAGINATION_SELECTORS = [
+        "a", "button", "[role='button']", "[role='link']",
+    ]
+    paginations_done = 0
+    try:
+        for sel in PAGINATION_SELECTORS:
+            if paginations_done >= 5 or tracker.executed >= max_interactions:
+                break
+            try:
+                elements = page.query_selector_all(sel)[:30]
+                for el in elements:
+                    if paginations_done >= 5 or tracker.executed >= max_interactions:
+                        break
+                    try:
+                        txt = (el.inner_text() or "").strip()
+                        if PAGINATION_PATTERN.search(txt):
+                            if _safe_click(el):
+                                paginations_done += 1
+                                _mini_wait(800)
+                                tracker.navigations += 1
+                                if _check_state_duplicate():
+                                    tracker.redirect_loop_stopped = True
+                                    break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Phase 2: Lazy-load / infinite scroll ──────────────────────────────────
+    try:
+        prev_scroll_y: Optional[int] = None
+        stale_scroll_attempts = 0
+        scroll_steps = 10
+        for step in range(scroll_steps):
+            if tracker.executed >= max_interactions:
+                break
+            frac = (step + 1) / scroll_steps
+            try:
+                page.evaluate(
+                    f"window.scrollTo({{top: document.body.scrollHeight * {frac}, behavior: 'smooth'}});"
+                )
+                _mini_wait(500)
+                current_y = page.evaluate("window.scrollY || 0")
+                if prev_scroll_y is not None and current_y == prev_scroll_y:
+                    stale_scroll_attempts += 1
+                    if stale_scroll_attempts >= 3:
+                        tracker.infinite_scroll_stopped = True
+                        break
+                else:
+                    stale_scroll_attempts = 0
+                prev_scroll_y = current_y
+                try:
+                    reqs = page.evaluate("window.__bspy_requests || 0")
+                    if reqs > tracker.network_activity:
+                        tracker.network_activity = reqs
+                        tracker.new_intelligence += 1
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Phase 3: Hash / anchor navigation ─────────────────────────────────────
+    clicked_hashes: Set[str] = set()
+    try:
+        anchors = page.query_selector_all("a[href^='#']")[:40]
+        for el in anchors:
+            if len(clicked_hashes) >= 20 or tracker.executed >= max_interactions:
+                break
+            try:
+                href = el.get_attribute("href") or ""
+                if not href or href == "#" or href in clicked_hashes:
+                    continue
+                if _safe_click(el):
+                    clicked_hashes.add(href)
+                    _mini_wait(400)
+                    if _check_state_duplicate():
+                        tracker.redirect_loop_stopped = True
+                        break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Phase 4: Tabs, accordions, details, role=button ──────────────────────
+    interactive_selectors = [
+        "[role='tab']",
+        "[role='button']:not(button)",
+        "[aria-selected='false']",
+        "[aria-expanded='false']",
+        ".accordion-button",
+        "details > summary",
+        "[data-toggle='tab']",
+        "[data-bs-toggle='tab']",
+        ".nav-link:not(.active)",
+    ]
+    for sel in interactive_selectors:
+        if tracker.executed >= max_interactions:
+            break
+        try:
+            elements = page.query_selector_all(sel)[:8]
+            for el in elements:
+                if tracker.executed >= max_interactions:
+                    break
+                if _safe_click(el):
+                    _mini_wait(600)
+                    try:
+                        tracker.dom_changes += page.evaluate(
+                            "window.__bspy_mutations || 0"
+                        )
+                    except Exception:
+                        pass
+                    if _check_state_duplicate():
+                        tracker.redirect_loop_stopped = True
+                        break
+        except Exception:
+            pass
+
+    # ── Scroll back to top ────────────────────────────────────────────────────
+    try:
+        page.evaluate("window.scrollTo(0, 0);")
+    except Exception:
+        pass
+
+    logger.debug(
+        "_interact_advanced: attempted=%d executed=%d skipped_destructive=%d "
+        "navigations=%d infinite_scroll_stopped=%s redirect_loop_stopped=%s",
+        tracker.attempted, tracker.executed, tracker.skipped_destructive,
+        tracker.navigations, tracker.infinite_scroll_stopped,
+        tracker.redirect_loop_stopped,
+    )
+    return tracker
+
+
 # ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 def _parse_cookie_string(cookie_str: str, domain: str) -> List[dict]:
@@ -579,6 +924,7 @@ class HeadlessEngine:
     - Resource blocking
     - Priority queue
     - Authenticated scanning with cookie injection + session verification
+    - Extended interaction engine with pagination, lazy-load, hash nav, infinite-scroll protection
     """
 
     def __init__(
@@ -695,8 +1041,8 @@ class HeadlessEngine:
             pass
 
     def _is_destructive(self, text: str) -> bool:
-        lower = (text or "").lower().strip()
-        return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
+        # Use the enhanced regex-based check
+        return _check_destructive(text)
 
     def _extract_routes(self, page) -> Set[str]:
         try:
@@ -725,6 +1071,14 @@ class HeadlessEngine:
         try:
             r = page.evaluate("window.__bundlespy_workers || []")
             return [x["url"] for x in r if isinstance(x, dict) and "url" in x]
+        except Exception:
+            return []
+
+    def _extract_extra_events(self, page) -> List[dict]:
+        """Extract EventSource, sendBeacon, history, and dynamic import events."""
+        try:
+            r = page.evaluate("window.__bs_extra_events || []")
+            return r if isinstance(r, list) else []
         except Exception:
             return []
 
@@ -837,6 +1191,13 @@ class HeadlessEngine:
         except Exception:
             pass
 
+        # Phase 5: Advanced interactions (pagination, lazy-load, hash nav)
+        try:
+            seen_states: Set[str] = set()
+            _interact_advanced(page, seen_states, max_interactions=30)
+        except Exception:
+            pass
+
     def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
         """
         Safe read-only form observation.
@@ -918,6 +1279,33 @@ class HeadlessEngine:
             worker_urls = self._extract_worker_urls(page)
             iframe_urls = self._extract_iframe_urls(page)
 
+            # Also capture extra events (EventSource, sendBeacon, history, dynamic imports)
+            extra_events = self._extract_extra_events(page)
+            for ev in extra_events:
+                ev_url = ev.get("url", "")
+                ev_type = ev.get("type", "")
+                if ev_url and ev_type in ("eventsource", "beacon"):
+                    safe_ev, _ = validate_url(ev_url)
+                    if safe_ev and self.scope.in_scope(ev_url):
+                        with self._lock:
+                            self.api_calls.append({
+                                "url": ev_url,
+                                "method": "GET" if ev_type == "eventsource" else "POST",
+                                "type": ev_type,
+                            })
+                elif ev_url and ev_type in ("history_push", "history_replace"):
+                    # Treat as a new route
+                    parsed_ev = urlparse(ev_url)
+                    if parsed_ev.path:
+                        new_routes.add(parsed_ev.path)
+                elif ev_url and ev_type == "dynamic_import":
+                    # Dynamic chunk — add as route if same-origin
+                    parsed_target = urlparse(self.target_url)
+                    parsed_ev = urlparse(ev_url)
+                    if not parsed_ev.netloc or parsed_ev.netloc == parsed_target.netloc:
+                        if parsed_ev.path:
+                            new_routes.add(parsed_ev.path)
+
             with self._lock:
                 self.api_calls.extend(api_calls)
                 self.ws_urls.extend(ws_urls)
@@ -975,7 +1363,12 @@ class HeadlessEngine:
                 continue
             seen.add(key)
             lower = url.lower()
-            if any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
+            call_type = call.get("type", "")
+            if call_type == "eventsource":
+                cat = "EVENTSOURCE"
+            elif call_type == "beacon":
+                cat = "BEACON"
+            elif any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
                 cat = "AUTH"
             elif any(k in lower for k in ["/admin", "/management"]):
                 cat = "ADMIN"
@@ -1146,6 +1539,24 @@ class HeadlessEngine:
             worker_urls = self._extract_worker_urls(page)
             iframe_urls = self._extract_iframe_urls(page)
 
+            # Extra events (EventSource, sendBeacon, history, dynamic imports)
+            extra_events = self._extract_extra_events(page)
+            for ev in extra_events:
+                ev_url = ev.get("url", "")
+                ev_type = ev.get("type", "")
+                if ev_url and ev_type in ("eventsource", "beacon"):
+                    safe_ev, _ = validate_url(ev_url)
+                    if safe_ev and self.scope.in_scope(ev_url):
+                        api_calls.append({
+                            "url": ev_url,
+                            "method": "GET" if ev_type == "eventsource" else "POST",
+                            "type": ev_type,
+                        })
+                elif ev_url and ev_type in ("history_push", "history_replace"):
+                    parsed_ev = urlparse(ev_url)
+                    if parsed_ev.path:
+                        new_routes.add(parsed_ev.path)
+
             with self._lock:
                 self.api_calls.extend(api_calls)
                 self.ws_urls.extend(ws_urls)
@@ -1169,6 +1580,7 @@ class HeadlessEngine:
                     window.__bundlespy_ws = [];
                     window.__bundlespy_workers = [];
                     window.__bundlespy_iframes = [];
+                    window.__bs_extra_events = [];
                     window.__bspy_mutations = 0;
                     window.__bspy_requests = 0;
                     window.__bspy_last_active = Date.now();
