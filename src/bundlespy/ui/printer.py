@@ -95,32 +95,28 @@ def _section(title: str, count: str = "", color: str = "") -> None:
 
 def phase(label: str) -> None:
     """Phase line - shows a running indicator."""
-    _p(f"  {A.CYAN}>{A.RESET}  {label}")
+    _p(f"  {A.CYAN}▶{A.RESET}  {label}")
 
 
 def phase_sub(label: str) -> None:
-    """
-    Sub-phase line - indented one level deeper than phase(), used for
-    live status updates within a running phase (e.g. crawl sub-steps).
-    Shows a dim bullet so it's clearly subordinate to the parent phase.
-    """
-    _p(f"       {A.GREY}*{A.RESET}  {A.GREY}{label}{A.RESET}")
+    """Sub-phase line - indented, subordinate to parent phase."""
+    _p(f"       {A.GREY}·{A.RESET}  {A.GREY}{label}{A.RESET}")
 
 
 def phase_done(label: str, detail: str = "") -> None:
     """Done line - shown when a phase completes successfully."""
     det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.B_GREEN}>{A.RESET}  {label}{det}")
+    _p(f"  {A.GREEN}✔{A.RESET}  {label}{det}")
 
 
 def phase_warn(label: str) -> None:
     """Warning line."""
-    _p(f"  {A.B_YELLOW}!{A.RESET}  {label}")
+    _p(f"  {A.YELLOW}⚠{A.RESET}  {label}")
 
 
 def phase_error(label: str) -> None:
     """Error line - written to stderr."""
-    print(f"  {A.BRIGHT_RED}X{A.RESET}  {label}", file=sys.stderr)
+    print(f"  {A.RED}✘{A.RESET}  {label}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -844,8 +840,6 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
         for r in validation_results:
             val_map[r.endpoint] = r
 
-    _section("ENDPOINTS", str(len(endpoints)), A.B_BLUE)
-
     cat_colors = {
         "AUTH":       A.B_BRIGHT_RED,
         "ADMIN":      A.ORANGE,
@@ -859,7 +853,22 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
     w  = _w()
     bc = A.B_BLUE
 
-    _p(bc + _box_top_s(w) + A.RESET)
+    # Titled box top: ┌─[ ENDPOINTS ]─────────── 4 ──┐
+    _p("")
+    count_str = str(len(endpoints))
+    label_part = "[ ENDPOINTS ]"
+    count_part = f" {count_str} "
+    prefix_len = 1 + 1 + len(label_part) + 1  # tl + h + label + h
+    suffix_len = len(count_part) + 1 + 1        # count + h + tr
+    fill_len   = w - 2 - prefix_len - suffix_len
+    fill       = S["h"] * max(0, fill_len)
+    titled_top = (
+        bc + S["tl"] + S["h"] + label_part + S["h"]
+        + fill
+        + A.RESET + A.DIM + count_part + bc
+        + S["h"] + S["tr"] + A.RESET
+    )
+    _p(titled_top)
 
     # Category count summary
     count_parts = []
