@@ -606,9 +606,10 @@ _DESTRUCTIVE_PATTERN = re.compile(
     r'delete|remove|destroy|purge|wipe'
     r'|unsubscribe|cancel\s+account|close\s+account'
     r'|purchase|buy|checkout|pay(?:\s+now)?|confirm\s+order|place\s+order'
-    r'|submit\s+payment|charge|debit'
+    r'|submit\s+payment|charge|debit|payment'
     r'|reset\s+password|change\s+password|change\s+email'
     r'|revoke|logout|sign\s+out'
+    r'|deletion|transfer|send\s+money|wire\s+transfer'
     r')\b',
     re.IGNORECASE
 )
