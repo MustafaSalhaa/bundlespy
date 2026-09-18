@@ -347,6 +347,9 @@ def run_scan(args) -> int:
     if not args.passive and not _skip_crawler:
         if not args.quiet:
             phase("Crawling target")
+            if args.common_paths:
+                from bundlespy.crawler.crawler import COMMON_PAGE_PATHS as _CPP
+                phase_sub(f"Probing {len(_CPP)} common paths")
         crawler = Crawler(
             target_url=target, fetcher=fetcher, scope=scope,
             max_depth=args.depth, max_pages=args.max_pages,
@@ -959,14 +962,15 @@ def run_scan(args) -> int:
 
     # PATCH: Wire up CLI flag state for SCAN STATUS and NEXT ACTION sections
     extras["_args_flags"] = {
-        "headless":     args.headless,
-        "source_maps":  args.source_maps,
-        "passive":      args.passive,
-        "has_cookie":   bool(args.cookie),
-        "validate":     args.validate,
-        "graphql":      args.graphql,
-        "chunks":       args.chunks,
-        "harvest_subs": getattr(args, "harvest_subs", False),
+        "headless":      args.headless,
+        "source_maps":   args.source_maps,
+        "passive":       args.passive,
+        "has_cookie":    bool(args.cookie),
+        "validate":      args.validate,
+        "graphql":       args.graphql,
+        "chunks":        args.chunks,
+        "harvest_subs":  getattr(args, "harvest_subs", False),
+        "common_paths":  getattr(args, "common_paths", False),
     }
 
     if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
