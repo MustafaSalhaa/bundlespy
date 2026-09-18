@@ -100,7 +100,7 @@ def phase_sub(label: str) -> None:
 
 def phase_done(label: str, detail: str = "") -> None:
     det = f"  {A.DIM}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.B_GREEN}+{A.RESET}  {label}{det}")
+    _p(f"  {A.BRIGHT_WHITE}+{A.RESET}  {label}{det}")
 
 
 def phase_warn(label: str) -> None:
@@ -304,12 +304,20 @@ def _print_attack_surface_tree(result, extras: dict) -> None:
     rc = A.RESET
 
     def _tree_items(eps: list, limit: int = 15) -> list:
-        """Return (path, method) pairs sorted, deduplicated."""
+        """Return (path, method) pairs sorted, deduplicated. Uses relative paths."""
         seen: dict = {}
         for ep in eps:
-            url = ep.url[:w - 12]
-            if url not in seen:
-                seen[url] = ep.method or ""
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(ep.url)
+                path   = parsed.path or ep.url
+                if parsed.query:
+                    path += "?" + parsed.query
+                path = path[:w - 12]
+            except Exception:
+                path = ep.url[:w - 12]
+            if path not in seen:
+                seen[path] = ep.method or ""
         return list(seen.items())[:limit]
 
     def _tree_group(title: str, items: list, color: str = "", extra_note: str = "") -> None:
@@ -339,21 +347,36 @@ def _print_attack_surface_tree(result, extras: dict) -> None:
         _p("")
 
     # ── Pages ─────────────────────────────────────────────────────────────────
-    # Pages come from crawler, not endpoints - show crawled pages
-    page_eps = by_cat.get("ROUTE", [])
-    crawled  = result.pages_crawled or 0
-    if page_eps:
-        items = _tree_items(page_eps)
-        _tree_group("Pages", items, A.BRIGHT_WHITE)
+    # Collect unique page paths from all endpoint categories
+    crawled = result.pages_crawled or 0
+    seen_pages: dict = {}
+    for ep in result.endpoints:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(ep.url)
+            path   = parsed.path or "/"
+            # Normalize: strip trailing slash unless root
+            path = path.rstrip("/") or "/"
+            if path not in seen_pages:
+                seen_pages[path] = ""
+        except Exception:
+            pass
+    # Always include root
+    if "/" not in seen_pages and crawled > 0:
+        seen_pages["/"] = ""
+    page_items = list(seen_pages.items())[:20]
+
+    _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
+    if page_items:
+        for i, (path, _) in enumerate(page_items):
+            is_last = (i == len(page_items) - 1)
+            prefix  = "└─" if is_last else "├─"
+            _p(f"  {A.DIM}{prefix}{rc} {path}")
     elif crawled > 0:
-        # No ROUTE endpoints but we did crawl - show root at minimum
-        _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
         _p(f"  {A.DIM}└─ /{rc}")
-        _p("")
     else:
-        _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
         _p(f"  {A.DIM}└─ NOT RUN{rc}")
-        _p("")
+    _p("")
 
     # ── Admin ─────────────────────────────────────────────────────────────────
     admin_eps = by_cat.get("ADMIN", [])
@@ -675,7 +698,7 @@ def _print_discovery(result, extras: dict) -> None:
     _p(f"  {_label('Secrets')}{sec_c}{len(secrets)} detected{A.RESET}")
     if secrets:
         hc_c = A.B_BRIGHT_RED if high_conf else A.DIM
-        _p(f"  {_label('High confidence')}{hc_c}{high_conf}{A.RESET}")
+        _p(f"  {_label('High confidence', 16)}{hc_c}{high_conf}{A.RESET}")
         val_c = A.B_BRIGHT_RED if validated else A.DIM
         _p(f"  {_label('Validated')}{val_c}{validated}{A.RESET}")
     if pub_ids:
@@ -1192,7 +1215,7 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
             pct = min(1.0, current / total)
         filled = int(pct * bar_w)
         empty  = bar_w - filled
-        c = color or (A.B_GREEN if pct >= 1.0 else A.B_YELLOW)
+        c = color or (A.BRIGHT_WHITE if pct >= 1.0 else A.B_YELLOW)
         return (c + "█" * filled + rc + A.DIM + "░" * empty + rc)
 
     # Progress bars
@@ -1212,9 +1235,9 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
         if rt.websockets:   parts.append(f"ws: {rt.websockets}")
         if rt.workers:      parts.append(f"workers: {rt.workers}")
         if rt.iframes:      parts.append(f"iframes: {rt.iframes}")
-        _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.B_GREEN}COMPLETE{rc}  {A.DIM}{', '.join(parts)}{rc}")
+        _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.BRIGHT_WHITE}COMPLETE{rc}  {A.DIM}{', '.join(parts)}{rc}")
     elif headless_was_run:
-        _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.B_GREEN}RUN{rc}  {A.DIM}no dynamic endpoints captured{rc}")
+        _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.BRIGHT_WHITE}RUN{rc}  {A.DIM}no dynamic endpoints captured{rc}")
     else:
         _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.DIM}NOT RUN{rc}")
 
@@ -1224,7 +1247,7 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
     # N recovered = maps found and recovered
     sm_was_run = args_flags.get("source_maps", False)
     if sm.discovered > 0:
-        sm_color = A.B_GREEN if sm.recovered > 0 else A.B_YELLOW
+        sm_color = A.BRIGHT_WHITE if sm.recovered > 0 else A.B_YELLOW
         _p(f"  {A.DIM}{'Source Maps':<14}{rc}{sm_color}{sm.recovered} recovered{rc}  {A.DIM}of {sm.discovered} found{rc}")
     elif sm_was_run:
         # Ran but found nothing
@@ -1238,7 +1261,7 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
                        for bs in (coverage.blind_spots or []))
     has_cookie = args_flags.get("has_cookie", False)
     if has_cookie and not auth_missing:
-        _p(f"  {A.DIM}{'Auth':<14}{rc}{A.B_GREEN}PROVIDED{rc}")
+        _p(f"  {A.DIM}{'Auth':<14}{rc}{A.BRIGHT_WHITE}PROVIDED{rc}")
     else:
         _p(f"  {A.DIM}{'Auth':<14}{rc}{A.B_YELLOW}NOT PROVIDED{rc}")
 
@@ -1347,7 +1370,7 @@ def print_summary(result, extras=None, report_paths=None) -> None:
 
     # RESULT header right-aligned duration
     dur_str      = duration or ""
-    result_label = A.B_GREEN + "RESULT" + rc
+    result_label = A.BOLD + A.BRIGHT_WHITE + "RESULT" + rc
     dur_right    = A.DIM + dur_str + rc if dur_str else ""
     gap_len      = max(1, w - 2 - len("RESULT") - len(dur_str))
     _p(f"  {result_label}{' ' * gap_len}{dur_right}")
@@ -1405,7 +1428,7 @@ def print_summary(result, extras=None, report_paths=None) -> None:
     elif counts.get("MEDIUM"):
         _p(f"  {A.B_YELLOW}Medium severity findings present.{rc}")
     else:
-        _p(f"  {A.B_GREEN}Scan complete. No critical findings.{rc}")
+        _p(f"  {A.DIM}Scan complete. No critical findings.{rc}")
 
     _rule()
     _p("")
@@ -1462,7 +1485,7 @@ def print_report(
     _print_attack_surface_tree(result, extras)
 
     # SECURITY FINDINGS (HIGH/MEDIUM/LOW/CRITICAL) + INFORMATION (INFO)
-    print_findings(result.findings, verbose=verbose, show_full_secret=show_sensitive)
+    print_findings(result.findings, verbose=verbose, show_full_secret=False)
 
     # DISCOVERY - consolidated JS + secrets + libraries
     _print_discovery(result, extras)
