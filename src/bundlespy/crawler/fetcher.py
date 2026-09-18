@@ -157,10 +157,10 @@ from typing import Dict, List, Optional as _Optional, Tuple as _Tuple
 try:
     import aiohttp
     import aiohttp.connector
-except ImportError as _aiohttp_err:
-    raise ImportError(
-        "aiohttp is required for AsyncFetcher. Install it with: pip install aiohttp"
-    ) from _aiohttp_err
+    _AIOHTTP_AVAILABLE = True
+except ImportError:
+    aiohttp = None  # type: ignore[assignment]
+    _AIOHTTP_AVAILABLE = False
 
 try:
     import chardet as _chardet
@@ -231,6 +231,10 @@ class AsyncFetcher:
         self.extra_headers = extra_headers or {}
         self.ssl_verify = ssl_verify
 
+        if not _AIOHTTP_AVAILABLE:
+            raise ImportError(
+                "aiohttp is required for AsyncFetcher. Install it with: pip install aiohttp"
+            )
         self._semaphore: _Optional[asyncio.Semaphore] = None
         self._session: _Optional[aiohttp.ClientSession] = None
         self._last_request: float = 0.0
