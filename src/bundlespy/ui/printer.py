@@ -1215,7 +1215,7 @@ def print_coverage(coverage, args_flags: dict = None) -> None:
             pct = min(1.0, current / total)
         filled = int(pct * bar_w)
         empty  = bar_w - filled
-        c = color or (A.BRIGHT_WHITE if pct >= 1.0 else A.B_YELLOW)
+        c = color or (A.B_CYAN if pct >= 1.0 else A.B_YELLOW)
         return (c + "█" * filled + rc + A.DIM + "░" * empty + rc)
 
     # Progress bars
