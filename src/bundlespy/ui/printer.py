@@ -217,6 +217,7 @@ def _print_scan_status(result, args_flags: dict) -> None:
         ("Target initialization",   True),
         ("Page discovery",           True),
         ("JavaScript inventory",     True),
+        ("Common path probing",      args_flags.get("common_paths", False)),
         ("Static analysis",          True),
         ("Secret analysis",          True),
         ("Endpoint extraction",      True),
@@ -1270,6 +1271,10 @@ def _print_next_action(target: str, extras: dict) -> None:
 
     missing = []
     flags   = []
+
+    if not args_flags.get("common_paths"):
+        missing.append("common path probing")
+        flags.append("--common-paths")
 
     if not args_flags.get("headless"):
         missing.append("runtime discovery")
