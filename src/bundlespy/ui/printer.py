@@ -755,17 +755,13 @@ def print_js_inventory(js_files, verbose: bool = False, per_file_stats=None) -> 
         n_sec = st["secrets"]   if st else 0
         n_ep  = st["endpoints"] if st else 0
 
-        heat  = min(4, n_sec * 2 + (1 if n_ep > 10 else 0))
-        hot   = A.B_BRIGHT_RED + "█" * heat + A.RESET
-        cold  = A.DIM + "░" * (4 - heat) + A.RESET
-
         fname    = _display[:path_w].ljust(path_w + 1)
         sec_c    = A.B_BRIGHT_RED if n_sec > 0 else A.DIM
         ep_c     = A.B_CYAN       if n_ep  > 0 else A.DIM
         stats_s  = f"  {sec_c}s:{n_sec}{A.RESET}  {ep_c}ep:{n_ep}{A.RESET}" if st else f"  {A.DIM}--{A.RESET}"
         smap     = f" {A.B_YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
         size_str = A.DIM + f"{size:>7}" + A.RESET
-        _p(f"  {A.DIM}-{A.RESET} {fname}{tag}{smap}  {size_str}  {hot}{cold}{stats_s}")
+        _p(f"  {A.DIM}-{A.RESET} {fname}{tag}{smap}  {size_str}{stats_s}")
 
     if html_entries:
         _p("")
