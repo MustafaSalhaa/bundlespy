@@ -33,6 +33,7 @@ BundleSpy crawls a target web application, collects JavaScript files, and extrac
 | Live traffic | XHR, fetch, WebSocket calls intercepted from real browser session |
 
 > 📸 **[SCREENSHOT: Run `bundlespy scan https://example.com` and capture the full terminal output - banner, discovery phase, findings list, and summary. Dark terminal background.]**
+<img width="1263" height="971" alt="Demo sc" src="https://github.com/user-attachments/assets/af12e926-2c76-4dc6-ab1f-83725f6b0bcd" />
 
 ---
 
