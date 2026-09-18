@@ -89,10 +89,10 @@ def _section(title: str, count: str = "", color: str = "") -> None:
     label     = A.BOLD + A.BRIGHT_WHITE + title + A.RESET
     label_vis = len(title)
     count_vis = len(count) if count else 0
-    # 2sp indent + label + gap + count
     gap_len   = max(1, w - 2 - label_vis - count_vis)
     gap       = " " * gap_len
     cnt       = (A.DIM + count + A.RESET) if count else ""
+    _p("")
     _p(f"  {label}{gap}{cnt}")
     _p()
 
