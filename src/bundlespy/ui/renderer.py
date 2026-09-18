@@ -5,6 +5,7 @@ Exports: term_width, divider, section, kv, truncate, truncate_url,
          severity_badge, redact, bullet, indent_block, two_col_table,
          count_table, severity_table, progress_bar
 """
+from __future__ import annotations
 
 import os
 import shutil
@@ -19,7 +20,7 @@ from .theme import A, USE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_DOT_CO
 def term_width() -> int:
     """Return current terminal width, clamped to a sane range."""
     try:
-        return max(60, min(shutil.get_terminal_size((100, 24)).columns, 220))
+        return max(60, min(shutil.get_terminal_size((80, 24)).columns, 110))
     except Exception:
         return 100
 
