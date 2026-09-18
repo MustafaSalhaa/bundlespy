@@ -125,13 +125,12 @@ def print_header(
     """
     Compact professional header.
 
-    BundleSpy 1.0.0
-    JavaScript Attack Surface Intelligence
-    ────────────────────────────────────────────
+    BundleSpy 1.0.0  JavaScript Attack Surface Intelligence
+    --------------------------------------------------------
 
     TARGET
-    https://example.com
-    Active - Strict - 2026-09-18 08:10 UTC
+      https://example.com
+      Active - Strict - 2026-09-18 08:10 UTC
     """
     ts  = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     w   = _w()
@@ -201,14 +200,18 @@ def print_auth_result(auth: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scan status (PARTIAL / COMPLETE / FAILED)
+# Scan status with risk summary (immediately after target)
 # ---------------------------------------------------------------------------
 
-def _print_scan_status(args_flags: dict) -> None:
+def _print_scan_status(result, args_flags: dict) -> None:
     """
-    Print a SCAN STATUS block near the top showing what was and was not run.
-    args_flags: dict with boolean keys: headless, source_maps, passive,
-                has_cookie, validate, graphql, chunks, harvest_subs
+    SCAN STATUS block: pipeline completion + risk summary inline.
+
+    SCAN STATUS
+      PARTIAL - 7/9 stages completed
+
+      HIGH 2 - MEDIUM 1 - INFO 1
+      2 pages - 5 JS assets - 4 endpoints
     """
     stages = [
         ("Target initialization",   True),
@@ -224,92 +227,71 @@ def _print_scan_status(args_flags: dict) -> None:
         ("Endpoint validation",      args_flags.get("validate", False)),
         ("GraphQL introspection",    args_flags.get("graphql", False)),
     ]
-    done    = sum(1 for _, ran in stages if ran)
-    total   = len(stages)
+    done  = sum(1 for _, ran in stages if ran)
+    total = len(stages)
 
     if done == total:
         status_color = A.B_GREEN
         status_label = "COMPLETE"
-    elif done >= total - 3:
-        status_color = A.B_YELLOW
-        status_label = "PARTIAL"
     else:
-        status_color = A.ORANGE
+        status_color = A.B_YELLOW
         status_label = "PARTIAL"
 
     _section("SCAN STATUS")
-    _p(f"  {status_color}{status_label}{A.RESET}  {A.DIM}{done}/{total} discovery stages completed{A.RESET}")
-    _p("")
+    _p(f"  {status_color}{status_label}{A.RESET}  {A.DIM}{done}/{total} stages completed{A.RESET}")
 
-    for name, ran in stages:
-        if ran:
-            _p(f"  {A.B_GREEN}+{A.RESET}  {name}")
-        else:
-            _p(f"  {A.DIM}-  {name}  SKIPPED{A.RESET}")
-    _p("")
+    # Risk summary inline
+    if result is not None:
+        real = [f for f in result.findings if f.status != "likely_false_positive"]
+        counts: dict = {}
+        for f in real:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
 
+        order  = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        parts  = []
+        for sev in order:
+            n = counts.get(sev, 0)
+            if n:
+                c = SEV_COLOR.get(sev, A.DIM)
+                parts.append(f"{c}{sev} {n}{A.RESET}")
 
-# ---------------------------------------------------------------------------
-# Overview panel
-# ---------------------------------------------------------------------------
+        if parts:
+            _p("")
+            _p("  " + "  -  ".join(parts))
 
-def _print_overview(result, extras: dict) -> None:
-    """Compact high-level numbers."""
-    real_findings = [f for f in result.findings if f.status != "likely_false_positive"]
-    counts: dict  = {}
-    for f in real_findings:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
+        js_count = len([j for j in result.js_files if not j.url.startswith("sourcemap://")])
+        _p(f"  {A.DIM}{result.pages_crawled} pages - {js_count} JS assets - {len(result.endpoints)} endpoints{A.RESET}")
 
-    js_count   = len([j for j in result.js_files if not j.url.startswith("sourcemap://")])
-    ep_count   = len(result.endpoints)
-    infra_count = len(result.infrastructure)
-    lib_count  = len(extras.get("lib_findings", []))
-
-    _section("OVERVIEW")
-
-    w = _w()
-    col = (w - 4) // 5
-    row_vals = [
-        ("PAGES",     str(result.pages_crawled)),
-        ("JS",        str(js_count)),
-        ("ENDPOINTS", str(ep_count)),
-        ("FINDINGS",  str(len(real_findings))),
-        ("INFRA",     str(infra_count)),
-    ]
-    labels_line = ""
-    values_line = ""
-    for lbl, val in row_vals:
-        labels_line += A.DIM + lbl.ljust(col) + A.RESET
-        values_line += A.BRIGHT_WHITE + A.BOLD + val.ljust(col) + A.RESET
-    _p(f"  {labels_line}")
-    _p(f"  {values_line}")
-
-    if lib_count:
-        _p(f"\n  {A.DIM}Vulnerable libraries:{A.RESET}  {A.B_BRIGHT_RED}{lib_count}{A.RESET}")
-
-    # Severity summary
-    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    sev_parts = []
-    for sev in order:
-        n = counts.get(sev, 0)
-        if n:
-            c = SEV_COLOR.get(sev, A.DIM)
-            sev_parts.append(f"{c}{sev} {n}{A.RESET}")
-    if sev_parts:
-        _p("")
-        _p("  " + "  -  ".join(sev_parts))
     _p("")
 
 
 # ---------------------------------------------------------------------------
-# Attack surface (tree view)
+# Attack surface (tree view) - shown before findings
 # ---------------------------------------------------------------------------
 
 def _print_attack_surface_tree(result, extras: dict) -> None:
     """
-    Print an attack-surface tree view grouped by category.
-    Shows what was actually found - never fabricates data.
-    For capabilities not run, shows NOT RUN.
+    ATTACK SURFACE tree view, grouped by category.
+    Shows what was found - never fabricates. Marks NOT RUN capabilities.
+
+    ATTACK SURFACE
+
+      Pages
+      +-- /
+      +-- /admin
+
+      API
+      +-- GET /stock-toggle
+
+      Serverless
+      +-- GET /.netlify/functions/stock
+      +-- GET /.netlify/functions/create-checkout
+
+      Client Routes
+      +-- 1 discovered
+
+      Runtime APIs
+      +-- NOT RUN
     """
     _section("ATTACK SURFACE")
 
@@ -319,173 +301,268 @@ def _print_attack_surface_tree(result, extras: dict) -> None:
 
     args_flags = extras.get("_args_flags", {})
     w = _w()
+    rc = A.RESET
 
-    def _tree_group(title: str, eps: list, color: str = "") -> None:
+    def _tree_items(eps: list, limit: int = 15) -> list:
+        """Return (path, method) pairs sorted, deduplicated."""
+        seen: dict = {}
+        for ep in eps:
+            url = ep.url[:w - 12]
+            if url not in seen:
+                seen[url] = ep.method or ""
+        return list(seen.items())[:limit]
+
+    def _tree_group(title: str, items: list, color: str = "", extra_note: str = "") -> None:
         c = color or A.BRIGHT_WHITE
-        _p(f"  {c}{title}{A.RESET}")
-        paths = sorted(set(ep.url[:w - 10] for ep in eps))
-        for i, path in enumerate(paths[:12]):
-            prefix = "└─" if i == len(paths) - 1 or i == 11 else "├─"
-            method = ""
-            # Find method for this URL
-            for ep in eps:
-                if ep.url.startswith(path):
-                    if ep.method and ep.method not in ("GET", "?", "UNKNOWN", ""):
-                        method = f"  {A.DIM}{ep.method}{A.RESET}"
-                    break
-            _p(f"  {A.DIM}{prefix}{A.RESET} {path}{method}")
-        if len(paths) > 12:
-            _p(f"  {A.DIM}   ... and {len(paths) - 12} more{A.RESET}")
+        _p(f"  {c}{title}{rc}")
+        for i, (path, method) in enumerate(items):
+            is_last = (i == len(items) - 1)
+            prefix  = "└─" if is_last else "├─"
+            meth    = ""
+            if method and method not in ("GET", "?", "UNKNOWN", ""):
+                meth = f" {A.DIM}{method}{rc}"
+            elif method == "GET":
+                meth = f" {A.DIM}GET{rc}"
+            _p(f"  {A.DIM}{prefix}{rc} {path}{meth}")
+        if extra_note:
+            _p(f"  {A.DIM}└─ {extra_note}{rc}")
         _p("")
 
-    # Pages (from crawler - always run unless passive)
-    pages_cat = by_cat.get("ROUTE", []) + by_cat.get("ADMIN", []) + by_cat.get("AUTH", [])
-    if pages_cat:
-        _tree_group("Pages", pages_cat, A.BRIGHT_WHITE)
+    def _tree_not_run(title: str) -> None:
+        _p(f"  {A.BRIGHT_WHITE}{title}{rc}")
+        _p(f"  {A.DIM}└─ NOT RUN{rc}")
+        _p("")
+
+    def _tree_count(title: str, n: int, label: str = "discovered") -> None:
+        _p(f"  {A.BRIGHT_WHITE}{title}{rc}")
+        _p(f"  {A.DIM}└─ {n} {label}{rc}")
+        _p("")
+
+    # ── Pages ─────────────────────────────────────────────────────────────────
+    # Pages come from crawler, not endpoints - show crawled pages
+    page_eps = by_cat.get("ROUTE", [])
+    crawled  = result.pages_crawled or 0
+    if page_eps:
+        items = _tree_items(page_eps)
+        _tree_group("Pages", items, A.BRIGHT_WHITE)
+    elif crawled > 0:
+        # No ROUTE endpoints but we did crawl - show root at minimum
+        _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
+        _p(f"  {A.DIM}└─ /{rc}")
+        _p("")
     else:
-        _p(f"  {A.BRIGHT_WHITE}Pages{A.RESET}")
-        _p(f"  {A.DIM}└─ /{A.RESET}")
+        _p(f"  {A.BRIGHT_WHITE}Pages{rc}")
+        _p(f"  {A.DIM}└─ NOT RUN{rc}")
         _p("")
 
-    # API
-    api_eps = by_cat.get("API", [])
-    if api_eps:
-        _tree_group("API", api_eps, A.B_BLUE)
-
-    # Serverless
-    serverless = by_cat.get("SERVERLESS", [])
-    if serverless:
-        _tree_group("Serverless", serverless, A.B_CYAN)
-
-    # Auth
-    auth_eps = by_cat.get("AUTH", [])
-    if auth_eps:
-        _tree_group("Authentication", auth_eps, A.B_BRIGHT_RED)
-
-    # Admin
+    # ── Admin ─────────────────────────────────────────────────────────────────
     admin_eps = by_cat.get("ADMIN", [])
     if admin_eps:
-        _tree_group("Admin", admin_eps, A.ORANGE)
+        items = _tree_items(admin_eps)
+        _tree_group("Admin", items, A.ORANGE)
 
-    # GraphQL
+    # ── API ───────────────────────────────────────────────────────────────────
+    api_eps = by_cat.get("API", [])
+    if api_eps:
+        items = _tree_items(api_eps)
+        _tree_group("API", items, A.B_BLUE)
+
+    # ── Serverless ────────────────────────────────────────────────────────────
+    serverless = by_cat.get("SERVERLESS", [])
+    if serverless:
+        items = _tree_items(serverless)
+        _tree_group("Serverless", items, A.B_CYAN)
+
+    # ── Auth endpoints ────────────────────────────────────────────────────────
+    auth_eps = by_cat.get("AUTH", [])
+    if auth_eps:
+        items = _tree_items(auth_eps)
+        _tree_group("Authentication", items, A.B_BRIGHT_RED)
+
+    # ── Client Routes ─────────────────────────────────────────────────────────
+    # From JS router analysis
+    coverage    = extras.get("coverage")
+    route_stats = getattr(coverage, "routes", None) if coverage else None
+    if route_stats and route_stats.discovered > 0:
+        _tree_count("Client Routes", route_stats.discovered)
+    elif args_flags.get("headless"):
+        headless_routes = extras.get("headless_stats", {}).get("routes", 0)
+        _tree_count("Client Routes", headless_routes)
+
+    # ── GraphQL ───────────────────────────────────────────────────────────────
     gql_eps = by_cat.get("GRAPHQL", [])
     if gql_eps:
-        _tree_group("GraphQL", gql_eps, A.BRIGHT_MAGENTA)
-    elif args_flags.get("graphql"):
-        _p(f"  {A.BRIGHT_WHITE}GraphQL{A.RESET}")
-        _p(f"  {A.DIM}└─ Not detected{A.RESET}")
-        _p("")
+        items = _tree_items(gql_eps)
+        _tree_group("GraphQL", items, A.BRIGHT_MAGENTA)
 
-    # WebSockets
-    ws_eps = by_cat.get("WEBSOCKET", [])
-    if ws_eps:
-        _tree_group("WebSockets", ws_eps, A.B_CYAN)
-    elif args_flags.get("headless"):
-        ws_count = extras.get("headless_stats", {}).get("ws", 0)
-        _p(f"  {A.BRIGHT_WHITE}WebSockets{A.RESET}")
-        _p(f"  {A.DIM}└─ {ws_count} detected{A.RESET}")
+    # ── Runtime APIs (XHR/Fetch) - only meaningful if headless ran ─────────────
+    if args_flags.get("headless"):
+        xhr   = extras.get("headless_stats", {}).get("xhr", 0)
+        fetch = extras.get("headless_stats", {}).get("fetch", 0)
+        total = xhr + fetch
+        _p(f"  {A.BRIGHT_WHITE}Runtime APIs{rc}")
+        _p(f"  {A.DIM}└─ {total} intercepted{rc}")
         _p("")
     else:
-        _p(f"  {A.BRIGHT_WHITE}WebSockets{A.RESET}")
-        _p(f"  {A.DIM}└─ NOT RUN{A.RESET}")
-        _p("")
+        _tree_not_run("Runtime APIs")
 
-    # XHR/Fetch (from headless)
-    if args_flags.get("headless"):
-        xhr = extras.get("headless_stats", {}).get("xhr", 0)
-        fetch = extras.get("headless_stats", {}).get("fetch", 0)
-        _p(f"  {A.BRIGHT_WHITE}XHR / Fetch{A.RESET}")
-        _p(f"  {A.DIM}└─ {xhr + fetch} intercepted{A.RESET}")
-        _p("")
+    # ── WebSockets ────────────────────────────────────────────────────────────
+    ws_eps = by_cat.get("WEBSOCKET", [])
+    if ws_eps:
+        items = _tree_items(ws_eps)
+        _tree_group("WebSockets", items, A.B_CYAN)
+    elif args_flags.get("headless"):
+        ws_count = extras.get("headless_stats", {}).get("ws", 0)
+        if ws_count:
+            _tree_count("WebSockets", ws_count, "detected")
+        # If headless ran and found 0 WS, we just skip it - not clutter
 
 
 # ---------------------------------------------------------------------------
 # Security findings (redesigned per spec)
 # ---------------------------------------------------------------------------
 
+def _classification_label(f) -> str:
+    """Convert internal classification to human label."""
+    cls = getattr(f, "classification", "") or ""
+    mapping = {
+        "likely_secret":      "Likely secret",
+        "public_identifier":  "Public identifier",
+        "PUBLIC_IDENTIFIER":  "Public identifier",
+        "JWT":                "JWT",
+        "API_KEY":            "API key",
+        "PASSWORD":           "Password",
+        "TOKEN":              "Token",
+        "HASH":               "Hash",
+        "PRIVATE_KEY":        "Private key",
+        "CERTIFICATE":        "Certificate",
+        "CONNECTION_STRING":  "Connection string",
+    }
+    return mapping.get(cls, cls.replace("_", " ").lower().capitalize() if cls else "")
+
+
+def _validation_label(f) -> str:
+    status = (f.status or "").lower()
+    if status == "validated":
+        return A.B_BRIGHT_RED + "VALIDATED" + A.RESET
+    elif status == "validation_failed":
+        return A.DIM + "FAILED" + A.RESET
+    elif status == "likely_false_positive":
+        return A.DIM + "EXCLUDED" + A.RESET
+    else:
+        return A.DIM + "NOT VALIDATED" + A.RESET
+
+
+def _secret_redact(raw: str, show_full: bool = False) -> str:
+    """Show head (20) + ... + tail (12) by default. Full value only if show_full."""
+    if not raw:
+        return ""
+    if show_full:
+        return raw
+    if len(raw) > 40:
+        return raw[:20] + A.DIM + "..." + A.RESET + raw[-12:]
+    return raw
+
+
 def _print_finding_full(f, show_full_secret: bool = False) -> None:
     """
-    Full finding card with structured sections.
+    Structured finding card.
 
     HIGH  JWT Token in HTML Attribute
-    JWT_IN_ATTRIBUTE - confidence 88%
+          JWT_IN_ATTRIBUTE
 
-    LOCATION
-    https://example.com - HTML attribute - line 1892
+          Confidence   88%
+          Type         JWT
+          Validation   NOT VALIDATED
 
-    EVIDENCE
-    eyJhbGci...To7Vo
+          Location
+            https://example.com - line 1892
 
-    REMEDIATION
-    Generate authentication tokens server-side at runtime.
+          Evidence
+            eyJhbGci...To7Vo
+
+          Remediation
+            Generate authentication tokens server-side at runtime.
     """
-    sev    = f.severity.lower()
-    lbl_c  = SEV_COLOR.get(f.severity, A.WHITE)
-    dot_c  = SEVERITY_DOT_COLOR.get(sev, A.WHITE)
-    stat_c = STATUS_COLOR.get((f.status or "").lower(), A.WHITE)
-    w = _w()
-    rc = A.RESET
+    sev   = (f.severity or "INFO").upper()
+    lbl_c = SEV_COLOR.get(sev, A.WHITE)
+    dot_c = SEVERITY_DOT_COLOR.get(sev.lower(), A.WHITE)
+    w     = _w()
+    rc    = A.RESET
+    ind   = "        "   # 8-space indent for sub-fields
 
-    # Title line
-    lbl = SEVERITY_LABEL.get(sev, f.severity.upper()).strip()
-    _p(f"  {dot_c}┃{rc} {lbl_c}{A.BOLD}{lbl:<6}{rc}  {A.BRIGHT_WHITE}{f.title}{rc}")
+    # ── Title line ─────────────────────────────────────────────────────────
+    lbl = SEVERITY_LABEL.get(sev.lower(), sev).strip()
+    _p(f"  {dot_c}┃{rc} {lbl_c}{A.BOLD}{lbl:<6}{rc}  {A.BRIGHT_WHITE}{A.BOLD}{f.title}{rc}")
 
-    conf_pct = f"{f.confidence:.0%}"
-    rule_str = f.rule_id if f.rule_id else ""
-    sub_line = f"{A.DIM}{rule_str}{rc}"
-    if rule_str:
-        sub_line += f"  {A.DIM}-{rc}  {A.DIM}confidence {conf_pct}{rc}"
-    else:
-        sub_line = f"  {A.DIM}confidence {conf_pct}{rc}"
-    _p(f"  {A.DIM}│{rc} {sub_line}")
+    # ── Rule ID ────────────────────────────────────────────────────────────
+    if f.rule_id:
+        _p(f"  {A.DIM}│{rc}       {A.DIM}{f.rule_id}{rc}")
 
-    # Status badge
-    if f.status == "validated":
-        _p(f"  {A.DIM}│{rc} {A.B_BRIGHT_RED}CONFIRMED ACTIVE{rc}")
-    elif f.status:
-        _p(f"  {A.DIM}│{rc} {stat_c}{f.status}{rc}")
-
-    # LOCATION
+    # ── Classification / Confidence / Type / Validation ────────────────────
     _p(f"  {A.DIM}│{rc}")
-    _p(f"  {A.DIM}│{rc}  {A.DIM}LOCATION{rc}")
-    url  = f.file_url[:w - 14] if f.file_url else ""
-    occ  = getattr(f, "occurrences", None) or []
-    loc_parts = [url]
-    loc_parts.append(f"line {f.line_number}")
+    conf_pct = f"{f.confidence:.0%}" if f.confidence is not None else "?"
+    _p(f"  {A.DIM}│{rc}  {A.DIM}Confidence{rc}   {A.BRIGHT_WHITE}{conf_pct}{rc}")
+
+    cls_label = _classification_label(f)
+    if cls_label:
+        _p(f"  {A.DIM}│{rc}  {A.DIM}Type{rc}         {A.BRIGHT_WHITE}{cls_label}{rc}")
+
+    _p(f"  {A.DIM}│{rc}  {A.DIM}Validation{rc}   {_validation_label(f)}")
+
+    # ── Status badge (validated = highlight) ───────────────────────────────
+    if (f.status or "").lower() == "validated":
+        _p(f"  {A.DIM}│{rc}")
+        _p(f"  {A.DIM}│{rc}  {A.B_BRIGHT_RED}[!] CONFIRMED ACTIVE{rc}")
+
+    # ── Location ───────────────────────────────────────────────────────────
+    _p(f"  {A.DIM}│{rc}")
+    _p(f"  {A.DIM}│{rc}  {A.DIM}Location{rc}")
+    url      = (f.file_url or "")[:w - 14]
+    line_num = f.line_number
+    occ      = getattr(f, "occurrences", None) or []
+    loc      = url
+    if line_num:
+        loc += f"  -  line {line_num}"
     if occ and len(occ) > 1:
-        loc_parts.append(f"+{len(occ)-1} more")
-    _p(f"  {A.DIM}│{rc}  {A.BRIGHT_WHITE}{'  -  '.join(loc_parts)}{rc}")
+        loc += f"  +{len(occ)-1} more"
+    _p(f"  {A.DIM}│{rc}    {A.BRIGHT_WHITE}{loc}{rc}")
 
-    # EVIDENCE
-    _p(f"  {A.DIM}│{rc}")
-    _p(f"  {A.DIM}│{rc}  {A.DIM}EVIDENCE{rc}")
+    # ── Evidence ───────────────────────────────────────────────────────────
     raw = f.matched_value or ""
-    if show_full_secret:
-        ev = raw
-    else:
-        # Smart redaction: show head + tail
-        if len(raw) > 40:
-            ev = raw[:20] + A.DIM + "..." + A.RESET + raw[-12:]
-        else:
-            ev = raw
-    _p(f"  {A.DIM}│{rc}  {A.BRIGHT_WHITE}{ev}{rc}")
+    if raw:
+        _p(f"  {A.DIM}│{rc}")
+        _p(f"  {A.DIM}│{rc}  {A.DIM}Evidence{rc}")
+        ev = _secret_redact(raw, show_full=show_full_secret)
+        _p(f"  {A.DIM}│{rc}    {A.BRIGHT_WHITE}{ev}{rc}")
 
-    # REMEDIATION
+    # ── Remediation ────────────────────────────────────────────────────────
     if f.remediation:
         _p(f"  {A.DIM}│{rc}")
-        _p(f"  {A.DIM}│{rc}  {A.DIM}REMEDIATION{rc}")
-        max_w = w - 14
-        wrapped = textwrap.wrap(f.remediation[:200], max_w)
-        for line in wrapped[:3]:
-            _p(f"  {A.DIM}│{rc}  {A.DIM}{line}{rc}")
+        _p(f"  {A.DIM}│{rc}  {A.DIM}Remediation{rc}")
+        max_w   = w - 16
+        wrapped = textwrap.wrap(f.remediation[:300], max_w)
+        for line in wrapped[:4]:
+            _p(f"  {A.DIM}│{rc}    {A.DIM}{line}{rc}")
 
     _p("")
 
 
 def print_findings(findings, verbose: bool = False, show_full_secret: bool = False) -> None:
-    """Print all findings - separating security findings from discoveries."""
+    """
+    Print security findings, separating security from informational.
+
+    SECURITY FINDINGS shows HIGH/MEDIUM/LOW/CRITICAL.
+    INFORMATION shows INFO findings separately.
+    """
     real = [f for f in findings if f.status != "likely_false_positive"]
     fps  = [f for f in findings if f.status == "likely_false_positive"]
+
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+    # Split security vs informational
+    security_findings = [f for f in real if (f.severity or "INFO").upper() != "INFO"]
+    info_findings     = [f for f in real if (f.severity or "INFO").upper() == "INFO"]
 
     if not real and not fps:
         _section("SECURITY FINDINGS")
@@ -493,34 +570,48 @@ def print_findings(findings, verbose: bool = False, show_full_secret: bool = Fal
         _p("")
         return
 
-    counts: dict = {}
-    for f in real:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
+    # ── SECURITY FINDINGS ─────────────────────────────────────────────────
+    if security_findings:
+        counts: dict = {}
+        for f in security_findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
 
-    order   = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    fp_note = f"  {A.DIM}+{len(fps)} excluded{A.RESET}" if fps else ""
-    _section("SECURITY FINDINGS", f"{len(real)} confirmed{fp_note}", A.B_BRIGHT_RED)
+        fp_note = f"  {A.DIM}+{len(fps)} excluded{A.RESET}" if fps else ""
+        _section("SECURITY FINDINGS", f"{len(security_findings)} findings{fp_note}")
 
-    # Severity tally
-    sev_parts = []
-    for sev in order:
-        if counts.get(sev):
-            c = SEV_COLOR.get(sev, "")
-            sev_parts.append(f"{c}{sev}  {A.BRIGHT_WHITE}{counts[sev]}{A.RESET}")
-    if sev_parts:
-        _p("  " + "   ".join(sev_parts))
+        sev_parts = []
+        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+            if counts.get(sev):
+                c = SEV_COLOR.get(sev, "")
+                sev_parts.append(f"{c}{sev}  {A.BRIGHT_WHITE}{counts[sev]}{A.RESET}")
+        if sev_parts:
+            _p("  " + "   ".join(sev_parts))
+            _p("")
+
+        sorted_findings = sorted(
+            security_findings,
+            key=lambda x: order.index(x.severity) if x.severity in order else 99
+        )
+        for f in sorted_findings:
+            _print_finding_full(f, show_full_secret=show_full_secret)
+
+    elif fps:
+        _section("SECURITY FINDINGS")
+        _p(f"  {A.DIM}No security findings above threshold.{A.RESET}")
+        _p(f"  {A.DIM}+{len(fps)} excluded as likely false positive.{A.RESET}")
+        _p("")
+    else:
+        _section("SECURITY FINDINGS")
+        _p(f"  {A.DIM}No security findings detected.{A.RESET}")
         _p("")
 
-    for f in sorted(real, key=lambda x: order.index(x.severity) if x.severity in order else 99):
-        _print_finding_full(f, show_full_secret=show_full_secret)
-
-    if fps and verbose:
-        _p(f"  {A.DIM}{'─' * 40}{A.RESET}")
-        _p(f"  {A.DIM}Likely false positives ({len(fps)}){A.RESET}")
-        for f in fps[:10]:
-            fname = f.file_url.split("/")[-1] if "/" in f.file_url else f.file_url
-            _p(f"  {A.DIM}  - {f.title}  {fname}:{f.line_number}{A.RESET}")
-    _p("")
+    # ── INFORMATION ───────────────────────────────────────────────────────
+    if info_findings:
+        _section("INFORMATION")
+        _p(f"  {A.DIM}{len(info_findings)} informational finding{'s' if len(info_findings) != 1 else ''}{A.RESET}")
+        _p("")
+        for f in info_findings:
+            _print_finding_full(f, show_full_secret=show_full_secret)
 
 
 def _print_finding(f, verbose: bool = False) -> None:
@@ -529,49 +620,99 @@ def _print_finding(f, verbose: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Discovery section (JS assets, compact)
+# Discovery section - consolidated JS + secrets + libraries
+# ---------------------------------------------------------------------------
+
+def _print_discovery(result, extras: dict) -> None:
+    """
+    DISCOVERY - consolidated summary of what was found.
+
+    DISCOVERY
+
+      JavaScript       5 analyzed
+      Inline           5
+      External         0
+      Total size       12 KB
+
+      Secrets          3 detected
+      High confidence  2
+      Validated        0
+      Public IDs       1
+
+      Libraries        0 known vulnerable
+    """
+    _section("DISCOVERY")
+
+    js_files = result.js_files or []
+    inline_count   = sum(1 for j in js_files if j.url.startswith("inline:") or j.url.startswith("html:"))
+    recovered      = sum(1 for j in js_files if j.url.startswith("sourcemap://"))
+    external       = len(js_files) - inline_count - recovered
+    total_size     = sum(j.size_bytes for j in js_files if j.size_bytes)
+    size_kb        = f"{total_size / 1024:.0f} KB" if total_size else "0 KB"
+
+    _p(f"  {_label('JavaScript')}{len(js_files)} analyzed")
+    _p(f"  {_label('Inline')}{inline_count}")
+    _p(f"  {_label('External')}{external}")
+    if recovered:
+        _p(f"  {_label('Recovered')}{recovered}")
+    _p(f"  {_label('Total size')}{size_kb}")
+    _p("")
+
+    # Secrets summary
+    findings = result.findings or []
+
+    def _is_public_id(f):
+        return (getattr(f, "classification", "") == "PUBLIC_IDENTIFIER"
+                or f.rule_id in ("NETLIFY_SITE_ID",))
+
+    real_findings = [f for f in findings if f.status != "likely_false_positive"]
+    secrets       = [f for f in real_findings if not _is_public_id(f)]
+    pub_ids       = [f for f in real_findings if _is_public_id(f)]
+    high_conf     = sum(1 for f in secrets if f.confidence is not None and f.confidence >= 0.85)
+    validated     = sum(1 for f in secrets if f.status == "validated")
+
+    sec_c = A.B_BRIGHT_RED if secrets else A.DIM
+    _p(f"  {_label('Secrets')}{sec_c}{len(secrets)} detected{A.RESET}")
+    if secrets:
+        hc_c = A.B_BRIGHT_RED if high_conf else A.DIM
+        _p(f"  {_label('High confidence')}{hc_c}{high_conf}{A.RESET}")
+        val_c = A.B_BRIGHT_RED if validated else A.DIM
+        _p(f"  {_label('Validated')}{val_c}{validated}{A.RESET}")
+    if pub_ids:
+        _p(f"  {_label('Public IDs')}{A.DIM}{len(pub_ids)}{A.RESET}")
+    _p("")
+
+    # Libraries
+    lib_findings = extras.get("lib_findings", [])
+    if lib_findings:
+        lib_c = A.B_BRIGHT_RED
+        _p(f"  {_label('Libraries')}{lib_c}{len(lib_findings)} known vulnerable{A.RESET}")
+    else:
+        _p(f"  {_label('Libraries')}{A.DIM}0 known vulnerable{A.RESET}")
+    _p("")
+
+
+# ---------------------------------------------------------------------------
+# JS inventory (verbose) - kept for verbose mode
 # ---------------------------------------------------------------------------
 
 def print_js_inventory(js_files, verbose: bool = False, per_file_stats=None) -> None:
-    """Compact asset summary - full list only in verbose mode."""
-    if not js_files:
+    """In normal mode: handled by _print_discovery. Verbose mode: full table."""
+    if not js_files or not verbose:
         return
 
-    headless_count  = sum(1 for j in js_files if "headless-captured" in (j.technology or ""))
-    inline_count    = sum(1 for j in js_files if j.url.startswith("inline:") or j.url.startswith("html:"))
-    recovered_count = sum(1 for j in js_files if j.url.startswith("sourcemap://"))
-    static_count    = len(js_files) - headless_count - inline_count - recovered_count
-    total_size      = sum(j.size_bytes for j in js_files if j.size_bytes)
-
-    _section("JAVASCRIPT ASSETS", str(len(js_files)))
-
-    # Compact summary row
-    rows = [
-        ("Analyzed",   str(len(js_files))),
-        ("Inline",     str(inline_count)),
-        ("Static",     str(static_count)),
-        ("Browser",    str(headless_count) if headless_count else None),
-        ("Recovered",  str(recovered_count) if recovered_count else None),
-        ("Total size", f"{total_size/1024:.0f} KB"),
-    ]
-    for lbl, val in rows:
-        if val is not None:
-            _p(f"  {_label(lbl)}{val}")
-    _p("")
-
-    if not verbose:
-        return
-
-    # Verbose: per-file table
     stats_map: dict = {}
     if per_file_stats:
         for s in per_file_stats:
             stats_map[s["url"]] = s
 
-    js_files_only = [j for j in js_files if not j.url.startswith("html:")]
-    html_entries  = [s for s in (per_file_stats or []) if s.get("technology") == "html-attrs"]
     w = _w()
     path_w = max(30, w - 52)
+
+    _section("JAVASCRIPT ASSETS (verbose)", str(len(js_files)))
+
+    js_files_only = [j for j in js_files if not j.url.startswith("html:")]
+    html_entries  = [s for s in (per_file_stats or []) if s.get("technology") == "html-attrs"]
 
     for js in js_files_only:
         size = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
@@ -599,13 +740,13 @@ def print_js_inventory(js_files, verbose: bool = False, per_file_stats=None) -> 
         if not _display or _display == "/":
             _display = url.rstrip("/").split("/")[-1] or url
 
-        st = stats_map.get(js.url)
+        st    = stats_map.get(js.url)
         n_sec = st["secrets"]   if st else 0
         n_ep  = st["endpoints"] if st else 0
 
-        heat = min(4, n_sec * 2 + (1 if n_ep > 10 else 0))
-        hot  = A.B_BRIGHT_RED + "█" * heat + A.RESET
-        cold = A.DIM + "░" * (4 - heat) + A.RESET
+        heat  = min(4, n_sec * 2 + (1 if n_ep > 10 else 0))
+        hot   = A.B_BRIGHT_RED + "█" * heat + A.RESET
+        cold  = A.DIM + "░" * (4 - heat) + A.RESET
 
         fname    = _display[:path_w].ljust(path_w + 1)
         sec_c    = A.B_BRIGHT_RED if n_sec > 0 else A.DIM
@@ -627,40 +768,12 @@ def print_js_inventory(js_files, verbose: bool = False, per_file_stats=None) -> 
 
 
 # ---------------------------------------------------------------------------
-# Secret analysis pill row
+# Secret analysis pill row (kept for backward compat, not used in new flow)
 # ---------------------------------------------------------------------------
 
 def print_secret_analysis(findings) -> None:
-    if not findings:
-        return
-
-    def _is_public_id(f):
-        return getattr(f, "classification", "") == "PUBLIC_IDENTIFIER" or f.rule_id in ("NETLIFY_SITE_ID",)
-
-    secrets   = [f for f in findings if not _is_public_id(f)]
-    pub_ids   = [f for f in findings if _is_public_id(f)]
-    total     = len(secrets)
-    high_conf = sum(1 for f in secrets if f.confidence >= 0.85 and f.status != "likely_false_positive")
-    validated = sum(1 for f in secrets if f.status == "validated")
-
-    _section("SECRET ANALYSIS")
-
-    def _pill(count, label, active_color=""):
-        lbr = A.DIM + "[" + A.RESET
-        rbr = A.DIM + "]" + A.RESET
-        c   = active_color if (active_color and count) else A.DIM
-        num = f"{c}{count}{A.RESET}"
-        txt = f"{A.DIM} {label}{A.RESET}"
-        return f"{lbr} {num}{txt} {rbr}"
-
-    pills = [
-        _pill(total,        "detected",        A.BRIGHT_WHITE),
-        _pill(high_conf,    "high confidence", A.B_BRIGHT_RED),
-        _pill(validated,    "validated",       A.B_BRIGHT_RED),
-        _pill(len(pub_ids), "public id",       A.DIM),
-    ]
-    _p("  " + "  ".join(pills))
-    _p("")
+    # Now handled inside _print_discovery - keeping this for backward compat
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -996,7 +1109,7 @@ def print_validation_results(results) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Attack surface analysis (existing function - kept for compat)
+# Attack surface analysis (parameter-level, existing feature)
 # ---------------------------------------------------------------------------
 
 def print_attack_surface(surface) -> None:
@@ -1052,13 +1165,14 @@ def print_attack_surface(surface) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Coverage (with progress bars, NOT RUN vs 0 distinction)
+# Coverage (progress bars, NOT RUN vs 0 vs NOT FOUND semantic precision)
 # ---------------------------------------------------------------------------
 
-def print_coverage(coverage) -> None:
+def print_coverage(coverage, args_flags: dict = None) -> None:
     if not coverage:
         return
 
+    args_flags = args_flags or {}
     _section("COVERAGE")
 
     p  = coverage.pages
@@ -1081,17 +1195,16 @@ def print_coverage(coverage) -> None:
         c = color or (A.B_GREEN if pct >= 1.0 else A.B_YELLOW)
         return (c + "█" * filled + rc + A.DIM + "░" * empty + rc)
 
-    # Progress bars for crawled items
+    # Progress bars
     _p(f"  {A.DIM}{'Pages':<14}{rc}{_bar(p.visited, p.discovered)}  {A.BRIGHT_WHITE}{p.visited}/{p.discovered}{rc}")
     _p(f"  {A.DIM}{'JavaScript':<14}{rc}{_bar(j.analyzed, j.discovered)}  {A.BRIGHT_WHITE}{j.analyzed}/{j.discovered}{rc}")
-    _p(f"  {A.DIM}{'Routes':<14}{rc}{_bar(r.visited, r.discovered)}  {A.BRIGHT_WHITE}{r.visited}/{r.discovered}{rc}")
+    if r.discovered > 0:
+        _p(f"  {A.DIM}{'Routes':<14}{rc}{_bar(r.visited, r.discovered)}  {A.BRIGHT_WHITE}{r.visited}/{r.discovered}{rc}")
     _p("")
 
-    # Runtime capabilities - distinguish NOT RUN from 0
-    has_rt = any([rt.api_requests, rt.websockets, rt.workers, rt.iframes])
-    rt_was_run = coverage.blind_spots and not any(
-        "headless" in bs.description.lower() for bs in coverage.blind_spots
-    )
+    # Runtime - NOT RUN vs COMPLETE vs count
+    has_rt    = any([rt.api_requests, rt.websockets, rt.workers, rt.iframes])
+    headless_was_run = args_flags.get("headless", False)
 
     if has_rt:
         parts = []
@@ -1100,29 +1213,36 @@ def print_coverage(coverage) -> None:
         if rt.workers:      parts.append(f"workers: {rt.workers}")
         if rt.iframes:      parts.append(f"iframes: {rt.iframes}")
         _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.B_GREEN}COMPLETE{rc}  {A.DIM}{', '.join(parts)}{rc}")
+    elif headless_was_run:
+        _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.B_GREEN}RUN{rc}  {A.DIM}no dynamic endpoints captured{rc}")
     else:
         _p(f"  {A.DIM}{'Runtime':<14}{rc}{A.DIM}NOT RUN{rc}")
 
+    # Source Maps - semantic precision:
+    # NOT RUN  = --source-maps flag was NOT used
+    # NOT FOUND = --source-maps was used but none discovered
+    # N recovered = maps found and recovered
+    sm_was_run = args_flags.get("source_maps", False)
     if sm.discovered > 0:
         sm_color = A.B_GREEN if sm.recovered > 0 else A.B_YELLOW
         _p(f"  {A.DIM}{'Source Maps':<14}{rc}{sm_color}{sm.recovered} recovered{rc}  {A.DIM}of {sm.discovered} found{rc}")
+    elif sm_was_run:
+        # Ran but found nothing
+        _p(f"  {A.DIM}{'Source Maps':<14}{rc}{A.DIM}NOT FOUND{rc}")
     else:
-        # Check if source maps were attempted
-        sm_attempted = any("source map" in bs.description.lower() for bs in (coverage.blind_spots or []))
-        if sm_attempted:
-            _p(f"  {A.DIM}{'Source Maps':<14}{rc}{A.DIM}NOT FOUND{rc}")
-        else:
-            _p(f"  {A.DIM}{'Source Maps':<14}{rc}{A.DIM}NOT RUN{rc}")
+        # Never attempted
+        _p(f"  {A.DIM}{'Source Maps':<14}{rc}{A.DIM}NOT RUN{rc}")
 
     # Authentication
     auth_missing = any("auth" in bs.description.lower() or "session" in bs.description.lower()
                        for bs in (coverage.blind_spots or []))
-    if auth_missing:
-        _p(f"  {A.DIM}{'Auth':<14}{rc}{A.B_YELLOW}NOT PROVIDED{rc}")
-    else:
+    has_cookie = args_flags.get("has_cookie", False)
+    if has_cookie and not auth_missing:
         _p(f"  {A.DIM}{'Auth':<14}{rc}{A.B_GREEN}PROVIDED{rc}")
+    else:
+        _p(f"  {A.DIM}{'Auth':<14}{rc}{A.B_YELLOW}NOT PROVIDED{rc}")
 
-    # Failures
+    # Failures / warnings
     _p("")
     if p.failed:
         _p(f"  {A.B_YELLOW}!{rc}  {p.failed} page(s) failed to load")
@@ -1144,8 +1264,8 @@ def print_coverage(coverage) -> None:
 
 def _print_next_action(target: str, extras: dict) -> None:
     """
-    Analyze what was NOT run and recommend the most useful next command.
-    Never recommends flags already used.
+    Analyze what was NOT run and recommend the next useful command.
+    Only recommends flags that were NOT already used.
     """
     args_flags  = extras.get("_args_flags", {})
     coverage    = extras.get("coverage")
@@ -1164,8 +1284,8 @@ def _print_next_action(target: str, extras: dict) -> None:
 
     auth_missing = any("auth" in bs.description.lower() or "session" in bs.description.lower()
                        for bs in blind_spots)
-    if auth_missing and not args_flags.get("has_cookie"):
-        missing.append("authentication")
+    if not args_flags.get("has_cookie") and (auth_missing or not args_flags.get("headless")):
+        missing.append("authenticated crawling")
         flags.append("--cookie 'session=<YOUR_SESSION>'")
 
     if not args_flags.get("validate"):
@@ -1177,29 +1297,37 @@ def _print_next_action(target: str, extras: dict) -> None:
     _section("NEXT ACTION")
 
     if missing:
-        _p(f"  {A.DIM}{', '.join(missing).capitalize()} {'was' if len(missing) == 1 else 'were'} not performed.{A.RESET}")
+        # Human-readable sentence
+        if len(missing) == 1:
+            _p(f"  {A.DIM}{missing[0].capitalize()} was not performed.{A.RESET}")
+        elif len(missing) == 2:
+            _p(f"  {A.DIM}{missing[0].capitalize()} and {missing[1]} were not performed.{A.RESET}")
+        else:
+            last    = missing[-1]
+            others  = ", ".join(missing[:-1])
+            _p(f"  {A.DIM}{others.capitalize()}, and {last} were not performed.{A.RESET}")
         _p("")
 
     _p(f"  {A.DIM}Recommended:{A.RESET}")
     _p("")
-
-    cmd_parts = [f"  bundlespy scan {target}"]
-    for flag in flags:
-        cmd_parts.append(f"    {flag}")
-    _p(A.BRIGHT_WHITE + "\n".join(cmd_parts) + A.RESET)
+    _p(f"  {A.BRIGHT_WHITE}bundlespy scan {target} \\{A.RESET}")
+    for i, flag in enumerate(flags):
+        is_last = (i == len(flags) - 1)
+        suffix  = "" if is_last else " \\"
+        _p(f"  {A.BRIGHT_WHITE}  {flag}{suffix}{A.RESET}")
     _p("")
 
 
 # ---------------------------------------------------------------------------
-# Summary
+# Summary / RESULT section
 # ---------------------------------------------------------------------------
 
 def print_summary(result, extras=None, report_paths=None) -> None:
     extras       = extras or {}
     report_paths = report_paths or {}
 
-    findings = result.findings
-    real     = [f for f in findings if f.status != "likely_false_positive"]
+    findings  = result.findings
+    real      = [f for f in findings if f.status != "likely_false_positive"]
     counts: dict = {}
     for f in real:
         counts[f.severity] = counts.get(f.severity, 0) + 1
@@ -1217,8 +1345,8 @@ def print_summary(result, extras=None, report_paths=None) -> None:
     _rule()
     _p("")
 
-    # RESULT header
-    dur_str  = duration or ""
+    # RESULT header right-aligned duration
+    dur_str      = duration or ""
     result_label = A.B_GREEN + "RESULT" + rc
     dur_right    = A.DIM + dur_str + rc if dur_str else ""
     gap_len      = max(1, w - 2 - len("RESULT") - len(dur_str))
@@ -1235,22 +1363,22 @@ def print_summary(result, extras=None, report_paths=None) -> None:
             sev_parts.append(f"{c}{sev} {n}{rc}")
     if sev_parts:
         _p("  " + "  -  ".join(sev_parts))
-        _p("")
 
     # Key stats
     js_count = len([j for j in result.js_files if not j.url.startswith("sourcemap://")])
-    _p(f"  {A.DIM}{result.pages_crawled} pages  {js_count} JavaScript assets  {len(result.endpoints)} endpoints  {len(real)} findings{rc}")
+    _p(f"  {A.DIM}{result.pages_crawled} pages - {js_count} JS assets - {len(result.endpoints)} endpoints{rc}")
+    _p("")
 
     # Coverage status
-    coverage = extras.get("coverage")
+    coverage    = extras.get("coverage")
+    args_flags  = extras.get("_args_flags", {})
     if coverage:
-        blind_spots = getattr(coverage, "blind_spots", []) or []
+        blind_spots    = getattr(coverage, "blind_spots", []) or []
         has_high_blind = any(bs.severity == "HIGH" for bs in blind_spots)
-        cov_label = "PARTIAL" if blind_spots else "COMPLETE"
-        cov_color = A.B_YELLOW if has_high_blind else (A.B_GREEN if not blind_spots else A.ORANGE)
+        cov_label      = "PARTIAL" if blind_spots else "COMPLETE"
+        cov_color      = A.B_YELLOW if has_high_blind else (A.B_GREEN if not blind_spots else A.ORANGE)
         _p(f"  {A.DIM}Coverage:{rc}  {cov_color}{cov_label}{rc}")
 
-    args_flags = extras.get("_args_flags", {})
     if not args_flags.get("headless"):
         _p(f"  {A.DIM}Runtime:{rc}  {A.DIM}NOT RUN{rc}")
     if not args_flags.get("has_cookie"):
@@ -1308,33 +1436,49 @@ def print_report(
     verbose:            bool = False,
 ) -> None:
     """
-    Orchestrate a full scan report.
-    Information hierarchy: target -> status -> overview -> attack surface ->
-    security findings -> discovery -> coverage -> next action -> result
-    """
-    extras = extras or {}
+    Orchestrate the full scan report.
 
+    Information hierarchy (per spec):
+      TARGET (printed by cli.py via print_header)
+      -> SCAN STATUS + risk summary
+      -> ATTACK SURFACE (tree view)
+      -> SECURITY FINDINGS + INFORMATION
+      -> DISCOVERY (JS + secrets + libraries consolidated)
+      -> COVERAGE (progress bars, NOT RUN precision)
+      -> NEXT ACTION (dynamic recommendation)
+      -> RESULT
+    """
+    extras     = extras or {}
+    args_flags = extras.get("_args_flags", {})
+
+    # Auth result (shown at very top if auth was attempted)
     if extras.get("auth_result"):
         print_auth_result(extras["auth_result"])
 
-    # Scan status (what ran, what was skipped)
-    args_flags = extras.get("_args_flags", {})
-    if args_flags:
-        _print_scan_status(args_flags)
+    # SCAN STATUS with inline risk summary
+    _print_scan_status(result, args_flags)
 
-    # Overview panel
-    _print_overview(result, extras)
-
-    # Attack surface (tree view)
+    # ATTACK SURFACE tree view (before findings - gives map of app first)
     _print_attack_surface_tree(result, extras)
 
-    # Passive/headless discovery sections
+    # SECURITY FINDINGS (HIGH/MEDIUM/LOW/CRITICAL) + INFORMATION (INFO)
+    print_findings(result.findings, verbose=verbose, show_full_secret=show_sensitive)
+
+    # DISCOVERY - consolidated JS + secrets + libraries
+    _print_discovery(result, extras)
+
+    # Verbose: full JS asset table
+    if verbose:
+        print_js_inventory(result.js_files, verbose=True,
+                           per_file_stats=extras.get("per_file_stats"))
+
+    # Feature detail sections (headless, passive, source maps, chunks)
     if extras.get("passive_stats"):
         p = extras["passive_stats"]
         print_passive(p.get("source", ""), p.get("urls", 0), p.get("js", 0),
                       p.get("unique", 0), p.get("new", 0))
 
-    if extras.get("headless_stats"):
+    if extras.get("headless_stats") and verbose:
         h = extras["headless_stats"]
         print_headless(h.get("pages", 0), h.get("js", 0), h.get("xhr", 0),
                        h.get("fetch", 0), h.get("ws", 0), h.get("routes", 0),
@@ -1344,17 +1488,11 @@ def print_report(
     if intel:
         _print_intelligence(intel)
 
-    lib_findings = extras.get("lib_findings", [])
-    if lib_findings:
-        _print_libraries(lib_findings)
+    # Vulnerable libraries detail (verbose)
+    if verbose and extras.get("lib_findings"):
+        _print_libraries(extras["lib_findings"])
 
-    # Secret analysis
-    print_secret_analysis(result.findings)
-
-    # Security findings (redesigned)
-    print_findings(result.findings, verbose=verbose, show_full_secret=show_sensitive)
-
-    # Endpoints (tree style)
+    # Endpoints
     print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
 
     # Attack surface analysis (parameter-level)
@@ -1362,10 +1500,10 @@ def print_report(
     if surface and (surface.get("total_items", 0) > 0 or surface.get("state_change")):
         print_attack_surface(surface)
 
-    # Coverage
+    # COVERAGE
     coverage = extras.get("coverage")
     if coverage:
-        print_coverage(coverage)
+        print_coverage(coverage, args_flags=args_flags)
 
     if validation_results:
         print_validation_results(validation_results)
@@ -1378,21 +1516,19 @@ def print_report(
     if subdomains:
         print_subdomains(subdomains)
 
-    # JS inventory (compact summary always, full list in verbose)
-    print_js_inventory(result.js_files, verbose=verbose,
-                       per_file_stats=extras.get("per_file_stats"))
-
-    if extras.get("source_map_details"):
+    # Source map / chunk detail (verbose or if significant)
+    if extras.get("source_map_details") and verbose:
         d = extras["source_map_details"]
         print_source_maps(d.get("discovered", 0), d.get("valid", 0),
                           d.get("recovered", 0), d.get("sources", 0), d.get("items", []))
 
-    if extras.get("chunk_stats"):
+    if extras.get("chunk_stats") and verbose:
         c = extras["chunk_stats"]
         print_webpack(c.get("runtime", False), c.get("discovered", 0),
                       c.get("downloaded", 0), c.get("endpoints", 0), c.get("findings", 0))
 
-    # Next action engine
+    # NEXT ACTION
     _print_next_action(result.target_url, extras)
 
+    # RESULT
     print_summary(result, extras=extras, report_paths=report_paths)
