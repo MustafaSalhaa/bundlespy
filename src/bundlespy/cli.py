@@ -29,7 +29,7 @@ from .reporting.html_report import generate as generate_html
 from .reporting.csv_report import generate as generate_csv
 from .reporting.burp_export import generate_burp_xml, generate_url_list
 from .ui.printer import (
-    print_header, phase, phase_sub, phase_done, phase_warn, phase_error,
+    print_header, phase, phase_done, phase_warn, phase_error,
 )
 from .ui.theme import A
 
@@ -80,6 +80,7 @@ examples:
     scan.add_argument("--stealth",        action="store_true")
     scan.add_argument("--interact",       action="store_true", help="Enable full page interaction in headless mode (slower but finds more lazy JS)")
     scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
+    scan.add_argument("--concurrency", type=int, default=10, help="Concurrent async HTTP requests (default: 10)")
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
                       help="Extra header to include in all requests (can use multiple times)")
@@ -325,6 +326,7 @@ def run_scan(args) -> int:
         stealth=args.stealth,
         extra_headers=extra_headers,
     )
+    _async_concurrency = getattr(args, 'concurrency', 10)
     scope = ScopeChecker(
         target_url=target,
         same_origin=True,
@@ -345,17 +347,10 @@ def run_scan(args) -> int:
     if not args.passive and not _skip_crawler:
         if not args.quiet:
             phase("Crawling target")
-
-        def _crawl_status(msg: str) -> None:
-            """Sub-phase callback — prints live crawl status under the main phase line."""
-            if not args.quiet:
-                phase_sub(msg)
-
         crawler = Crawler(
             target_url=target, fetcher=fetcher, scope=scope,
             max_depth=args.depth, max_pages=args.max_pages,
             max_js_files=args.max_js, common_paths=args.common_paths,
-            status_cb=_crawl_status,
         )
         try:
             crawler.crawl()
@@ -398,19 +393,40 @@ def run_scan(args) -> int:
         passive_urls = collect_passive_js_urls(target)
         new_js = 0
         seen   = set()
+
+        # Filter URLs first
+        _passive_to_fetch = []
         for url in passive_urls[:args.max_js]:
-            if url in seen or not scope.in_scope(url):
-                continue
-            seen.add(url)
-            content, status, ct, sha256 = fetcher.get(url)
+            if url not in seen and scope.in_scope(url):
+                seen.add(url)
+                _passive_to_fetch.append(url)
+
+        # Async batch fetch
+        import asyncio
+        from .crawler.fetcher import AsyncFetcher as _AsyncFetcher
+
+        async def _fetch_passive_batch(urls):
+            async with _AsyncFetcher(
+                concurrency=_async_concurrency,
+                timeout=args.timeout,
+                requests_per_second=args.rate,
+                stealth=args.stealth,
+                extra_headers=extra_headers,
+            ) as _af:
+                return await _af.fetch_many(urls)
+
+        _passive_results = asyncio.run(_fetch_passive_batch(_passive_to_fetch))
+        from datetime import datetime as dt
+        for url, result_tuple in _passive_results.items():
+            content, status, ct, sha256, _rchain = result_tuple
             if content and status in range(200, 300):
-                from datetime import datetime as dt
                 all_js.append(JSFile(
                     url=url, source_page=target, status_code=status,
                     content_type=ct, size_bytes=len(content),
                     sha256=sha256, content=content, discovered_at=dt.utcnow(),
                 ))
                 new_js += 1
+
         extras["passive_stats"] = {
             "source": "Wayback Machine + CommonCrawl",
             "urls": len(passive_urls), "js": new_js,
