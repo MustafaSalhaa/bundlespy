@@ -9,7 +9,7 @@
 ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝╚══════╝╚═╝        ╚═╝   
 ```
 
-**JavaScript attack surface scanner for authorized penetration testing**
+**JavaScript attack surface scanner**
 
 BundleSpy crawls a target web application, collects JavaScript files, and extracts secrets, endpoints, credentials, and infrastructure details that developers accidentally left in the code. It goes beyond a standard crawler by recovering original source from source maps, discovering hidden webpack chunks, pulling historical JS from web archives, intercepting real browser network traffic, and validating findings against provider APIs.
 
