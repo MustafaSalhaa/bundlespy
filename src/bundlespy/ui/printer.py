@@ -654,18 +654,18 @@ def _print_finding(f, verbose=False):
     type_line = f"{A.DIM}type{A.RESET}  {A.BRIGHT_WHITE}{f.category}{A.RESET}  {A.DIM}·{A.RESET}  {stat_c}{f.status}{A.RESET}  {A.DIM}{conf_pct}{A.RESET}"
     _p(f"  {dim_pipe} {type_line}")
 
+    # Evidence (full, no redaction) - shown before fix
+    ev_line = f"{A.DIM}secret{A.RESET}  {A.BRIGHT_WHITE}{f.matched_value}{A.RESET}"
+    _p(f"  {dim_pipe} {ev_line}")
+
     # Fix
     max_fix = w - 12
     fix_txt = f.remediation[:100]
     wrapped = textwrap.wrap(fix_txt, max_fix) if len(fix_txt) > max_fix else [fix_txt]
-    fix_line = f"{A.DIM}fix   {wrapped[0]}{A.RESET}"
+    fix_line = f"{A.DIM}fix     {wrapped[0]}{A.RESET}"
     _p(f"  {dim_pipe} {fix_line}")
     for cont in wrapped[1:]:
-        _p(f"  {dim_pipe}       {A.DIM}{cont}{A.RESET}")
-
-    # Evidence (redacted)
-    ev_line = f"{A.DIM}{redact(f.matched_value)}{A.RESET}"
-    _p(f"  {dim_pipe} {ev_line}")
+        _p(f"  {dim_pipe}         {A.DIM}{cont}{A.RESET}")
 
     if f.context and verbose:
         ctx = f.context[:120].replace("\n", " ").strip()
