@@ -3,6 +3,7 @@ theme.py - Color and styling constants for BundleSpy terminal UI.
 
 Exports: A, USE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL, STATUS_COLOR
 """
+from __future__ import annotations
 
 import os
 import sys
