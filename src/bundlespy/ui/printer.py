@@ -107,28 +107,28 @@ def _section(title: str, count: str = "", color: str = "") -> None:
 
 def phase(label: str) -> None:
     """Phase line - shows a running indicator."""
-    _p(f"  {A.CYAN}◆{A.RESET}  {label}")
+    _p(f"  {A.CYAN}>{A.RESET}  {label}")
 
 
 def phase_sub(label: str) -> None:
     """Sub-phase line - indented, subordinate to parent phase."""
-    _p(f"       {A.DIM}·{A.RESET}  {A.DIM}{label}{A.RESET}")
+    _p(f"       {A.DIM}-{A.RESET}  {A.DIM}{label}{A.RESET}")
 
 
 def phase_done(label: str, detail: str = "") -> None:
     """Done line - shown when a phase completes successfully."""
     det = f"  {A.DIM}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.B_GREEN}✓{A.RESET}  {label}{det}")
+    _p(f"  {A.B_GREEN}+{A.RESET}  {label}{det}")
 
 
 def phase_warn(label: str) -> None:
     """Warning line."""
-    _p(f"  {A.YELLOW}⚠{A.RESET}  {label}")
+    _p(f"  {A.YELLOW}!{A.RESET}  {label}")
 
 
 def phase_error(label: str) -> None:
     """Error line - written to stderr."""
-    print(f"  {A.RED}✗{A.RESET}  {label}", file=sys.stderr)
+    print(f"  {A.RED}x{A.RESET}  {label}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -143,40 +143,33 @@ def print_header(
     author: str = "Mustafa Salha",
 ) -> None:
     """
-    Print the scan header.
-
-    Renders a clean bordered box with target, mode, scope, and timestamp.
+    Print the scan header - no box, pure typographic power.
     """
     ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
     w  = _w()
-    bc = A.B_CYAN
-    lc = A.DIM
-    vc = A.BRIGHT_WHITE
     rc = A.RESET
 
     _p("")
-    _p(bc + _box_top_d(w) + rc)
+    # Top accent line - full width dim
+    _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
+    _p("")
 
-    # Title row
-    title_content = f"{A.B_CYAN}{A.BOLD}BundleSpy{rc}  {lc}v{version}  by {author}{rc}"
-    _p(_box_row_d(title_content, w, bc))
+    # Tool name - large, confident
+    _p(f"  {A.B_BRIGHT_WHITE}BUNDLESPY{rc}  {A.DIM}v{version}{rc}")
+    _p("")
 
-    _p(bc + _box_mid_d(w) + rc)
+    # Target - most important info, highlighted
+    target_display = target[:w - 12] if len(target) > w - 12 else target
+    _p(f"  {A.DIM}TARGET{rc}")
+    _p(f"  {A.B_CYAN}{A.BOLD}{target_display}{rc}")
+    _p("")
 
-    # Target
-    target_display = target[:w - 22] if len(target) > w - 22 else target
-    content = f"{lc}TARGET{rc}   {A.B_CYAN}{target_display}{rc}"
-    _p(_box_row_d(content, w, bc))
+    # Meta row
+    _p(f"  {A.DIM}MODE   {rc}{A.BRIGHT_WHITE}{mode}{rc}    {A.DIM}SCOPE  {rc}{A.BRIGHT_WHITE}{scope}{rc}    {A.DIM}STARTED  {rc}{A.BRIGHT_WHITE}{ts}{rc}")
+    _p("")
 
-    # Mode / Scope row
-    inline = f"{lc}MODE{rc}  {vc}{mode}{rc}  {A.DIM}|{rc}  {lc}SCOPE{rc}  {vc}{scope}{rc}"
-    _p(_box_row_d(inline, w, bc))
-
-    # Started row
-    content = f"{lc}STARTED{rc}  {vc}{ts}{rc}"
-    _p(_box_row_d(content, w, bc))
-
-    _p(bc + _box_bot_d(w) + rc)
+    # Bottom accent line
+    _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
     _p("")
 
 
@@ -231,8 +224,8 @@ def print_auth_result(auth: dict) -> None:
         _p(f"  {_label('Auth state')}{A.B_BRIGHT_RED}NOT VERIFIED{A.RESET}")
         if reason:
             _p(f"  {_label('Reason')}{A.DIM}{reason}{A.RESET}")
-        _p(f"  {A.B_YELLOW}Credentials supplied but authentication not verified.{A.RESET}")
-        _p(f"  {A.B_YELLOW}Results reflect the unauthenticated application state.{A.RESET}")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  Credentials supplied but authentication not verified.{A.RESET}")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  Results reflect the unauthenticated application state.{A.RESET}")
 
     _p()
 
@@ -712,17 +705,17 @@ def print_coverage(coverage) -> None:
 
     # Failure details
     if p.failed:
-        _p(f"  {A.B_YELLOW}⚠{A.RESET}  {A.DIM}{p.failed} page(s) failed to load{A.RESET}")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  {A.DIM}{p.failed} page(s) failed to load{A.RESET}")
     if p.auth_required:
-        _p(f"  {A.B_YELLOW}⚠{A.RESET}  {p.auth_required} auth-required page(s) skipped")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  {p.auth_required} auth-required page(s) skipped")
         for u in p.auth_urls[:3]:
             _p(f"  {A.DIM}     {u}{A.RESET}")
     if j.failed:
-        _p(f"  {A.B_YELLOW}⚠{A.RESET}  {A.DIM}{j.failed} JS file(s) failed{A.RESET}")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  {A.DIM}{j.failed} JS file(s) failed{A.RESET}")
         for u in j.failed_urls[:2]:
             _p(f"  {A.DIM}     {u}{A.RESET}")
     if r.unvisited:
-        _p(f"  {A.B_YELLOW}⚠{A.RESET}  {A.DIM}{r.unvisited} route(s) unvisited{A.RESET}")
+        _p(f"  {A.B_YELLOW}!{A.RESET}  {A.DIM}{r.unvisited} route(s) unvisited{A.RESET}")
 
     # Runtime stats
     rt = coverage.runtime
@@ -743,15 +736,14 @@ def print_coverage(coverage) -> None:
         if sm.unavailable > 0:
             _p(f"  {A.DIM}             {sm.unavailable} unavailable{A.RESET}")
 
-    # Blind spots
+    # Blind spots - clean tag style, no emoji
     if coverage.blind_spots:
         _p()
         for bs in coverage.blind_spots:
-            sc = (A.BRIGHT_RED if bs.severity == "HIGH"   else
-                  A.B_YELLOW   if bs.severity == "MEDIUM" else A.DIM)
-            arrow = A.DIM + " ->" + A.RESET
-            miti  = (arrow + f"  {A.DIM}{bs.mitigation}{A.RESET}") if bs.mitigation else ""
-            _p(f"  {A.B_YELLOW}⚠{A.RESET}  {bs.description}{miti}")
+            sc    = A.B_BRIGHT_RED if bs.severity == "HIGH" else A.B_YELLOW if bs.severity == "MEDIUM" else A.DIM
+            tag   = f"{sc}[{bs.severity}]{A.RESET}"
+            miti  = (f"  {A.DIM}-> {bs.mitigation}{A.RESET}") if bs.mitigation else ""
+            _p(f"  {tag}  {bs.description}{miti}")
 
     _p()
 
@@ -1008,7 +1000,7 @@ def print_validation_results(results):
 # ---------------------------------------------------------------------------
 
 def print_summary(result, extras=None, report_paths=None):
-    """Print the final scan-complete summary - stat tiles style."""
+    """Print the final scan-complete summary - no boxes, no emoji."""
     extras       = extras or {}
     report_paths = report_paths or {}
 
@@ -1025,17 +1017,16 @@ def print_summary(result, extras=None, report_paths=None):
         duration = f"{secs:.1f}s"
 
     w  = _w()
-    bc = A.B_GREEN
     rc = A.RESET
 
     _p("")
-    # Single-line banner box
-    _p(bc + _box_top_s(w) + rc)
-    title_text = "SCAN COMPLETE"
-    if duration:
-        title_text += f"  {duration}"
-    _p(_box_row_s(A.B_GREEN + A.BOLD + title_text + rc, w, bc))
-    _p(bc + _box_bot_s(w) + rc)
+    # Accent divider - same style as _section but for the summary block
+    _p(f"  {A.DIM}{'─' * (w - 4)}{rc}")
+    _p("")
+
+    # SCAN COMPLETE label
+    dur_str = f"  {A.DIM}{duration}{rc}" if duration else ""
+    _p(f"  {A.B_GREEN}SCAN COMPLETE{rc}{dur_str}")
     _p("")
 
     # Key stats: compact inline
@@ -1068,7 +1059,6 @@ def print_summary(result, extras=None, report_paths=None):
                 continue
             sev_c = SEV_COLOR.get(sev, A.DIM)
             dot_c = SEVERITY_DOT_COLOR.get(sev.lower(), A.DIM)
-            # Filled bar for HIGH+, outlined for lower
             bar = (dot_c + "██" + rc if sev in ("CRITICAL", "HIGH") else
                    A.DIM + "░░" + rc   if sev == "INFO"               else
                    A.DIM + "▒▒" + rc)
@@ -1089,15 +1079,15 @@ def print_summary(result, extras=None, report_paths=None):
             _p(f"  {A.DIM}{fmt.upper():<8}{rc}  {path}")
         _p("")
 
-    # Final verdict
+    # Final verdict - no emoji, clean text
     if counts.get("CRITICAL") or validated:
-        _p(f"  {A.B_BRIGHT_RED}⚡ Critical findings present. Immediate action required.{rc}")
+        _p(f"  {A.B_BRIGHT_RED}Critical findings present. Immediate action required.{rc}")
     elif counts.get("HIGH"):
-        _p(f"  {A.ORANGE}⚡ High severity findings present. Review required.{rc}")
+        _p(f"  {A.ORANGE}High severity findings present. Review required.{rc}")
     elif counts.get("MEDIUM"):
-        _p(f"  {A.B_YELLOW}⚡ Medium severity findings present.{rc}")
+        _p(f"  {A.B_YELLOW}Medium severity findings present.{rc}")
     else:
-        _p(f"  {A.B_GREEN}✓ Scan complete. No critical findings.{rc}")
+        _p(f"  {A.B_GREEN}Scan complete. No critical findings.{rc}")
     _p("")
 
 
