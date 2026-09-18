@@ -1,74 +1,184 @@
 """
-BundleSpy terminal UI — clean, modern, professional.
+BundleSpy terminal UI - clean, modern, professional.
+
+Exports all public functions used by the scanner:
+    phase, phase_sub, phase_done, phase_warn, phase_error,
+    print_header, print_auth_result, print_js_inventory,
+    print_source_maps, print_webpack, print_passive, print_headless,
+    print_secret_analysis, print_findings, print_coverage,
+    print_attack_surface, print_endpoints, print_graphql,
+    print_infrastructure, print_subdomains, print_validation_results,
+    print_summary, print_report,
+    _p, _w, _line, _label, _val, _section, SEV_COLOR
 """
+
+from __future__ import annotations
 
 import os
 import re
 import sys
 import shutil
-from typing import List, Optional, Dict
+import textwrap
+from typing import Any
 from datetime import datetime
 
-from .theme import A
+from .theme import (
+    A, USE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL,
+    SEVERITY_DOT_COLOR, STATUS_COLOR, SECTION_COLOR,
+)
+from .renderer import (
+    _p, _w, _vis_len, _pad,
+    term_width, divider, section, kv, truncate, truncate_url,
+    severity_badge, redact, bullet, indent_block, two_col_table,
+    count_table, severity_table, progress_bar,
+    D, S,
+    _box_top_d, _box_bot_d, _box_mid_d, _box_row_d,
+    _box_top_s, _box_bot_s, _box_mid_s, _box_row_s,
+    _hline_d, _hline_s,
+)
 
+# ---------------------------------------------------------------------------
+# Backward-compat alias used throughout the codebase
+# ---------------------------------------------------------------------------
+
+SEV_COLOR: dict[str, str] = SEVERITY_COLOR
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers  (_p, _w, _line, _label, _val, _section)
+# Re-exported here so callers can import them directly from this module.
+# ---------------------------------------------------------------------------
 
 def _p(text: str = "") -> None:
+    """Print a line (single point of output). Re-export from renderer."""
     print(text)
 
 
 def _w() -> int:
-    try:
-        return min(shutil.get_terminal_size((80, 24)).columns, 110)
-    except Exception:
-        return 80
+    """Return current terminal width (clamped). Re-export from renderer."""
+    return term_width()
 
 
-def _line(char: str = "─", color: str = "") -> str:
+def _line(char: str = "-", color: str = "") -> str:
+    """Return a full-width line of `char`."""
     rst = A.RESET if color else ""
     return f"{color}{char * _w()}{rst}"
 
 
 def _label(text: str, width: int = 14) -> str:
-    return f"{A.GREY}{text.ljust(width)}{A.RESET}"
+    """Return a styled label string (key in a k/v pair)."""
+    return A.GREY + text.ljust(width) + A.RESET
 
 
 def _val(text: str, color: str = "") -> str:
+    """Return a styled value string."""
     rst = A.RESET if color else ""
     return f"{color}{text}{rst}"
 
 
 def _section(title: str, count: str = "", color: str = "") -> None:
-    c   = color or A.WHITE
-    cnt = f"  {A.GREY}({count}){A.RESET}" if count else ""
-    _p()
-    _p(f"  {c}{A.BOLD}{title}{A.RESET}{cnt}")
-    _p(f"  {A.GREY}{_line()}{A.RESET}")
+    """
+    Print a modern section header.
+
+    Renders:
+      +-[ TITLE ]------------ count --+
+
+    Signature preserved: _section(title, count="", color="")
+    """
+    c = color or SECTION_COLOR.get(title.lower(), SECTION_COLOR["default"])
+    section(title, count=count, color=c)
 
 
-SEV_COLOR = {
-    "CRITICAL": A.RED    + A.BOLD,
-    "HIGH":     A.ORANGE + A.BOLD,
-    "MEDIUM":   A.YELLOW,
-    "LOW":      A.BLUE,
-    "INFO":     A.GREY,
-}
+# ---------------------------------------------------------------------------
+# Phase / status lines  (original signatures)
+# ---------------------------------------------------------------------------
+
+def phase(label: str) -> None:
+    """Phase line - shows a running indicator."""
+    _p(f"  {A.CYAN}>{A.RESET}  {label}")
 
 
-# ── Header ────────────────────────────────────────────────────────────────────
+def phase_sub(label: str) -> None:
+    """
+    Sub-phase line - indented one level deeper than phase(), used for
+    live status updates within a running phase (e.g. crawl sub-steps).
+    Shows a dim bullet so it's clearly subordinate to the parent phase.
+    """
+    _p(f"       {A.GREY}*{A.RESET}  {A.GREY}{label}{A.RESET}")
 
-def print_header(target, mode="Active", scope="Strict", version="1.0.0", author="Mustafa Salha"):
+
+def phase_done(label: str, detail: str = "") -> None:
+    """Done line - shown when a phase completes successfully."""
+    det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
+    _p(f"  {A.B_GREEN}>{A.RESET}  {label}{det}")
+
+
+def phase_warn(label: str) -> None:
+    """Warning line."""
+    _p(f"  {A.B_YELLOW}!{A.RESET}  {label}")
+
+
+def phase_error(label: str) -> None:
+    """Error line - written to stderr."""
+    print(f"  {A.BRIGHT_RED}X{A.RESET}  {label}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Scan header  (original signature restored)
+# ---------------------------------------------------------------------------
+
+def print_header(
+    target: str,
+    mode: str = "Active",
+    scope: str = "Strict",
+    version: str = "1.0.0",
+    author: str = "Mustafa Salha",
+) -> None:
+    """
+    Print the scan header inside a double-line bordered box.
+
+      +==========================================================+
+      ||  TARGET   https://example.com                          ||
+      ||  MODE     Active  |  SCOPE  Strict                     ||
+      ||  STARTED  2026-09-18  10:30 UTC                        ||
+      +==========================================================+
+    """
     ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
-    _p()
-    _p(f"  {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
-    _p(f"  {A.GREY}{_line()}{A.RESET}")
-    _p(f"  {_label('Target')}{A.CYAN}{target[:_w()-22]}{A.RESET}")
-    _p(f"  {_label('Mode')}{mode}")
-    _p(f"  {_label('Scope')}{scope}")
-    _p(f"  {_label('Started')}{A.GREY}{ts}{A.RESET}")
-    _p()
+    w  = _w()
+    bc = A.B_CYAN
+    lc = A.GREY
+    vc = A.BRIGHT_WHITE
+    rc = A.RESET
+
+    _p("")
+    _p(bc + _box_top_d(w) + rc)
+
+    # Title row
+    title_content = f"{A.B_CYAN}{A.BOLD}BundleSpy{rc}  {lc}v{version}  by {author}{rc}"
+    _p(_box_row_d(title_content, w, bc))
+
+    _p(bc + _box_mid_d(w) + rc)
+
+    # Target
+    target_display = target[:w - 22] if len(target) > w - 22 else target
+    content = f"{lc}TARGET{rc}   {A.B_CYAN}{target_display}{rc}"
+    _p(_box_row_d(content, w, bc))
+
+    # Mode / Scope row
+    inline = f"{lc}MODE{rc}  {vc}{mode}{rc}  {A.BRIGHT_BLACK}|{rc}  {lc}SCOPE{rc}  {vc}{scope}{rc}"
+    _p(_box_row_d(inline, w, bc))
+
+    # Started row
+    content = f"{lc}STARTED{rc}  {vc}{ts}{rc}"
+    _p(_box_row_d(content, w, bc))
+
+    _p(bc + _box_bot_d(w) + rc)
+    _p("")
 
 
-# ── Authentication result ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Authentication result  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_auth_result(auth: dict) -> None:
     """
@@ -94,66 +204,41 @@ def print_auth_result(auth: dict) -> None:
     _p(f"  {_label('Cookies injected')}{n_cookies}")
     _p(f"  {_label('Initial URL')}{init_url}")
 
-    status_color = A.GREEN if status == 200 else A.ORANGE if status in (301, 302) else A.RED
+    status_color = A.B_GREEN if status == 200 else A.ORANGE if status in (301, 302) else A.BRIGHT_RED
     _p(f"  {_label('Status')}{status_color}{status}{A.RESET}")
     _p(f"  {_label('Final URL')}{final_url}")
 
     redirected = init_url.rstrip("/") != final_url.rstrip("/") if init_url and final_url else False
     to_login   = any(k in final_url.lower() for k in ["/login", "/signin", "/sign-in"])
 
-    redir_color = A.RED if to_login else A.ORANGE if redirected else A.GREEN
+    redir_color = A.BRIGHT_RED if to_login else A.ORANGE if redirected else A.B_GREEN
     redir_label = "YES (to login)" if to_login else "YES" if redirected else "NO"
     _p(f"  {_label('Redirected')}{redir_color}{redir_label}{A.RESET}")
 
     if chain:
-        _p(f"  {_label('Redirect chain')}{A.GREY}{' → '.join(chain[:5])}{A.RESET}")
+        _p(f"  {_label('Redirect chain')}{A.GREY}{' -> '.join(chain[:5])}{A.RESET}")
 
     if ck_present:
         _p(f"  {_label('Browser cookies')}{A.GREY}{', '.join(ck_present[:8])}{A.RESET}")
 
     if verified:
-        _p(f"  {_label('Auth state')}{A.GREEN}{A.BOLD}VERIFIED{A.RESET}")
+        _p(f"  {_label('Auth state')}{A.B_GREEN}VERIFIED{A.RESET}")
     else:
-        _p(f"  {_label('Auth state')}{A.RED}{A.BOLD}NOT VERIFIED{A.RESET}")
+        _p(f"  {_label('Auth state')}{A.B_BRIGHT_RED}NOT VERIFIED{A.RESET}")
         if reason:
             _p(f"  {_label('Reason')}{A.GREY}{reason}{A.RESET}")
-        _p(f"  {A.YELLOW}Credentials supplied but authentication not verified.{A.RESET}")
-        _p(f"  {A.YELLOW}Results reflect the unauthenticated application state.{A.RESET}")
+        _p(f"  {A.B_YELLOW}Credentials supplied but authentication not verified.{A.RESET}")
+        _p(f"  {A.B_YELLOW}Results reflect the unauthenticated application state.{A.RESET}")
 
     _p()
 
 
-# ── Phase lines ───────────────────────────────────────────────────────────────
-
-def phase(label):
-    _p(f"  {A.GREY}›{A.RESET}  {label}")
-
-
-def phase_sub(label):
-    """
-    Sub-phase line — indented one level deeper than phase(), used for
-    live status updates within a running phase (e.g. crawl sub-steps).
-    Shows a dim bullet so it's clearly subordinate to the parent phase.
-    """
-    _p(f"       {A.GREY}·{A.RESET}  {A.GREY}{label}{A.RESET}")
-
-
-def phase_done(label, detail=""):
-    det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.GREEN}✓{A.RESET}  {label}{det}")
-
-
-def phase_warn(label):
-    _p(f"  {A.YELLOW}!{A.RESET}  {label}")
-
-
-def phase_error(label):
-    print(f"  {A.RED}✗{A.RESET}  {label}", file=sys.stderr)
-
-
-# ── JS Inventory ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# JS Inventory  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_js_inventory(js_files, verbose=False, per_file_stats=None):
+    """Print JS asset table with heat bar."""
     if not js_files:
         return
 
@@ -163,7 +248,7 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
     static_count    = len(js_files) - headless_count - inline_count - recovered_count
     total_size      = sum(j.size_bytes for j in js_files if j.size_bytes)
 
-    _section("JAVASCRIPT ASSETS", str(len(js_files)), A.CYAN)
+    _section("JAVASCRIPT ASSETS", str(len(js_files)), A.B_CYAN)
 
     summary_parts = []
     if static_count:    summary_parts.append(f"{static_count} static")
@@ -171,10 +256,10 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
     if inline_count:    summary_parts.append(f"{inline_count} inline")
     if recovered_count: summary_parts.append(f"{recovered_count} recovered")
     if summary_parts:
-        _p(f"  {A.GREY}{' · '.join(summary_parts)} · {total_size/1024:.0f} KB total{A.RESET}")
+        _p(f"  {A.GREY}{' * '.join(summary_parts)} * {total_size/1024:.0f} KB total{A.RESET}")
     _p()
 
-    # Per-file analysis table — proves every file was analyzed
+    # Per-file analysis table
     stats_map = {}
     if per_file_stats:
         for s in per_file_stats:
@@ -186,54 +271,69 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
     js_files_only = [j for j in show if not j.url.startswith("html:")]
     html_entries  = [s for s in (per_file_stats or []) if s.get("technology") == "html-attrs"]
 
+    w = _w()
+    path_w = max(30, w - 60)
+
     for js in js_files_only:
         size = f"{js.size_bytes/1024:.1f}KB" if js.size_bytes else "?"
         url  = js.url
         tag  = ""
+        context = ""
 
         if url.startswith("sourcemap://"):
-            url = url.replace("sourcemap://", ""); tag = f" {A.GREEN}[recovered]{A.RESET}"
+            url = url.replace("sourcemap://", "")
+            tag = f" {A.B_GREEN}[recovered]{A.RESET}"
+            context = "recovered"
         elif url.startswith("inline:") or url.startswith("html:"):
-            # Strip prefix to get the bare URL with fragment
             bare = re.sub(r"^(inline:|html:)", "", url)
-            # Extract script number from #script-N-hash fragment
             _frag_match = re.search(r"#script-(\d+)-[a-f0-9]+$", bare)
             if _frag_match:
                 _script_num = _frag_match.group(1)
-                # Full host + path (strip fragment only)
                 _page_display = bare.split("#")[0]
-                # Strip scheme for brevity: https://odehfin.com/admin -> odehfin.com/admin
                 _page_display = re.sub(r"^https?://", "", _page_display).rstrip("/") or "/"
                 url = f"script {_script_num} @ {_page_display}"
             else:
                 url = re.sub(r"^https?://[^/]+", "", bare) or bare
             tag = f" {A.GREY}[inline]{A.RESET}"
+            context = "inline"
         elif "headless-captured" in (js.technology or ""):
-            tag = f" {A.CYAN}[browser]{A.RESET}"
+            tag = f" {A.B_CYAN}[browser]{A.RESET}"
+            context = "browser"
         elif "webworker" in (js.technology or ""):
-            tag = f" {A.PURPLE}[worker]{A.RESET}"
+            tag = f" {A.BRIGHT_MAGENTA}[worker]{A.RESET}"
+            context = "worker"
 
-        # Show path only (strip scheme+host)
         _display = re.sub(r"^https?://[^/]+", "", url) or url
         if not _display or _display == "/":
             _display = url.rstrip("/").split("/")[-1] or url
-        fname = _display[:40].ljust(41)
 
         st = stats_map.get(js.url)
+        n_secrets  = st["secrets"]   if st else 0
+        n_endpoints = st["endpoints"] if st else 0
+
+        # Heat bar (4 blocks)
+        heat_score = min(4, n_secrets * 2 + (1 if n_endpoints > 10 else 0))
+        bar_filled = A.B_BRIGHT_RED + "#" * heat_score + A.RESET
+        bar_empty  = A.BRIGHT_BLACK + "." * (4 - heat_score) + A.RESET
+        heat_bar   = bar_filled + bar_empty
+
+        fname = _display[:path_w].ljust(path_w + 1)
+
         if st:
-            sec_c = A.RED    if st["secrets"]   > 0 else A.GREY
-            ep_c  = A.CYAN   if st["endpoints"] > 0 else A.GREY
-            inf_c = A.ORANGE if st["infra"]     > 0 else A.GREY
-            stats = (
-                f"  {sec_c}secrets={st['secrets']}{A.RESET}"
-                f"  {ep_c}endpoints={st['endpoints']}{A.RESET}"
-                f"  {inf_c}infra={st['infra']}{A.RESET}"
+            sec_c = A.B_BRIGHT_RED if n_secrets > 0 else A.GREY
+            ep_c  = A.B_CYAN       if n_endpoints > 0 else A.GREY
+            inf_c = A.ORANGE       if st.get("infra", 0) > 0 else A.GREY
+            stats_str = (
+                f"  {sec_c}secrets={n_secrets}{A.RESET}"
+                f"  {ep_c}endpoints={n_endpoints}{A.RESET}"
+                f"  {inf_c}infra={st.get('infra',0)}{A.RESET}"
             )
         else:
-            stats = f"  {A.GREY}not analyzed{A.RESET}"
+            stats_str = f"  {A.GREY}not analyzed{A.RESET}"
 
-        smap = f" {A.YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
-        _p(f"  {A.GREY}•{A.RESET} {fname}{tag}{smap}  {A.GREY}{size}{A.RESET}{stats}")
+        smap = f" {A.B_YELLOW}[map]{A.RESET}" if getattr(js, "has_source_map", False) else ""
+        size_str = A.DIM + f"{size:>8}" + A.RESET
+        _p(f"  {A.GREY}*{A.RESET} {fname}{tag}{smap}  {size_str}  {heat_bar}{stats_str}")
 
     # Show HTML-attribute findings as page-level entries
     if html_entries:
@@ -241,49 +341,54 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
         _p(f"  {A.GREY}HTML attribute findings (not in JS content):{A.RESET}")
         for he in html_entries:
             _page = re.sub(r"^https?://[^/]+", "", he["url"].replace("html:", "")) or he["url"]
-            sec_c = A.RED if he["secrets"] > 0 else A.GREY
-            _p(f"  {A.GREY}•{A.RESET} {_page[:40].ljust(41)}  {A.GREY}[page]{A.RESET}  {sec_c}secrets={he['secrets']}{A.RESET}")
+            sec_c = A.B_BRIGHT_RED if he["secrets"] > 0 else A.GREY
+            _p(f"  {A.GREY}*{A.RESET} {_page[:path_w].ljust(path_w + 1)}  {A.GREY}[page]{A.RESET}  {sec_c}secrets={he['secrets']}{A.RESET}")
 
     if not verbose and len(js_files) > 20:
         _p(f"\n  {A.GREY}  ... and {len(js_files)-20} more  (-v to show all){A.RESET}")
     _p()
 
 
-# ── Feature summaries ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Feature summaries  (original signatures)
+# ---------------------------------------------------------------------------
 
 def print_source_maps(discovered, valid, recovered, sources, details=None):
+    """Print source map discovery section."""
     if not discovered:
         return
-    _section("SOURCE MAPS", "", A.YELLOW)
-    for label, val in [("Discovered", str(discovered)), ("Valid", str(valid)),
-                       ("Recovered", str(recovered)), ("Sources", str(sources))]:
-        _p(f"  {_label(label)}{val}")
+    _section("SOURCE MAPS", "", A.B_YELLOW)
+    for lbl, val in [("Discovered", str(discovered)), ("Valid", str(valid)),
+                     ("Recovered", str(recovered)), ("Sources", str(sources))]:
+        _p(f"  {_label(lbl)}{val}")
     if details:
         for d in details:
-            _p(f"\n  {A.WHITE}{d.get('js','')}{A.RESET}")
-            _p(f"  {A.GREY}  └─ {d.get('map','')}{A.RESET}")
+            _p(f"\n  {A.BRIGHT_WHITE}{d.get('js','')}{A.RESET}")
+            _p(f"  {A.GREY}  +-- {d.get('map','')}{A.RESET}")
             if d.get("sources"):
-                _p(f"  {A.GREY}     ├─ {d['sources']} original sources{A.RESET}")
+                _p(f"  {A.GREY}     +-- {d['sources']} original sources{A.RESET}")
     _p()
 
 
 def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0):
+    """Print webpack chunk discovery section."""
     if not discovered:
         return
-    _section("WEBPACK CHUNKS", "", A.YELLOW)
+    _section("WEBPACK CHUNKS", "", A.B_YELLOW)
     rows = [("Runtime", "detected" if runtime else "not found"),
             ("Discovered", str(discovered)), ("Downloaded", str(downloaded))]
     if endpoints:
         rows.append(("New endpoints", str(endpoints)))
     if findings:
         rows.append(("New findings", str(findings)))
-    for label, val in rows:
-        _p(f"  {_label(label)}{val}")
+    for lbl, val in rows:
+        _p(f"  {_label(lbl)}{val}")
     _p()
 
 
 def print_passive(source, urls, js, unique, new, errors=None):
-    _section("PASSIVE DISCOVERY", "", A.CYAN)
+    """Print passive discovery section."""
+    _section("PASSIVE DISCOVERY", "", A.B_CYAN)
     _p(f"  {_label('Source')}{source}")
     if urls > 0:
         _p(f"  {_label('URLs found')}{urls}")
@@ -293,13 +398,14 @@ def print_passive(source, urls, js, unique, new, errors=None):
         _p(f"  {_label('Status')}{A.GREY}No historical assets found{A.RESET}")
     if errors:
         for err in errors:
-            _p(f"  {A.YELLOW}  ! {err}{A.RESET}")
+            _p(f"  {A.B_YELLOW}  ! {err}{A.RESET}")
     _p()
 
 
 def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
                    workers=0, timings=None):
-    _section("BROWSER DISCOVERY", "", A.CYAN)
+    """Print browser discovery section."""
+    _section("BROWSER DISCOVERY", "", A.B_CYAN)
     rows = [("Engine", "Chromium"), ("Pages", str(pages)), ("JS captured", str(js))]
     if xhr or fetch:
         rows.append(("API calls", str(xhr + fetch)))
@@ -311,8 +417,8 @@ def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
         rows.append(("Endpoints", str(endpoints)))
     if workers:
         rows.append(("Workers", str(workers)))
-    for label, val in rows:
-        _p(f"  {_label(label)}{val}")
+    for lbl, val in rows:
+        _p(f"  {_label(lbl)}{val}")
 
     # Phase timings
     if timings:
@@ -322,22 +428,25 @@ def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
             "browser_start": "Browser start",
             "phase1_root":   "Root page",
             "phase2_routes": "Route crawl",
-            "endpoint_build":"Endpoint build",
+            "endpoint_build": "Endpoint build",
             "total":         "Total",
         }
-        for key, label in phase_labels.items():
+        for key, lbl in phase_labels.items():
             if key in timings:
-                secs = timings[key]
-                color = A.RED if key == "total" else A.GREY
-                _p(f"  {A.GREY}  {label:<16}{color}{secs:.1f}s{A.RESET}")
+                secs  = timings[key]
+                color = A.BRIGHT_RED if key == "total" else A.GREY
+                _p(f"  {A.GREY}  {lbl:<16}{color}{secs:.1f}s{A.RESET}")
     _p()
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers for libraries and intelligence
+# ---------------------------------------------------------------------------
 
 def _print_libraries(lib_findings):
     if not lib_findings:
         return
 
-    # Group CVEs by library+version
     by_lib: dict = {}
     for lf in lib_findings:
         key = f"{lf.library}::{lf.version}"
@@ -350,10 +459,8 @@ def _print_libraries(lib_findings):
     for lf in lib_findings:
         counts[lf.severity] = counts.get(lf.severity, 0) + 1
 
-    _section("VULNERABLE LIBRARIES",
-             f"{total_cves} in {unique_libs}", A.RED)
+    _section("VULNERABLE LIBRARIES", f"{total_cves} in {unique_libs}", A.B_BRIGHT_RED)
 
-    # Severity summary bar
     parts = []
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
         if counts.get(sev):
@@ -363,7 +470,6 @@ def _print_libraries(lib_findings):
         _p("  " + "   ".join(parts))
     _p()
 
-    # One block per library, showing all its CVEs together
     for lib_key in sorted(by_lib.keys(),
                           key=lambda k: -max(c.cvss for c in by_lib[k])):
         cves    = sorted(by_lib[lib_key], key=lambda x: -x.cvss)
@@ -371,23 +477,26 @@ def _print_libraries(lib_findings):
         version = cves[0].version
         fname   = cves[0].source_file.split("/")[-1] if "/" in cves[0].source_file else cves[0].source_file
 
-        # Highest severity determines header color
         top_sev = cves[0].severity
         hc      = SEV_COLOR.get(top_sev, "")
 
-        # Library header
-        _p(f"  {hc}{A.BOLD}{library} {version}{A.RESET}  {A.GREY}·  {fname}{A.RESET}")
-        _p(f"  {A.GREY}{'─' * min(_w()-4, 70)}{A.RESET}")
+        w = _w()
+        bc = hc
 
-        # Each CVE as a clean row
+        _p(bc + _box_top_s(w) + A.RESET)
+        header = f"{hc}{A.BOLD}{library} {version}{A.RESET}  {A.GREY}{fname}{A.RESET}"
+        _p(_box_row_s(header, w, bc))
+        _p(bc + _box_mid_s(w) + A.RESET)
+
         for cve in cves:
             c        = SEV_COLOR.get(cve.severity, "")
             sev_tag  = f"{c}{cve.severity:<8}{A.RESET}"
             cvss_tag = f"{A.GREY}CVSS {cve.cvss}{A.RESET}"
-            _p(f"  {sev_tag} {A.CYAN}{cve.cve_id}{A.RESET}  {cvss_tag}")
-            _p(f"           {cve.description}")
-            _p(f"           {A.GREY}Fix: {cve.remediation}{A.RESET}")
-            _p()
+            _p(_box_row_s(f"{sev_tag} {A.CYAN}{cve.cve_id}{A.RESET}  {cvss_tag}", w, bc))
+            _p(_box_row_s(f"         {cve.description}", w, bc))
+            _p(_box_row_s(f"         {A.GREY}Fix: {cve.remediation}{A.RESET}", w, bc))
+
+        _p(bc + _box_bot_s(w) + A.RESET)
         _p()
 
 
@@ -397,28 +506,28 @@ def _print_intelligence(intel):
     if not has:
         return
 
-    _section("PASSIVE INTELLIGENCE", "", A.PURPLE)
+    _section("PASSIVE INTELLIGENCE", "", A.BRIGHT_MAGENTA)
 
     if intel.sitemap_urls:
         _p(f"  {_label('Sitemap URLs')}{len(intel.sitemap_urls)}")
         for url in intel.sitemap_urls[:8]:
-            _p(f"  {A.GREY}  • {url[:_w()-8]}{A.RESET}")
+            _p(f"  {A.GREY}  * {url[:_w()-8]}{A.RESET}")
         if len(intel.sitemap_urls) > 8:
             _p(f"  {A.GREY}  ... and {len(intel.sitemap_urls)-8} more{A.RESET}")
 
     if intel.api_schema:
         _p(f"\n  {_label('API Schema')}{intel.api_schema.get('type','?')}  {A.GREY}{intel.api_schema.get('url','')}{A.RESET}")
         for ep in intel.api_endpoints[:12]:
-            _p(f"  {A.GREY}  • {ep}{A.RESET}")
+            _p(f"  {A.GREY}  * {ep}{A.RESET}")
 
     if intel.security_txt:
-        _p(f"\n  {_label('security.txt')}{A.GREEN}found{A.RESET}")
+        _p(f"\n  {_label('security.txt')}{A.B_GREEN}found{A.RESET}")
         for line in intel.security_txt.splitlines()[:5]:
             if line.strip() and not line.startswith("#"):
                 _p(f"  {A.GREY}  {line.strip()}{A.RESET}")
 
     if intel.openid_config:
-        _p(f"\n  {_label('OpenID Config')}{A.YELLOW}found{A.RESET}")
+        _p(f"\n  {_label('OpenID Config')}{A.B_YELLOW}found{A.RESET}")
         if isinstance(intel.openid_config, dict):
             for k in ["issuer", "authorization_endpoint", "token_endpoint"]:
                 if k in intel.openid_config:
@@ -426,13 +535,15 @@ def _print_intelligence(intel):
     _p()
 
 
-# ── Secret analysis ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Secret analysis  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_secret_analysis(findings):
+    """Print the secret analysis summary block."""
     if not findings:
         return
 
-    # PUBLIC_IDENTIFIER findings (Netlify site IDs, etc.) are not secrets — exclude from counts
     def _is_public_id(f):
         return getattr(f, "classification", "") == "PUBLIC_IDENTIFIER" or f.rule_id in (
             "NETLIFY_SITE_ID",
@@ -445,23 +556,26 @@ def print_secret_analysis(findings):
     validated = sum(1 for f in secrets if f.status == "validated")
     fps       = sum(1 for f in secrets if f.status == "likely_false_positive")
 
-    _section("SECRET ANALYSIS", "", A.RED)
-    for label, val, color in [
-        ("Detected",          str(total),        ""),
-        ("High confidence",   str(high_conf),    A.RED if high_conf else ""),
-        ("Likely FP",         str(fps),          A.GREY),
-        ("Validated",         str(validated),    A.RED + A.BOLD if validated else ""),
+    _section("SECRET ANALYSIS", "", A.B_BRIGHT_RED)
+    for lbl, val, color in [
+        ("Detected",           str(total),        ""),
+        ("High confidence",    str(high_conf),    A.B_BRIGHT_RED if high_conf else ""),
+        ("Likely FP",          str(fps),          A.GREY),
+        ("Validated",          str(validated),    A.B_BRIGHT_RED if validated else ""),
         ("Public identifiers", str(len(pub_ids)), A.GREY),
     ]:
-        if label == "Public identifiers" and len(pub_ids) == 0:
+        if lbl == "Public identifiers" and len(pub_ids) == 0:
             continue
-        _p(f"  {_label(label, 18)}{_val(val, color)}")
+        _p(f"  {_label(lbl, 18)}{_val(val, color)}")
     _p()
 
 
-# ── Findings ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Findings  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_findings(findings, verbose=False):
+    """Print all findings as bordered cards."""
     real = [f for f in findings if f.status != "likely_false_positive"]
     fps  = [f for f in findings if f.status == "likely_false_positive"]
 
@@ -475,9 +589,9 @@ def print_findings(findings, verbose=False):
     for f in real:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
-    order    = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    fp_note  = f"  {A.GREY}+{len(fps)} FP excluded{A.RESET}" if fps else ""
-    _section("FINDINGS", f"{len(real)} confirmed{fp_note}", A.RED)
+    order   = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    fp_note = f"  {A.GREY}+{len(fps)} FP excluded{A.RESET}" if fps else ""
+    _section("FINDINGS", f"{len(real)} confirmed{fp_note}", A.B_BRIGHT_RED)
 
     for sev in order:
         if counts.get(sev):
@@ -489,142 +603,175 @@ def print_findings(findings, verbose=False):
         _print_finding(f, verbose=verbose)
 
     if fps and verbose:
-        _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
+        _p(f"  {A.GREY}{'-' * 40}{A.RESET}")
         _p(f"  {A.GREY}Likely false positives ({len(fps)}){A.RESET}")
         for f in fps[:10]:
             fname = f.file_url.split("/")[-1] if "/" in f.file_url else f.file_url
-            _p(f"  {A.GREY}  • {f.title}  {fname}:{f.line_number}  {f.matched_value[:40]}{A.RESET}")
+            _p(f"  {A.GREY}  * {f.title}  {fname}:{f.line_number}  {f.matched_value[:40]}{A.RESET}")
     _p()
 
 
 def _print_finding(f, verbose=False):
-    sc  = SEV_COLOR.get(f.severity, "")
+    """Print a single finding as a bordered card."""
+    sev   = f.severity.lower()
+    dot_c = SEVERITY_DOT_COLOR.get(sev, A.WHITE)
+    lbl_c = SEV_COLOR.get(f.severity, A.WHITE)
+    lbl   = SEVERITY_LABEL.get(sev, f.severity.upper()).strip()
+    stat_c = STATUS_COLOR.get(f.status.lower(), A.WHITE) if f.status else A.WHITE
 
-    _p(f"  {sc}{f.severity:<8}{A.RESET}  {A.WHITE}{A.BOLD}{f.title}{A.RESET}  {A.GREY}({f.rule_id}){A.RESET}")
-    _p()
+    w  = _w()
+    bc = dot_c
 
-    url = f.file_url[:_w()-6]
-    occ = getattr(f, "occurrences", None) or []
-    if len(occ) > 1:
-        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}  {A.YELLOW}(+{len(occ)-1} more pages){A.RESET}")
+    _p(bc + _box_top_s(w) + A.RESET)
+
+    # Title row
+    badge     = dot_c + "* " + A.RESET + lbl_c + f"{lbl:<8}" + A.RESET
+    title_str = A.BRIGHT_WHITE + f.title + A.RESET
+    rule_str  = (A.GREY + "rule:" + A.DIM + f.rule_id + A.RESET) if f.rule_id else ""
+    badge_vis = 2 + 1 + 8
+    gap = max(0, (w - 4) - badge_vis - 1 - _vis_len(title_str) - 1 - _vis_len(rule_str))
+    title_row = badge + " " + title_str + " " * gap + rule_str
+    _p(_box_row_s(title_row, w, bc))
+
+    _p(bc + _box_mid_s(w) + A.RESET)
+
+    def _drow(key: str, val: str) -> None:
+        k = A.GREY + f"{key:<10}" + A.RESET
+        _p(_box_row_s(k + "  " + val, w, bc))
+
+    url  = f.file_url[:w - 6]
+    occ  = getattr(f, "occurrences", None) or []
+    loc  = A.BRIGHT_WHITE + url + A.RESET
+    if occ and len(occ) > 1:
+        loc += A.GREY + f"  line {f.line_number}" + A.RESET + A.B_YELLOW + f"  (+{len(occ)-1} more pages)" + A.RESET
     else:
-        _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}")
-    _p(f"  {_label('Type')}{f.category}")
+        loc += A.GREY + f"  line {f.line_number}" + A.RESET
+    _drow("File", loc)
 
-    sc2 = {"likely_secret": A.RED, "validated": A.RED+A.BOLD,
-           "candidate": A.YELLOW, "likely_false_positive": A.GREY}.get(f.status, "")
-    _p(f"  {_label('Confidence')}{f.confidence:.0%}  {sc2}{f.status}{A.RESET}")
-    _p(f"  {_label('Evidence')}{sc}{f.matched_value}{A.RESET}")
+    _drow("Type", A.BRIGHT_WHITE + f.category + A.RESET)
+
+    conf_str = stat_c + f.status + A.RESET + A.GREY + f"  ({f.confidence:.0%} confidence)" + A.RESET
+    _drow("Status", conf_str)
+
+    _drow("Evidence", lbl_c + redact(f.matched_value) + A.RESET)
 
     if f.context and verbose:
         ctx = f.context[:120].replace("\n", " ").strip()
-        _p(f"  {_label('Context')}{A.GREY}{ctx}{A.RESET}")
+        _drow("Context", A.GREY + ctx + A.RESET)
 
-    _p(f"  {_label('Fix')}{f.remediation[:100]}")
+    max_fix = w - 18
+    fix_txt = f.remediation[:100]
+    if len(fix_txt) > max_fix:
+        wrapped = textwrap.wrap(fix_txt, max_fix)
+        _drow("Fix", A.DIM + wrapped[0] + A.RESET)
+        for cont in wrapped[1:]:
+            _p(_box_row_s("            " + A.DIM + cont + A.RESET, w, bc))
+    else:
+        _drow("Fix", A.DIM + fix_txt + A.RESET)
 
     if f.status == "validated":
-        _p(f"  {A.RED}{A.BOLD}  ⚡ CONFIRMED ACTIVE{A.RESET}")
+        _p(_box_row_s(A.B_BRIGHT_RED + "  [!] CONFIRMED ACTIVE" + A.RESET, w, bc))
 
-    _p(f"  {A.GREY}{'─' * 60}{A.RESET}")
+    _p(bc + _box_bot_s(w) + A.RESET)
     _p()
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Coverage  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_coverage(coverage) -> None:
-    """Print observed coverage data and blind spots — real counts only."""
+    """Print observed coverage data and blind spots."""
     if not coverage:
         return
 
-    _section("COVERAGE & BLIND SPOTS", "", A.CYAN)
+    _section("COVERAGE & BLIND SPOTS", "", A.B_CYAN)
 
-    def _row(label: str, val, color=""):
-        _p(f"  {A.GREY}{label:<18}{A.RESET}  {color}{val}{A.RESET}")
+    def _row(lbl: str, val, color=""):
+        _p(f"  {A.GREY}{lbl:<18}{A.RESET}  {color}{val}{A.RESET}")
 
-    # Pages
     p = coverage.pages
-    _p(f"  {A.WHITE}{A.BOLD}Pages{A.RESET}")
+    _p(f"  {A.BRIGHT_WHITE}{A.BOLD}Pages{A.RESET}")
     _row("Discovered",   p.discovered)
     _row("Visited",      p.visited,
-         A.GREEN if p.visited == p.discovered else A.YELLOW)
+         A.B_GREEN if p.visited == p.discovered else A.B_YELLOW)
     if p.failed:
-        _row("Failed", p.failed, A.RED)
+        _row("Failed", p.failed, A.BRIGHT_RED)
     if p.auth_required:
-        _row("Auth-required", p.auth_required, A.YELLOW)
+        _row("Auth-required", p.auth_required, A.B_YELLOW)
         for u in p.auth_urls[:3]:
             _p(f"  {A.GREY}    {u}{A.RESET}")
     _p()
 
-    # JavaScript
     j = coverage.js
-    _p(f"  {A.WHITE}{A.BOLD}JavaScript{A.RESET}")
+    _p(f"  {A.BRIGHT_WHITE}{A.BOLD}JavaScript{A.RESET}")
     _row("Discovered", j.discovered)
     _row("Analyzed",   j.analyzed,
-         A.GREEN if j.analyzed == j.discovered else A.YELLOW)
+         A.B_GREEN if j.analyzed == j.discovered else A.B_YELLOW)
     if j.failed:
-        _row("Failed", j.failed, A.RED)
+        _row("Failed", j.failed, A.BRIGHT_RED)
         for u in j.failed_urls[:2]:
             _p(f"  {A.GREY}    {u}{A.RESET}")
     _p()
 
-    # Routes
     r = coverage.routes
     if r.discovered > 0:
-        _p(f"  {A.WHITE}{A.BOLD}Routes{A.RESET}")
+        _p(f"  {A.BRIGHT_WHITE}{A.BOLD}Routes{A.RESET}")
         _row("Discovered", r.discovered)
         _row("Visited",    r.visited,
-             A.GREEN if r.visited >= r.discovered else A.YELLOW)
+             A.B_GREEN if r.visited >= r.discovered else A.B_YELLOW)
         if r.unvisited:
-            _row("Unvisited", r.unvisited, A.YELLOW)
+            _row("Unvisited", r.unvisited, A.B_YELLOW)
         _p()
 
-    # Runtime
     rt = coverage.runtime
     has_runtime = any([rt.api_requests, rt.websockets, rt.workers, rt.iframes])
     if has_runtime:
-        _p(f"  {A.WHITE}{A.BOLD}Runtime{A.RESET}")
-        if rt.api_requests: _row("API requests",  rt.api_requests, A.GREEN)
-        if rt.websockets:   _row("WebSockets",    rt.websockets,   A.GREEN)
-        if rt.workers:      _row("Workers",       rt.workers,      A.GREEN)
-        if rt.iframes:      _row("Iframes",       rt.iframes,      A.GREEN)
+        _p(f"  {A.BRIGHT_WHITE}{A.BOLD}Runtime{A.RESET}")
+        if rt.api_requests: _row("API requests",  rt.api_requests, A.B_GREEN)
+        if rt.websockets:   _row("WebSockets",    rt.websockets,   A.B_GREEN)
+        if rt.workers:      _row("Workers",       rt.workers,      A.B_GREEN)
+        if rt.iframes:      _row("Iframes",       rt.iframes,      A.B_GREEN)
         _p()
 
-    # Source maps
     sm = coverage.source_maps
-    _p(f"  {A.WHITE}{A.BOLD}Source Maps{A.RESET}")
+    _p(f"  {A.BRIGHT_WHITE}{A.BOLD}Source Maps{A.RESET}")
     if sm.discovered == 0:
         _p(f"  {A.GREY}  None referenced in any JS file{A.RESET}")
     else:
         _row("Discovered",  sm.discovered)
         if sm.recovered > 0:
-            _row("Recovered",   sm.recovered, A.GREEN)
+            _row("Recovered",   sm.recovered, A.B_GREEN)
         else:
-            _row("Recovered",   0, A.YELLOW)
+            _row("Recovered",   0, A.B_YELLOW)
         if sm.unavailable > 0:
-            _row("Unavailable", sm.unavailable, A.YELLOW)
+            _row("Unavailable", sm.unavailable, A.B_YELLOW)
             for u in sm.unavailable_urls[:3]:
                 _p(f"  {A.GREY}    {u}{A.RESET}")
     _p()
 
-    # Blind spots
     if coverage.blind_spots:
         _p(f"  {A.ORANGE}{A.BOLD}BLIND SPOTS{A.RESET}")
         _p()
         for bs in coverage.blind_spots:
-            sc = (A.RED    if bs.severity == "HIGH"   else
-                  A.YELLOW if bs.severity == "MEDIUM" else A.GREY)
+            sc = (A.BRIGHT_RED  if bs.severity == "HIGH"   else
+                  A.B_YELLOW    if bs.severity == "MEDIUM" else A.GREY)
             _p(f"  {sc}[{bs.severity}]{A.RESET}  {bs.description}")
             for u in (bs.urls or [])[:3]:
                 _p(f"  {A.GREY}         {u}{A.RESET}")
             if bs.mitigation:
-                _p(f"  {A.GREY}         → {bs.mitigation}{A.RESET}")
+                _p(f"  {A.GREY}         -> {bs.mitigation}{A.RESET}")
             _p()
 
 
+# ---------------------------------------------------------------------------
+# Attack surface  (original signature)
+# ---------------------------------------------------------------------------
+
 def print_attack_surface(surface):
+    """Print attack surface analysis section."""
     if not surface:
         return
-    # Only show section if there is something meaningful to display
     has_content = (
         surface.get("total_items", 0) > 0
         or surface.get("state_change")
@@ -633,20 +780,19 @@ def print_attack_surface(surface):
         return
 
     total = surface.get("total_items", 0)
-    _section("ATTACK SURFACE", str(total), A.RED)
+    _section("ATTACK SURFACE", str(total), A.B_BRIGHT_RED)
 
-    # Summary bar
     parts = []
-    for key, label, color in [
-        ("idor", "IDOR", A.RED),
-        ("injection", "Injection", A.ORANGE),
-        ("file_ops", "LFI/Path", A.ORANGE),
-        ("ssrf", "SSRF", A.YELLOW),
-        ("open_redirect", "Open Redirect", A.YELLOW),
+    for key, lbl, color in [
+        ("idor",          "IDOR",          A.B_BRIGHT_RED),
+        ("injection",     "Injection",     A.ORANGE),
+        ("file_ops",      "LFI/Path",      A.ORANGE),
+        ("ssrf",          "SSRF",          A.B_YELLOW),
+        ("open_redirect", "Open Redirect", A.B_YELLOW),
     ]:
         n = len(surface.get(key, []))
         if n:
-            parts.append(f"{color}{n} {label}{A.RESET}")
+            parts.append(f"{color}{n} {lbl}{A.RESET}")
     if parts:
         _p("  " + "   ".join(parts))
         _p()
@@ -663,25 +809,29 @@ def print_attack_surface(surface):
             _p(f"  {A.GREY}  ... and {len(items)-15} more{A.RESET}")
         _p()
 
-    _print_group(surface.get("idor", []), "IDOR CANDIDATES", A.RED)
-    _print_group(surface.get("injection", []), "INJECTION CANDIDATES", A.ORANGE)
-    _print_group(surface.get("file_ops", []), "PATH TRAVERSAL / LFI", A.ORANGE)
-    _print_group(surface.get("ssrf", []), "SSRF CANDIDATES", A.YELLOW)
-    _print_group(surface.get("open_redirect", []), "OPEN REDIRECT", A.YELLOW)
+    _print_group(surface.get("idor", []),          "IDOR CANDIDATES",         A.B_BRIGHT_RED)
+    _print_group(surface.get("injection", []),     "INJECTION CANDIDATES",    A.ORANGE)
+    _print_group(surface.get("file_ops", []),      "PATH TRAVERSAL / LFI",   A.ORANGE)
+    _print_group(surface.get("ssrf", []),          "SSRF CANDIDATES",         A.B_YELLOW)
+    _print_group(surface.get("open_redirect", []), "OPEN REDIRECT",           A.B_YELLOW)
 
-    # State-changing endpoints
     sc = surface.get("state_change", [])
     if sc:
-        _p(f"  {A.PURPLE}{A.BOLD}STATE-CHANGING ENDPOINTS{A.RESET}  {A.GREY}({len(sc)}){A.RESET}")
+        _p(f"  {A.BRIGHT_MAGENTA}{A.BOLD}STATE-CHANGING ENDPOINTS{A.RESET}  {A.GREY}({len(sc)}){A.RESET}")
         for ep in sc[:15]:
-            mc = A.RED if ep.method in ("DELETE", "PUT") else A.ORANGE
+            mc = A.B_BRIGHT_RED if ep.method in ("DELETE", "PUT") else A.ORANGE
             _p(f"  {mc}  {ep.method:<6}{A.RESET} {ep.url[:_w()-14]}")
         if len(sc) > 15:
             _p(f"  {A.GREY}  ... and {len(sc)-15} more{A.RESET}")
         _p()
 
 
+# ---------------------------------------------------------------------------
+# Endpoints  (original signature)
+# ---------------------------------------------------------------------------
+
 def print_endpoints(endpoints, validation_results=None, verbose=False):
+    """Print endpoints as a clean bordered table grouped by category."""
     if not endpoints:
         return
 
@@ -694,19 +844,41 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
         for r in validation_results:
             val_map[r.endpoint] = r
 
-    _section("ENDPOINTS", str(len(endpoints)), A.BLUE)
+    _section("ENDPOINTS", str(len(endpoints)), A.B_BLUE)
 
-    cat_colors = {"AUTH": A.RED, "ADMIN": A.ORANGE, "GRAPHQL": A.PURPLE,
-                  "API": A.BLUE, "WEBSOCKET": A.CYAN, "SERVERLESS": A.YELLOW, "ROUTE": A.GREEN}
+    cat_colors = {
+        "AUTH":       A.B_BRIGHT_RED,
+        "ADMIN":      A.ORANGE,
+        "GRAPHQL":    A.BRIGHT_MAGENTA,
+        "API":        A.B_BLUE,
+        "WEBSOCKET":  A.B_CYAN,
+        "SERVERLESS": A.B_YELLOW,
+        "ROUTE":      A.B_GREEN,
+    }
 
+    w  = _w()
+    bc = A.B_BLUE
+
+    _p(bc + _box_top_s(w) + A.RESET)
+
+    # Category count summary
+    count_parts = []
     for cat in ["AUTH", "ADMIN", "GRAPHQL", "UPLOAD", "DOWNLOAD", "API", "SERVERLESS", "WEBSOCKET", "ROUTE", "UNKNOWN"]:
         eps = by_cat.get(cat, [])
         if not eps:
             continue
         c = cat_colors.get(cat, A.GREY)
-        _p(f"  {c}{A.BOLD}{cat:<12}{A.RESET}  {len(eps)}")
+        count_parts.append(f"{c}{A.BOLD}{cat:<12}{A.RESET}  {A.BRIGHT_WHITE}{len(eps)}{A.RESET}")
 
-    _p()
+    row_parts: list[str] = []
+    for i, part in enumerate(count_parts):
+        row_parts.append(part)
+        if (i + 1) % 3 == 0:
+            _p(_box_row_s("  ".join(row_parts), w, bc))
+            row_parts = []
+    if row_parts:
+        _p(_box_row_s("  ".join(row_parts), w, bc))
+
     shown = 0
     limit = 9999 if verbose else 40
 
@@ -715,67 +887,75 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
         if not eps:
             continue
         c = cat_colors.get(cat, A.GREY)
+        _p(bc + _box_mid_s(w) + A.RESET)
+        _p(_box_row_s(c + A.BOLD + cat + A.RESET, w, bc))
+
         for ep in eps:
             if shown >= limit:
                 break
             method = (ep.method or "?").ljust(6)
-            url    = ep.url[:_w()-20]
+            url    = ep.url[:w - 22]
             vr     = val_map.get(ep.url)
 
-            # Color method by type
-            mc = (A.RED if ep.method in ("DELETE", "PUT") else
-                  A.ORANGE if ep.method == "POST" else
+            mc = (A.B_BRIGHT_RED if ep.method in ("DELETE", "PUT") else
+                  A.ORANGE       if ep.method == "POST"             else
                   A.GREY)
 
             if vr:
-                sc = (A.GREEN if vr.status_code == 200 else
-                      A.YELLOW if vr.status_code in (301,302,307) else
-                      A.RED if vr.status_code in (401,403) else A.GREY)
-                ct = vr.content_type.split(";")[0][:20] if vr.content_type else ""
-                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}  {sc}{vr.status_code}{A.RESET}  {A.GREY}{ct}{A.RESET}")
+                sc2 = (A.B_GREEN if vr.status_code == 200 else
+                       A.B_YELLOW if vr.status_code in (301, 302, 307) else
+                       A.B_BRIGHT_RED if vr.status_code in (401, 403) else A.GREY)
+                ct  = vr.content_type.split(";")[0][:20] if vr.content_type else ""
+                row = (mc + method + A.RESET + "  " + c + url + A.RESET +
+                       "  " + sc2 + str(vr.status_code) + A.RESET +
+                       ("  " + A.DIM + ct + A.RESET if ct else ""))
             else:
-                _p(f"  {mc}{method}{A.RESET}  {c}{url}{A.RESET}")
+                row = mc + method + A.RESET + "  " + c + url + A.RESET
 
-            # Show intelligence in verbose mode
+            _p(_box_row_s(row, w, bc))
+
             if verbose:
-                intel_parts = []
-                bf = getattr(ep, "body_fields", None) or []
-                qp = getattr(ep, "query_params", None) or []
-                pp = getattr(ep, "path_params", None) or []
+                bf   = getattr(ep, "body_fields",  None) or []
+                qp   = getattr(ep, "query_params", None) or []
+                pp   = getattr(ep, "path_params",  None) or []
                 auth = getattr(ep, "auth_context", "") or ""
-
                 if bf:
                     names = ", ".join(f["name"] for f in bf[:6])
-                    _p(f"  {A.GREY}         body: {names}{A.RESET}")
+                    _p(_box_row_s(f"         {A.GREY}body: {names}{A.RESET}", w, bc))
                 if qp:
                     names = ", ".join(f["name"] for f in qp[:6])
-                    _p(f"  {A.GREY}         query: {names}{A.RESET}")
+                    _p(_box_row_s(f"         {A.GREY}query: {names}{A.RESET}", w, bc))
                 if pp:
                     names = ", ".join(f["name"] for f in pp[:6])
-                    _p(f"  {A.GREY}         path params: {names}{A.RESET}")
+                    _p(_box_row_s(f"         {A.GREY}path params: {names}{A.RESET}", w, bc))
                 if auth:
-                    _p(f"  {A.YELLOW}         auth: {auth}{A.RESET}")
+                    _p(_box_row_s(f"         {A.B_YELLOW}auth: {auth}{A.RESET}", w, bc))
 
             shown += 1
+
+    _p(bc + _box_bot_s(w) + A.RESET)
 
     if shown >= limit and not verbose:
         _p(f"\n  {A.GREY}  ... use -v to show all {len(endpoints)} endpoints{A.RESET}")
     _p()
 
 
-# ── GraphQL ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# GraphQL  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_graphql(schemas):
+    """Print GraphQL schema section."""
     if not schemas:
         return
-    _section("GRAPHQL", "", A.PURPLE)
+    _section("GRAPHQL", "", A.BRIGHT_MAGENTA)
     _p(f"  {_label('Endpoints')}{len(schemas)}")
     _p(f"  {_label('Introspection')}{'enabled' if any(not s.error for s in schemas) else 'disabled'}")
     _p(f"  {_label('Types')}{sum(len(s.types) for s in schemas if not s.error)}")
     _p(f"  {_label('Queries')}{sum(len(s.queries) for s in schemas if not s.error)}")
     _p(f"  {_label('Mutations')}{sum(len(s.mutations) for s in schemas if not s.error)}")
     for schema in schemas:
-        _p(f"\n  {A.WHITE}{schema.endpoint[:_w()-4]}{A.RESET}")
+        _p(f"\n  {A.BRIGHT_WHITE}{schema.endpoint[:_w()-4]}{A.RESET}")
         if schema.error:
             _p(f"  {A.GREY}  {schema.error}{A.RESET}")
             continue
@@ -784,61 +964,74 @@ def print_graphql(schemas):
         if schema.mutations:
             _p(f"  {A.ORANGE}  Mutations:{A.RESET}  {', '.join(schema.mutations[:8])}")
         if schema.sensitive_fields:
-            _p(f"  {A.RED}  Sensitive:{A.RESET}  {', '.join(schema.sensitive_fields[:6])}")
+            _p(f"  {A.B_BRIGHT_RED}  Sensitive:{A.RESET}  {', '.join(schema.sensitive_fields[:6])}")
     _p()
 
 
-# ── Infrastructure ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Infrastructure  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_infrastructure(items):
+    """Print infrastructure findings section."""
     if not items:
         return
     by_cls: dict = {}
     for item in items:
         by_cls.setdefault(item.classification, []).append(item)
-    _section("INFRASTRUCTURE", str(len(items)), A.YELLOW)
+    _section("INFRASTRUCTURE", str(len(items)), A.B_YELLOW)
     for cls, its in sorted(by_cls.items()):
-        cls_c = A.RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else (A.ORANGE if "HOSTNAME" in cls else A.GREY)
+        cls_c = (A.B_BRIGHT_RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else
+                 A.ORANGE       if "HOSTNAME" in cls                          else A.GREY)
         _p(f"\n  {cls_c}{cls}{A.RESET}  {A.GREY}({len(its)}){A.RESET}")
         for item in its[:10]:
             fname = item.source_file.split("/")[-1] if "/" in item.source_file else item.source_file
-            _p(f"  {A.GREY}  • {item.value}  line {item.line_number} in {fname}{A.RESET}")
+            _p(f"  {A.GREY}  * {item.value}  line {item.line_number} in {fname}{A.RESET}")
     _p()
 
 
-# ── Subdomains ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Subdomains  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_subdomains(subdomains):
+    """Print subdomain list section."""
     if not subdomains:
         return
-    _section("SUBDOMAINS", str(len(subdomains)), A.GREEN)
+    _section("SUBDOMAINS", str(len(subdomains)), A.B_GREEN)
     for sub in subdomains[:30]:
-        _p(f"  {A.GREY}  • {sub}{A.RESET}")
+        _p(f"  {A.GREY}  * {sub}{A.RESET}")
     if len(subdomains) > 30:
         _p(f"  {A.GREY}  ... and {len(subdomains)-30} more{A.RESET}")
     _p()
 
 
-# ── Endpoint validation ───────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Endpoint validation  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_validation_results(results):
+    """Print interesting endpoint validation results."""
     interesting = [r for r in results if r.interesting]
     if not interesting:
         return
-    _section("ENDPOINT VALIDATION", f"{len(interesting)} interesting", A.GREEN)
+    _section("ENDPOINT VALIDATION", f"{len(interesting)} interesting", A.B_GREEN)
     for r in interesting:
-        sc = (A.GREEN if r.status_code == 200 else
-              A.YELLOW if r.status_code in (301,302,307) else
-              A.RED if r.status_code in (401,403) else A.GREY)
+        sc = (A.B_GREEN    if r.status_code == 200 else
+              A.B_YELLOW   if r.status_code in (301, 302, 307) else
+              A.B_BRIGHT_RED if r.status_code in (401, 403) else A.GREY)
         url   = r.endpoint[:_w()-20]
         notes = " | ".join(r.notes[:2]) if r.notes else ""
         _p(f"  {sc}{r.status_code}{A.RESET}  {url}  {A.GREY}{notes}{A.RESET}")
     _p()
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Summary  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_summary(result, extras=None, report_paths=None):
+    """Print the final scan-complete summary in a double-line box."""
     extras       = extras or {}
     report_paths = report_paths or {}
 
@@ -854,63 +1047,99 @@ def print_summary(result, extras=None, report_paths=None):
         secs     = (result.finished_at - result.started_at).total_seconds()
         duration = f"{secs:.1f}s"
 
-    _p()
-    _p(f"  {A.WHITE}{A.BOLD}{_line('─')}{A.RESET}")
-    _p(f"  {A.WHITE}{A.BOLD}SCAN COMPLETE{A.RESET}  {A.GREY}{duration}{A.RESET}")
-    _p(f"  {A.WHITE}{A.BOLD}{_line('─')}{A.RESET}")
-    _p()
+    w  = _w()
+    bc = A.B_GREEN
+    rc = A.RESET
 
-    _p(f"  {_label('Target')}{A.CYAN}{result.target_url[:70]}{A.RESET}")
-    _p(f"  {_label('Pages crawled')}{result.pages_crawled}")
+    _p("")
+    _p(bc + _box_top_d(w) + rc)
+
+    # Title row - centered
+    title_text = "SCAN COMPLETE"
+    if duration:
+        title_text += f"  {duration}"
+    inner_w  = w - 4
+    centered = title_text.center(inner_w)
+    _p(_box_row_d(A.B_GREEN + centered + rc, w, bc))
+
+    _p(bc + _box_mid_d(w) + rc)
+
+    _p(_box_row_d(f"{A.GREY}Target{rc}     {A.BRIGHT_WHITE}{result.target_url[:70]}{rc}", w, bc))
+    _p(_box_row_d(f"{A.GREY}Pages{rc}      {A.BRIGHT_WHITE}{result.pages_crawled}{rc}", w, bc))
 
     js_count = len([js for js in result.js_files if not js.url.startswith("sourcemap://")])
-    _p(f"  {_label('JS files')}{js_count}")
+    _p(_box_row_d(f"{A.GREY}JS files{rc}   {A.BRIGHT_WHITE}{js_count}{rc}", w, bc))
     if extras.get("recovered_sources"):
-        _p(f"  {_label('Recovered')}{A.GREEN}{extras['recovered_sources']} source files{A.RESET}")
+        _p(_box_row_d(f"{A.GREY}Recovered{rc}  {A.B_GREEN}{extras['recovered_sources']} source files{rc}", w, bc))
     if extras.get("chunks_found"):
-        _p(f"  {_label('Chunks')}{extras['chunks_found']}")
+        _p(_box_row_d(f"{A.GREY}Chunks{rc}     {A.BRIGHT_WHITE}{extras['chunks_found']}{rc}", w, bc))
 
-    _p()
-    _p(f"  {_label('Endpoints')}{len(result.endpoints)}")
+    _p(_box_row_d(f"{A.GREY}Endpoints{rc}  {A.BRIGHT_WHITE}{len(result.endpoints)}{rc}", w, bc))
     if extras.get("subdomains"):
-        _p(f"  {_label('Subdomains')}{extras['subdomains']}")
+        _p(_box_row_d(f"{A.GREY}Subdomains{rc} {A.BRIGHT_WHITE}{extras['subdomains']}{rc}", w, bc))
     if result.infrastructure:
-        _p(f"  {_label('Infrastructure')}{len(result.infrastructure)}")
+        _p(_box_row_d(f"{A.GREY}Infra{rc}      {A.BRIGHT_WHITE}{len(result.infrastructure)}{rc}", w, bc))
 
     lib_f = extras.get("lib_findings", [])
     if lib_f:
-        _p(f"  {_label('Vuln libraries')}{A.RED}{len(lib_f)}{A.RESET}")
+        _p(_box_row_d(f"{A.GREY}Vuln libs{rc}  {A.B_BRIGHT_RED}{len(lib_f)}{rc}", w, bc))
 
-    _p()
-    _p(f"  {_label('Findings')}{len(real)}")
-    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-        n = counts.get(sev, 0)
-        if n:
-            c = SEV_COLOR.get(sev, "")
-            _p(f"  {c}  {sev:<10}  {n}{A.RESET}")
+    if real or counts:
+        _p(bc + _box_mid_d(w) + rc)
+        _p(_box_row_d(A.BOLD + "FINDINGS" + rc, w, bc))
+        order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        sev_pairs = [(s, counts[s]) for s in order if counts.get(s, 0) > 0]
+        for i in range(0, len(sev_pairs), 2):
+            left  = _fmt_sev_cell(sev_pairs[i][0], sev_pairs[i][1])
+            right = ""
+            if i + 1 < len(sev_pairs):
+                right = "    " + _fmt_sev_cell(sev_pairs[i + 1][0], sev_pairs[i + 1][1])
+            _p(_box_row_d(left + right, w, bc))
 
     if validated:
-        _p(f"\n  {A.RED}{A.BOLD}  ⚡ {len(validated)} secrets VALIDATED as active{A.RESET}")
+        _p(bc + _box_mid_d(w) + rc)
+        icon = A.B_BRIGHT_RED + "[!]" + rc
+        _p(_box_row_d(
+            f"{icon}  {A.B_BRIGHT_RED}{len(validated)} secret{'s' if len(validated) != 1 else ''} VALIDATED as active{rc}",
+            w, bc,
+        ))
 
     if report_paths:
-        _p()
-        _p(f"  {_label('Reports')}")
+        _p(bc + _box_mid_d(w) + rc)
         for fmt, path in report_paths.items():
-            _p(f"  {A.GREY}  {fmt.upper():<8}{A.RESET}  {path}")
+            _p(_box_row_d(f"{A.GREY}{fmt.upper():<8}{rc}  {path}", w, bc))
 
-    _p()
+    _p(bc + _box_bot_d(w) + rc)
+
+    _p("")
     if counts.get("CRITICAL") or validated:
-        _p(f"  {A.RED}{A.BOLD}Critical findings present. Immediate action required.{A.RESET}")
+        _p(f"  {A.B_BRIGHT_RED}Critical findings present. Immediate action required.{rc}")
     elif counts.get("HIGH"):
-        _p(f"  {A.ORANGE}{A.BOLD}High severity findings present. Review required.{A.RESET}")
+        _p(f"  {A.ORANGE}High severity findings present. Review required.{rc}")
     elif counts.get("MEDIUM"):
-        _p(f"  {A.YELLOW}Medium severity findings present.{A.RESET}")
+        _p(f"  {A.B_YELLOW}Medium severity findings present.{rc}")
     else:
-        _p(f"  {A.GREEN}Scan complete. No critical findings.{A.RESET}")
-    _p()
+        _p(f"  {A.B_GREEN}Scan complete. No critical findings.{rc}")
+    _p("")
 
 
-# ── Main report ───────────────────────────────────────────────────────────────
+def _fmt_sev_cell(sev: str, count: int) -> str:
+    """Format a single severity count cell for the summary grid."""
+    dot_c = SEVERITY_DOT_COLOR.get(sev.lower(), A.WHITE)
+    lbl_c = SEV_COLOR.get(sev, A.WHITE)
+    label = SEVERITY_LABEL.get(sev.lower(), sev.upper()).strip()
+    rc    = A.RESET
+    return (
+        dot_c + "* " + rc
+        + lbl_c + f"{label:<8}" + rc
+        + "  "
+        + A.BRIGHT_WHITE + str(count) + rc
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main report  (original signature)
+# ---------------------------------------------------------------------------
 
 def print_report(
     result,
@@ -924,35 +1153,40 @@ def print_report(
     report_paths:       dict = None,
     verbose:            bool = False,
 ) -> None:
+    """
+    Orchestrate a full scan report.
+
+    All sections use the new visual design (boxes, cards, heat bars)
+    while preserving the original function signature.
+    """
     extras = extras or {}
 
-    # Authentication verification block — shown first when credentials were used
     if extras.get("auth_result"):
         print_auth_result(extras["auth_result"])
 
     print_js_inventory(result.js_files, verbose=verbose,
-                        per_file_stats=extras.get("per_file_stats"))
+                       per_file_stats=extras.get("per_file_stats"))
 
     if extras.get("source_map_details"):
         d = extras["source_map_details"]
-        print_source_maps(d.get("discovered",0), d.get("valid",0),
-                          d.get("recovered",0), d.get("sources",0), d.get("items",[]))
+        print_source_maps(d.get("discovered", 0), d.get("valid", 0),
+                          d.get("recovered", 0), d.get("sources", 0), d.get("items", []))
 
     if extras.get("chunk_stats"):
         c = extras["chunk_stats"]
-        print_webpack(c.get("runtime",False), c.get("discovered",0),
-                      c.get("downloaded",0), c.get("endpoints",0), c.get("findings",0))
+        print_webpack(c.get("runtime", False), c.get("discovered", 0),
+                      c.get("downloaded", 0), c.get("endpoints", 0), c.get("findings", 0))
 
     if extras.get("passive_stats"):
         p = extras["passive_stats"]
-        print_passive(p.get("source",""), p.get("urls",0), p.get("js",0),
-                      p.get("unique",0), p.get("new",0))
+        print_passive(p.get("source", ""), p.get("urls", 0), p.get("js", 0),
+                      p.get("unique", 0), p.get("new", 0))
 
     if extras.get("headless_stats"):
         h = extras["headless_stats"]
-        print_headless(h.get("pages",0), h.get("js",0), h.get("xhr",0),
-                       h.get("fetch",0), h.get("ws",0), h.get("routes",0),
-                       h.get("endpoints",0))
+        print_headless(h.get("pages", 0), h.get("js", 0), h.get("xhr", 0),
+                       h.get("fetch", 0), h.get("ws", 0), h.get("routes", 0),
+                       h.get("endpoints", 0))
 
     intel = extras.get("intel")
     if intel:
@@ -966,12 +1200,10 @@ def print_report(
     print_findings(result.findings, verbose=verbose)
     print_endpoints(result.endpoints, validation_results=validation_results, verbose=verbose)
 
-    # Attack surface analysis
     surface = extras.get("attack_surface")
     if surface:
         print_attack_surface(surface)
 
-    # Coverage and blind spots
     coverage = extras.get("coverage")
     if coverage:
         print_coverage(coverage)
