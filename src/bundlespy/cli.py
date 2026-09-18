@@ -29,7 +29,7 @@ from .reporting.html_report import generate as generate_html
 from .reporting.csv_report import generate as generate_csv
 from .reporting.burp_export import generate_burp_xml, generate_url_list
 from .ui.printer import (
-    print_header, phase, phase_done, phase_warn, phase_error,
+    print_header, phase, phase_sub, phase_done, phase_warn, phase_error,
 )
 from .ui.theme import A
 
