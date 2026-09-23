@@ -191,7 +191,13 @@ def _write_reports(
     return paths
 
 
-def _analyze(js_files: list, scanner: SecretScanner, inline_analyzed_hashes: set = None) -> tuple:
+def _analyze(
+    js_files: list,
+    scanner: SecretScanner,
+    inline_analyzed_hashes: set = None,
+    fetcher=None,
+    scope=None,
+) -> tuple:
     """
     Analyze JS files for secrets, endpoints, and infrastructure.
 
@@ -201,12 +207,21 @@ def _analyze(js_files: list, scanner: SecretScanner, inline_analyzed_hashes: set
 
     Static↔runtime endpoint correlation: same canonical URL seen in
     both static JS and runtime interception → one entity, higher confidence.
+
+    Workers and dynamic imports are fetched and analyzed when fetcher/scope
+    are supplied. GraphQL operations are extracted and returned separately.
     """
-    findings:   list = []
-    endpoints:  list = []
-    infra:      list = []
-    seen_finds: set  = set()
-    seen_eps:   set  = set()
+    from .analysis.ast_endpoints import (
+        extract_workers, extract_dynamic_imports, extract_graphql_operations,
+    )
+    from urllib.parse import urljoin
+
+    findings:      list = []
+    endpoints:     list = []
+    infra:         list = []
+    graphql_ops:   list = []
+    seen_finds:    set  = set()
+    seen_eps:      set  = set()
 
     # Content-hash dedup: sha256 -> list of JSFile sharing that content
     from collections import defaultdict
@@ -223,6 +238,18 @@ def _analyze(js_files: list, scanner: SecretScanner, inline_analyzed_hashes: set
 
     # Set of sha256 hashes already processed by the inline analyzer (avoid double-counting)
     _inline_analyzed = inline_analyzed_hashes or set()
+
+    # Track worker/dynamic-import URLs already fetched to avoid loops
+    _fetched_extra: set = set()
+
+    def _add_ep(ep, source_type: str = "static") -> bool:
+        key = ep.url.rstrip("/").lower().split("?")[0]
+        if key not in seen_eps:
+            seen_eps.add(key)
+            ep.source_type = source_type
+            endpoints.append(ep)
+            return True
+        return False
 
     # Analyze each unique content once; attribute to all occurrences
     def _process(primary_js: "JSFile", all_urls: list) -> None:
@@ -247,25 +274,83 @@ def _analyze(js_files: list, scanner: SecretScanner, inline_analyzed_hashes: set
                 findings.append(f)
 
         # Endpoint extraction — deduplicate by canonical key
-        _eps_this_file = []
         for ep in extract_all_endpoints(content, primary_js.url):
-            key = ep.url.rstrip("/").lower().split("?")[0]
-            if key not in seen_eps:
-                seen_eps.add(key)
-                ep.source_type = "static"
-                _eps_this_file.append(ep)
-                endpoints.append(ep)
+            _add_ep(ep, "static")
 
         for ep in extract_endpoints(content, primary_js.url):
-            key = ep.url.rstrip("/").lower().split("?")[0]
-            if key not in seen_eps:
-                seen_eps.add(key)
-                ep.source_type = "static"
-                _eps_this_file.append(ep)
-                endpoints.append(ep)
+            _add_ep(ep, "static")
+
+        # GraphQL operations — extracted from every JS file, deduplicated by op_type:name
+        for op in extract_graphql_operations(content, primary_js.url):
+            key = f"{op.op_type}:{op.name}"
+            if not any(f"{o.op_type}:{o.name}" == key for o in graphql_ops):
+                graphql_ops.append(op)
+
+        # Workers — fetch and analyze inline when fetcher is available.
+        # extract_workers() covers new Worker(), SharedWorker, sw.register, importScripts.
+        if fetcher and scope:
+            _process_workers(content, primary_js.url)
+            _process_dynamic_imports(content, primary_js.url)
 
         # Infrastructure detection
         infra.extend(extract_infrastructure(content, primary_js.url))
+
+    def _fetch_and_analyze(url: str, source_page: str) -> None:
+        """Fetch one extra JS file (worker/dynamic-import) and run _process on it."""
+        norm = url.rstrip("?#")
+        if norm in _fetched_extra:
+            return
+        _fetched_extra.add(norm)
+        try:
+            content, status, ct, sha256 = fetcher.get(url)
+        except Exception:
+            return
+        if not content or status not in range(200, 300):
+            return
+        # Deduplicate by content hash
+        if sha256 and sha256 in content_groups:
+            return  # already analyzed as part of main set
+        from .storage.models import JSFile as _JSFile
+        extra_js = _JSFile(
+            url=url, source_page=source_page, status_code=status,
+            content_type=ct, size_bytes=len(content), sha256=sha256,
+            content=content,
+        )
+        # Register in content_groups so subsequent duplicates are skipped
+        if sha256:
+            if sha256 in content_groups:
+                content_groups[sha256].append(extra_js)
+                return
+            content_groups[sha256] = [extra_js]
+        _process(extra_js, [url])
+
+    def _process_workers(content: str, file_url: str) -> None:
+        """Extract worker URLs and analyze their content."""
+        for w in extract_workers(content, file_url):
+            wurl = w.url
+            if not wurl or wurl.startswith("blob:") or wurl.startswith("data:"):
+                continue
+            # Resolve relative URLs against the file that references them
+            if not wurl.startswith("http"):
+                wurl = urljoin(file_url, wurl)
+            if scope and not scope.in_scope(wurl):
+                continue
+            _fetch_and_analyze(wurl, file_url)
+
+    def _process_dynamic_imports(content: str, file_url: str) -> None:
+        """Extract dynamic import() / require() URLs and analyze them."""
+        for di in extract_dynamic_imports(content, file_url):
+            durl = di.url
+            if not durl or durl.startswith("blob:") or durl.startswith("data:"):
+                continue
+            # Skip template-literal placeholders that could not be resolved
+            if "${" in durl:
+                continue
+            if not durl.startswith("http"):
+                durl = urljoin(file_url, durl)
+            if scope and not scope.in_scope(durl):
+                continue
+            _fetch_and_analyze(durl, file_url)
 
     for sha, group in content_groups.items():
         primary = group[0]
@@ -275,7 +360,7 @@ def _analyze(js_files: list, scanner: SecretScanner, inline_analyzed_hashes: set
     for js in no_hash:
         _process(js, [js.url])
 
-    return findings, endpoints, infra
+    return findings, endpoints, infra, graphql_ops
 
 
 def run_scan(args) -> int:
@@ -373,6 +458,39 @@ def run_scan(args) -> int:
 
         # Include HTML attribute findings from crawler
         html_findings_from_crawler = getattr(crawler, "html_findings", [])
+
+        # Surface technology-stack intelligence from HTTP response headers.
+        # Server:, X-Powered-By:, Via:, CSP, etc. are collected by the crawler
+        # and stored as InfrastructureItem objects for the final report.
+        _observed_headers = getattr(crawler, "observed_headers", [])
+        if _observed_headers:
+            from .storage.models import InfrastructureItem as _InfraItem
+            _header_infra = []
+            _seen_hdr_vals: set = set()
+            for _hdr_entry in _observed_headers:
+                _page_url = _hdr_entry.get("url", target)
+                for _key, _label in [
+                    ("server",           "HTTP Server"),
+                    ("x_powered_by",     "X-Powered-By"),
+                    ("via",              "Via Proxy"),
+                    ("x_generator",      "Generator"),
+                    ("x_aspnet_version", "ASP.NET Version"),
+                    ("x_aspnetmvc_version", "ASP.NET MVC"),
+                    ("x_drupal_cache",   "Drupal CMS"),
+                    ("x_wp_total",       "WordPress REST"),
+                ]:
+                    _val = _hdr_entry.get(_key, "")
+                    if _val and _val not in _seen_hdr_vals:
+                        _seen_hdr_vals.add(_val)
+                        _header_infra.append(_InfraItem(
+                            value          = f"{_label}: {_val}",
+                            classification = "TECHNOLOGY_DISCLOSURE",
+                            source_file    = f"http-header:{_page_url}",
+                            line_number    = 0,
+                            confidence     = 0.99,
+                            action         = "report_only",
+                        ))
+            extras["header_infra"] = _header_infra
 
         for idx, (script_content, source_page) in enumerate(crawler.inline_scripts):
             import hashlib
@@ -586,9 +704,32 @@ def run_scan(args) -> int:
     # Pass hashes already analyzed inline by the headless engine so _analyze()
     # skips those files and avoids double-counting findings/endpoints.
     _headless_analyzed_hashes = locals().get("headless_result", {}).get("analyzed_hashes", set()) if "headless_result" in locals() else set()
-    all_findings, all_endpoints, all_infra = _analyze(all_js, scanner, inline_analyzed_hashes=_headless_analyzed_hashes)
+    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(
+        all_js, scanner,
+        inline_analyzed_hashes=_headless_analyzed_hashes,
+        fetcher=fetcher,
+        scope=scope,
+    )
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
     _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
+
+    # Store extracted GraphQL operations for the report (Gap 8).
+    # These are statically extracted operation names (query/mutation/subscription)
+    # from JS source — distinct from GraphQL introspection schemas.
+    extras["graphql_operations"] = _graphql_ops
+    if _graphql_ops and not args.quiet:
+        _gql_queries = sum(1 for op in _graphql_ops if op.op_type == "query")
+        _gql_muts    = sum(1 for op in _graphql_ops if op.op_type == "mutation")
+        _gql_subs    = sum(1 for op in _graphql_ops if op.op_type == "subscription")
+        _logger.info(
+            "GraphQL operations extracted: %d queries, %d mutations, %d subscriptions",
+            _gql_queries, _gql_muts, _gql_subs,
+        )
+
+    # Merge HTTP header infrastructure items (technology disclosure from Server:, X-Powered-By:, etc.)
+    _header_infra = extras.pop("header_infra", [])
+    if _header_infra:
+        all_infra.extend(_header_infra)
 
     # Re-categorize UNKNOWN endpoints using full classifier
     from .analysis.endpoints import _categorize_path as _recat
@@ -774,6 +915,22 @@ def run_scan(args) -> int:
                     _ep_path = _upep(ep.url).path or ep.url
                     ep.category = _cat_path(_ep_path)
                 all_endpoints.append(ep)
+
+        # Static-to-runtime correlation: same canonical URL seen in static JS and
+        # real network traffic -> upgrade to source_type="correlated", boost confidence.
+        # Only run when we have real runtime endpoints to correlate against.
+        if all_endpoints_extra:
+            from .analysis.endpoints import correlate_endpoints as _correlate
+            _static_eps  = [ep for ep in all_endpoints if getattr(ep, "source_type", "static") == "static"]
+            _runtime_eps = [ep for ep in all_endpoints if getattr(ep, "source_type", "runtime") == "runtime"]
+            if _static_eps and _runtime_eps:
+                _correlated = _correlate(_static_eps, _runtime_eps)
+                # Replace static+runtime portion of all_endpoints with correlated set;
+                # keep crawled-page routes and any other source_type entries intact.
+                _other_eps = [ep for ep in all_endpoints
+                              if getattr(ep, "source_type", "static") not in ("static", "runtime")]
+                all_endpoints = _other_eps + _correlated
+
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
@@ -1028,7 +1185,7 @@ def run_local(args) -> int:
         return 0
 
     scanner = SecretScanner()
-    all_findings, all_endpoints, all_infra = _analyze(js_files, scanner)
+    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(js_files, scanner)
 
     started  = datetime.utcnow()
     finished = datetime.utcnow()
