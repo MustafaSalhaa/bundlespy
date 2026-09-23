@@ -63,7 +63,7 @@ def _make_js_file(url: str, content: str, source_page: str = "") -> "JSFile":
 
 def _make_engine():
     """Return a HeadlessEngine configured for unit tests (no browser)."""
-    from bundlespy.discovery.headless import HeadlessEngine
+    from bundlespy.discovery.headless_v2 import HeadlessEngine
 
     with patch("bundlespy.safety.network.validate_url", return_value=(True, "")):
         engine = HeadlessEngine(
@@ -335,10 +335,10 @@ def test_final_analysis_dedup_skips_inline_analyzed():
     scanner = SecretScanner()
 
     # Without inline_analyzed_hashes - should analyze normally
-    findings_normal, endpoints_normal, _ = _analyze([js], scanner)
+    findings_normal, endpoints_normal, _, _ = _analyze([js], scanner)
 
     # With the hash in inline_analyzed_hashes - should skip
-    findings_skip, endpoints_skip, _ = _analyze(
+    findings_skip, endpoints_skip, _, _ = _analyze(
         [js], scanner, inline_analyzed_hashes={js.sha256}
     )
 
@@ -390,7 +390,7 @@ def test_interaction_event_has_delta_fields():
     InteractionEvent dataclass must have intelligence delta fields:
     new_js_assets, new_routes, new_endpoints, new_findings.
     """
-    from bundlespy.discovery.headless import InteractionEvent, InteractionClass
+    from bundlespy.discovery.headless_v2 import InteractionEvent, InteractionClass
 
     event = InteractionEvent(
         element_label="test:button:save",
