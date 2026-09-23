@@ -352,10 +352,24 @@ def _analyze(
                 continue
             _fetch_and_analyze(durl, file_url)
 
-    for sha, group in content_groups.items():
-        primary = group[0]
-        all_urls = [js.url for js in group]
-        _process(primary, all_urls)
+    # Snapshot keys before iteration - _process() may add new entries to
+    # content_groups via _fetch_and_analyze() (workers, dynamic imports).
+    # Iterate a copy so the dict can grow without raising RuntimeError.
+    processed: set = set()
+
+    def _process_all() -> None:
+        """Process all unprocessed content groups, including ones added mid-run."""
+        changed = True
+        while changed:
+            changed = False
+            for sha, group in list(content_groups.items()):
+                if sha in processed:
+                    continue
+                processed.add(sha)
+                changed = True
+                _process(group[0], [js.url for js in group])
+
+    _process_all()
 
     for js in no_hash:
         _process(js, [js.url])
