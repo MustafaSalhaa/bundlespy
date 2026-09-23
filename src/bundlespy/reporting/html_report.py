@@ -152,23 +152,18 @@ def _js_html(result, extras):
         st_color = {"static":"#34d399","browser":"#60a5fa","inline":"#a78bfa","sourcemap":"#86efac","chunk":"#22d3ee"}.get(st,"#94a3b8")
         tech = f'<span class="tech-tag">{_e(js.technology)}</span>' if js.technology else ""
         sm   = '<span class="sm-tag">map</span>' if js.has_source_map else ""
-        # Build a readable label: real filename instead of "script N @ page"
         label = js.url
-        try:
-            from urllib.parse import urlparse as _up
-            if js.url.startswith("inline:"):
-                bare = js.url.replace("inline:","").split("#")[0]
-                frag = js.url.split("#")[-1] if "#" in js.url else ""
-                num  = _re.search(r"script-(\d+)", frag)
-                n    = num.group(1) if num else "?"
-                p    = _up(bare)
-                label = f"inline:{n} @ {p.netloc}{p.path or '/'}"
-            else:
-                p = _up(js.url)
-                filename = p.path.rstrip("/").split("/")[-1] or p.netloc
-                label = f"{filename} @ {p.netloc}"
-        except Exception:
-            label = js.url
+        if js.url.startswith("inline:"):
+            bare = js.url.replace("inline:","").split("#")[0]
+            frag = js.url.split("#")[-1] if "#" in js.url else ""
+            num  = _re.search(r"script-(\d+)", frag)
+            n    = num.group(1) if num else "?"
+            try:
+                from urllib.parse import urlparse as _up
+                p = _up(bare)
+                label = f"script {n} @ {p.netloc}{p.path or '/'}"
+            except Exception:
+                label = js.url
         size = f"{js.size_bytes/1024:.1f} KB" if js.size_bytes >= 1024 else f"{js.size_bytes} B"
         stats = per_file.get(js.url, {})
         sec_n  = stats.get("secrets", 0)
@@ -469,18 +464,127 @@ def _graph_data(result):
     return _j(result.graph.to_dict())
 
 
-def _trace_data(result) -> str:
-    """Serialize all page traces to JSON for the Trace Engine panel."""
-    if not result.graph:
-        return "[]"
-    try:
-        traces = result.graph.trace_all_from_pages(max_depth=6)
-        out = []
-        for tr in traces:
-            out.append(tr.to_dict())
-        return _j(out)
-    except Exception:
-        return "[]"
+def _intelligence_html(intel) -> str:
+    """Render the passive intelligence section from an IntelligenceResult."""
+    if not intel:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>Passive intelligence collection was not run</p></div>'
+
+    out = []
+
+    # Technologies detected
+    techs = getattr(intel, "technologies", {})
+    if techs:
+        rows = "".join(
+            f'<tr><td class="meta-key">{_e(k)}</td><td class="meta-val"><code>{_e(v)}</code></td></tr>'
+            for k, v in techs.items()
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">Technology Stack <span style="color:var(--text3);font-weight:400;font-size:11px">({len(techs)} detected)</span></div>
+  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
+</div>""")
+
+    # Interesting headers
+    interesting = getattr(intel, "interesting_headers", [])
+    if interesting:
+        rows = "".join(
+            f'<tr><td style="padding:6px 14px;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px"><code>{_e(h)}</code></td></tr>'
+            for h in interesting
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">Header Flags <span style="color:var(--text3);font-weight:400;font-size:11px">({len(interesting)} flagged)</span></div>
+  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
+</div>""")
+
+    # CSP policy
+    csp = getattr(intel, "csp_policy", {})
+    if csp:
+        rows = "".join(
+            f'<tr><td class="meta-key" style="font-family:monospace">{_e(d)}</td>'
+            f'<td class="meta-val" style="word-break:break-all">{_e(" ".join(vals))}</td></tr>'
+            for d, vals in csp.items()
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">Content Security Policy <span style="color:var(--text3);font-weight:400;font-size:11px">({len(csp)} directives)</span></div>
+  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
+</div>""")
+
+    # Sitemap URLs discovered
+    sitemap_urls = getattr(intel, "sitemap_urls", [])
+    if sitemap_urls:
+        rows = "".join(
+            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px"><code>{_e(u)}</code></td></tr>'
+            for u in sitemap_urls[:200]
+        )
+        more = f'<tr><td style="padding:5px 14px;color:var(--text3);font-size:11px">… and {len(sitemap_urls)-200} more</td></tr>' if len(sitemap_urls) > 200 else ""
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">Sitemap URLs <span style="color:var(--text3);font-weight:400;font-size:11px">({len(sitemap_urls)} discovered)</span></div>
+  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}{more}</table></div>
+</div>""")
+
+    # OpenID / OIDC config
+    oidc = getattr(intel, "openid_config", None)
+    if oidc and isinstance(oidc, dict):
+        rows = "".join(
+            f'<tr><td class="meta-key">{_e(str(k))}</td><td class="meta-val"><code style="word-break:break-all">{_e(str(v))}</code></td></tr>'
+            for k, v in list(oidc.items())[:20]
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">OpenID Configuration</div>
+  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
+</div>""")
+
+    # API schema found
+    api_schema = getattr(intel, "api_schema", None)
+    if api_schema:
+        schema_url  = api_schema.get("url", "")
+        schema_type = api_schema.get("type", "unknown")
+        schema_data = api_schema.get("schema", {})
+        paths_count = len(schema_data.get("paths", {})) if isinstance(schema_data, dict) else 0
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">API Schema Discovered</div>
+  <div class="card-body" style="padding:0"><table class="meta-table">
+    <tr><td class="meta-key">Type</td><td class="meta-val">{_e(schema_type.upper())}</td></tr>
+    <tr><td class="meta-key">URL</td><td class="meta-val"><code>{_e(schema_url)}</code></td></tr>
+    {f'<tr><td class="meta-key">Paths</td><td class="meta-val">{paths_count} endpoint paths defined</td></tr>' if paths_count else ''}
+  </table></div>
+</div>""")
+
+    # Security.txt
+    sec_txt = getattr(intel, "security_txt", None)
+    if sec_txt:
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">security.txt</div>
+  <div class="card-body"><pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-word">{_e(sec_txt[:2000])}</pre></div>
+</div>""")
+
+    # API endpoints from JSON responses
+    api_endpoints = getattr(intel, "api_endpoints", [])
+    if api_endpoints:
+        rows = "".join(
+            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px"><code>{_e(ep)}</code></td></tr>'
+            for ep in api_endpoints[:100]
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header">API Endpoints from JSON Responses <span style="color:var(--text3);font-weight:400;font-size:11px">({len(api_endpoints)} found)</span></div>
+  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
+</div>""")
+
+    # Collection errors
+    errors = getattr(intel, "errors", [])
+    if errors:
+        rows = "".join(
+            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text3)">{_e(e)}</td></tr>'
+            for e in errors[:20]
+        )
+        out.append(f"""<div class="card" style="margin-bottom:14px">
+  <div class="card-header" style="color:var(--text3)">Collection Errors ({len(errors)})</div>
+  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
+</div>""")
+
+    if not out:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No passive intelligence gathered from this target</p></div>'
+
+    return "\n".join(out)
 
 
 # ── Main generator ────────────────────────────────────────────────────────────
@@ -516,12 +620,12 @@ def generate(
     passive_stats   = extras.get("passive_stats",     {})
     chunk_stats     = extras.get("chunk_stats",       {})
     attack_surface  = extras.get("attack_surface",    {})
+    intelligence    = extras.get("intelligence",      None)
 
     gen_time   = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     scan_start = result.started_at.strftime("%Y-%m-%d %H:%M UTC") if result.started_at else "—"
     dur        = _duration(result)
     graph_json = _graph_data(result)
-    trace_json = _trace_data(result)
     g_stats    = result.graph.stats().get("by_type", {}) if result.graph else {}
 
     # Pre-compute filter buttons (Python 3.10: no backslash in f-string expressions)
@@ -549,6 +653,7 @@ def generate(
     _val_used      = bool(validation_results)
     _subs_used     = bool(subdomains)
     _passive_used  = bool(passive_stats)
+    _intel_used    = bool(intelligence)
 
     _so, _sc = "'", "'"  # quote helpers for onclick JS strings
     _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ')"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
@@ -557,15 +662,10 @@ def generate(
     _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
     _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
     _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
-
-    # Node counts for graph section subtitle
-    _page_n     = g_stats.get("PAGE", 0)
-    _js_n       = g_stats.get("JS", 0) + g_stats.get("CHUNK", 0)
-    _ep_n       = g_stats.get("ENDPOINT", 0)
-    _secret_n   = g_stats.get("SECRET", 0)
-    # Graph node/edge counts for overview (fixed NameError: use result.graph.stats() not self._nodes)
-    _graph_node_count = result.graph.stats()["nodes"] if result.graph else 0
-    _graph_edge_count = result.graph.stats()["edges"] if result.graph else 0
+    _intel_techs  = len(getattr(intelligence, "technologies", {})) if intelligence else 0
+    _intel_flags  = len(getattr(intelligence, "interesting_headers", [])) if intelligence else 0
+    _intel_badge  = f'<span class="nav-badge orange">{_intel_flags}</span>' if _intel_flags else (f'<span class="nav-badge">{_intel_techs}</span>' if _intel_techs else '')
+    _nav_intel    = ('<button class="nav-item" onclick="show(' + _so + 'intelligence' + _sc + ')"><span class="nav-icon">◐</span>Recon' + _intel_badge + '</button>' if _intel_used else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -805,115 +905,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .neighbor-list{{display:flex;flex-direction:column;gap:3px}}
 .neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .neighbor-item:hover{{color:var(--accent)}}
-/* ── Trace Engine ── */
-.te-toolbar{{display:flex;align-items:center;gap:12px;margin-bottom:24px;flex-wrap:wrap}}
-.te-toggle{{display:flex;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;overflow:hidden}}
-.te-toggle-btn{{padding:7px 20px;border:none;background:none;color:var(--text3);font-size:12px;font-weight:500;cursor:pointer;transition:all .18s;font-family:inherit;letter-spacing:.01em}}
-.te-toggle-btn:hover{{color:var(--text)}}
-.te-toggle-btn.active{{background:var(--surface);color:var(--text);font-weight:600;box-shadow:inset 0 0 0 1px var(--border2)}}
-.te-search-wrap{{position:relative;flex:1;max-width:340px}}
-.te-search-wrap svg{{position:absolute;left:10px;top:50%;transform:translateY(-50%);pointer-events:none;opacity:.4}}
-.te-search{{width:100%;padding:7px 12px 7px 34px;background:var(--surface2);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .18s}}
-.te-search:focus{{border-color:var(--accent)}}
-.te-stat{{font-size:11px;color:var(--text3);margin-left:auto;white-space:nowrap}}
-/* Origin group card */
-.te-origin{{background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden;transition:box-shadow .18s}}
-.te-origin:hover{{box-shadow:0 0 0 1px var(--border2)}}
-.te-origin.risk-critical{{border-left:3px solid #f87171}}
-.te-origin.risk-high{{border-left:3px solid #fb923c}}
-.te-origin.risk-low{{border-left:3px solid var(--border2)}}
-.te-origin-hd{{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;user-select:none}}
-.te-origin-hd:hover{{background:rgba(255,255,255,.018)}}
-.te-pg-icon{{width:32px;height:32px;border-radius:7px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.18);display:flex;align-items:center;justify-content:center;flex-shrink:0}}
-.te-pg-icon svg{{opacity:.8}}
-.te-origin-text{{flex:1;min-width:0}}
-.te-origin-url{{font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-.01em}}
-.te-origin-sub{{font-size:11px;color:var(--text3);margin-top:2px}}
-.te-pills{{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap}}
-.te-pill{{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;padding:3px 8px;border-radius:5px;white-space:nowrap;letter-spacing:.02em}}
-.te-pill-path{{background:rgba(88,166,255,.08);color:#58a6ff;border:1px solid rgba(88,166,255,.18)}}
-.te-pill-secret{{background:rgba(248,81,73,.1);color:#f87171;border:1px solid rgba(248,81,73,.2)}}
-.te-pill-ep{{background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)}}
-.te-chevron{{color:var(--text3);font-size:10px;flex-shrink:0;transition:transform .2s}}
-.te-chevron.open{{transform:rotate(90deg)}}
-.te-origin-body{{display:none;border-top:1px solid var(--border)}}
-.te-origin-body.open{{display:block}}
-/* Path summary bar */
-.te-summary-bar{{padding:10px 18px;background:#0a0d13;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-x:auto}}
-.te-sum-node{{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:5px;white-space:nowrap;flex-shrink:0}}
-.te-sum-arrow{{color:var(--text3);font-size:11px;flex-shrink:0}}
-.te-sum-rel{{font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--text3);text-transform:uppercase;flex-shrink:0;padding:0 2px}}
-/* Paths container */
-.te-paths{{padding:16px 18px;display:flex;flex-direction:column;gap:12px}}
-/* Individual path card */
-.te-path{{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#0a0d13}}
-.te-path-hd{{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.02)}}
-.te-path-num{{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em}}
-.te-path-len{{font-size:10px;color:var(--text3)}}
-.te-path-flags{{display:flex;gap:4px;margin-left:auto}}
-.te-path-flag{{font-size:10px;font-weight:600;padding:1px 7px;border-radius:4px}}
-.te-path-flag.secret{{background:rgba(248,81,73,.12);color:#f87171}}
-.te-path-flag.endpoint{{background:rgba(167,139,250,.12);color:#a78bfa}}
-/* Chain layout */
-.te-chain{{padding:14px 16px;display:flex;flex-direction:column;gap:0}}
-.te-chain-row{{display:flex;gap:0}}
-.te-chain-left{{width:36px;display:flex;flex-direction:column;align-items:center;flex-shrink:0}}
-.te-chain-dot{{width:12px;height:12px;border-radius:50%;border:2px solid;margin-top:2px;flex-shrink:0;position:relative;z-index:1}}
-.te-chain-line{{width:2px;flex:1;min-height:20px;margin:3px 0}}
-.te-chain-row:last-child .te-chain-line{{display:none}}
-.te-chain-right{{padding-bottom:18px;flex:1;min-width:0}}
-.te-chain-row:last-child .te-chain-right{{padding-bottom:4px}}
-/* Node card inside chain */
-.te-node-card{{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border-radius:6px;border:1px solid;max-width:100%;overflow:hidden;cursor:default}}
-.te-node-card:hover{{filter:brightness(1.08)}}
-.te-node-type{{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.7;flex-shrink:0}}
-.te-node-label{{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.te-node-extra{{font-size:10px;opacity:.6;flex-shrink:0}}
-/* Relationship connector between nodes */
-.te-rel-row{{display:flex;align-items:center;gap:8px;padding:3px 0 3px 4px;margin-left:-2px}}
-.te-rel-line-seg{{width:2px;height:8px;background:var(--border2);flex-shrink:0}}
-.te-rel-label{{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);background:var(--border);padding:2px 7px;border-radius:4px;font-family:'SF Mono','Fira Code',Consolas,monospace}}
-.te-rel-label.strong{{background:rgba(88,166,255,.08);color:var(--accent);border:1px solid rgba(88,166,255,.15)}}
-/* Evidence line */
-.te-evidence{{font-size:10px;color:var(--text3);margin-top:4px;padding:4px 8px;background:rgba(255,255,255,.02);border-radius:4px;border-left:2px solid var(--border2);word-break:break-all;line-height:1.5}}
-/* Node colour system */
-.tn-PAGE{{background:rgba(88,166,255,.1);border-color:rgba(88,166,255,.25);color:#60a5fa}}
-.tn-JS{{background:rgba(63,185,80,.1);border-color:rgba(63,185,80,.25);color:#34d399}}
-.tn-ENDPOINT{{background:rgba(167,139,250,.1);border-color:rgba(167,139,250,.25);color:#a78bfa}}
-.tn-SECRET{{background:rgba(248,81,73,.12);border-color:rgba(248,81,73,.3);color:#f87171}}
-.tn-WORKER{{background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.25);color:#fbbf24}}
-.tn-HOST{{background:rgba(251,146,60,.1);border-color:rgba(251,146,60,.25);color:#fb923c}}
-.tn-CHUNK{{background:rgba(34,211,238,.08);border-color:rgba(34,211,238,.2);color:#22d3ee}}
-.tn-PARAMETER{{background:rgba(148,163,184,.08);border-color:rgba(148,163,184,.2);color:#94a3b8}}
-.tn-SOURCEMAP{{background:rgba(134,239,172,.08);border-color:rgba(134,239,172,.2);color:#86efac}}
-.tn-CONFIG{{background:rgba(192,132,252,.1);border-color:rgba(192,132,252,.25);color:#c084fc}}
-.td-PAGE{{border-color:#60a5fa;background:rgba(88,166,255,.25)}}
-.td-JS{{border-color:#34d399;background:rgba(63,185,80,.25)}}
-.td-ENDPOINT{{border-color:#a78bfa;background:rgba(167,139,250,.25)}}
-.td-SECRET{{border-color:#f87171;background:rgba(248,81,73,.3)}}
-.td-WORKER{{border-color:#fbbf24;background:rgba(251,191,36,.25)}}
-.td-HOST{{border-color:#fb923c;background:rgba(251,146,60,.25)}}
-.td-CHUNK{{border-color:#22d3ee;background:rgba(34,211,238,.2)}}
-.td-PARAMETER{{border-color:#94a3b8;background:rgba(148,163,184,.2)}}
-.td-SOURCEMAP{{border-color:#86efac;background:rgba(134,239,172,.2)}}
-.td-CONFIG{{border-color:#c084fc;background:rgba(192,132,252,.2)}}
-.tl-PAGE{{background:rgba(88,166,255,.15)}}
-.tl-JS{{background:rgba(63,185,80,.15)}}
-.tl-ENDPOINT{{background:rgba(167,139,250,.15)}}
-.tl-SECRET{{background:rgba(248,81,73,.2)}}
-.tl-WORKER{{background:rgba(251,191,36,.15)}}
-.tl-HOST{{background:rgba(251,146,60,.15)}}
-.tl-CHUNK{{background:rgba(34,211,238,.12)}}
-.tl-PARAMETER{{background:rgba(148,163,184,.12)}}
-.tl-SOURCEMAP{{background:rgba(134,239,172,.12)}}
-.tl-CONFIG{{background:rgba(192,132,252,.15)}}
-/* Truncation warning */
-.te-truncated{{display:flex;align-items:center;gap:7px;padding:8px 18px;font-size:11px;color:var(--orange);background:rgba(240,136,62,.05);border-top:1px solid rgba(240,136,62,.12)}}
-/* Empty */
-.te-empty{{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:72px 24px;color:var(--text3);text-align:center}}
-.te-empty-icon{{width:48px;height:48px;border-radius:12px;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;margin-bottom:14px;opacity:.5}}
-.te-empty-title{{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:5px}}
-.te-empty-sub{{font-size:12px;color:var(--text3)}}
 /* ── Notice ── */
 .notice{{background:rgba(63,185,80,.05);border:1px solid rgba(63,185,80,.15);border-radius:var(--radius);padding:10px 14px;font-size:12px;color:var(--text2);margin-top:14px;line-height:1.7}}
 /* ── Empty ── */
@@ -937,7 +928,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="nav-label">Report</div>
       <button class="nav-item active" onclick="show('overview')"><span class="nav-icon">◈</span>Overview</button>
       <button class="nav-item" onclick="show('graph')"><span class="nav-icon">⬡</span>Attack Surface</button>
-      <button class="nav-item" onclick="show('trace')"><span class="nav-icon">⇢</span>Trace Engine</button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Intelligence</div>
@@ -949,6 +939,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Discovery</div>
+      {_nav_intel}
       {_nav_headless}
       {_nav_auth}
       {_nav_srcmaps}
@@ -1004,7 +995,8 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
             <tr><td class="meta-key">Vuln libraries</td><td class="meta-val">{len(lib_findings)} CVE(s) found</td></tr>
             <tr><td class="meta-key">Infrastructure</td><td class="meta-val">{len(result.infrastructure)} indicator(s)</td></tr>
             {f'<tr><td class="meta-key">Auth state</td><td class="meta-val" style="color:{("#34d399" if auth_result.get("authenticated") else "#f87171")}">{("Verified" if auth_result.get("authenticated") else "Not verified")}</td></tr>' if auth_result else ''}
-            {f'<tr><td class="meta-key">Graph</td><td class="meta-val">{_graph_node_count} nodes · {_graph_edge_count} relationships</td></tr>' if result.graph else ''}
+            {f'<tr><td class="meta-key">Graph</td><td class="meta-val">{result.graph.stats()["nodes"]} nodes · {result.graph.stats()["edges"]} relationships</td></tr>' if result.graph else ''}
+            {f'<tr><td class="meta-key">Recon</td><td class="meta-val">{_intel_techs} tech detected · {len(getattr(intelligence,"sitemap_urls",[]))} sitemap URLs · {_intel_flags} header flags</td></tr>' if intelligence else ''}
             {f'<tr><td class="meta-key">Scan errors</td><td class="meta-val" style="color:var(--red)">{len(result.errors)}</td></tr>' if result.errors else ''}
           </table>
         </div>
@@ -1019,7 +1011,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <!-- ATTACK SURFACE GRAPH -->
     <div id="section-graph" class="section">
       <div class="section-title">Attack Surface Graph
-        <span class="count">{_page_n} pages · {_js_n} assets · {_ep_n} endpoints · {_secret_n} secrets</span>
+        <span class="count">{g_stats.get("PAGE",0)} pages · {g_stats.get("JS",0)+g_stats.get("CHUNK",0)} assets · {g_stats.get("ENDPOINT",0)} endpoints · {g_stats.get("SECRET",0)} secrets</span>
       </div>
       <div class="graph-legend">
         {''.join(f'<div class="legend-item"><div class="legend-dot" style="background:{c}"></div>{k.title()}</div>' for k,c in NODE_COLOR.items())}
@@ -1043,23 +1035,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
           <div id="dp-body"></div>
         </div>
       </div>
-    </div>
-
-    <!-- TRACE ENGINE -->
-    <div id="section-trace" class="section">
-      <div class="section-title">Trace Engine <span class="count">attack path analysis</span></div>
-      <div class="te-toolbar">
-        <div class="te-toggle">
-          <button id="btn-downstream" class="te-toggle-btn active" onclick="setTraceMode('downstream',this)">&#x2193; Downstream</button>
-          <button id="btn-upstream"   class="te-toggle-btn"        onclick="setTraceMode('upstream',this)">&#x2191; Upstream</button>
-        </div>
-        <div class="te-search-wrap">
-          <svg class="te-search-icon" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 10l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          <input id="trace-search" class="te-search" type="text" placeholder="Filter by page URL…" oninput="renderTraces(currentTraceMode)">
-        </div>
-        <span class="te-count-label" id="trace-count-label"></span>
-      </div>
-      <div id="trace-list"></div>
     </div>
 
     <!-- FINDINGS -->
@@ -1132,6 +1107,14 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="card"><div class="card-body" style="padding:0">{_subdomains_html(subdomains)}</div></div>
     </div>
 
+    <!-- PASSIVE INTELLIGENCE / RECON -->
+    <div id="section-intelligence" class="section">
+      <div class="section-title">Passive Recon
+        <span class="count">{_intel_techs} tech · {len(getattr(intelligence,"sitemap_urls",[]))} sitemap URLs · {_intel_flags} header flags</span>
+      </div>
+      {_intelligence_html(intelligence)}
+    </div>
+
     <!-- COVERAGE -->
     <div id="section-coverage" class="section">
       <div class="section-title">Coverage &amp; Blind Spots</div>
@@ -1145,7 +1128,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script>
 const GRAPH_DATA = {graph_json};
-const TRACE_DATA = {trace_json};
 const NC = {_j(NODE_COLOR)};
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -1155,7 +1137,6 @@ function show(id) {{
   document.getElementById('section-' + id).classList.add('active');
   event.currentTarget.classList.add('active');
   if (id === 'graph') initGraph();
-  if (id === 'trace') initTrace();
 }}
 
 // ── Findings filter ───────────────────────────────────────────────────────────
@@ -1165,205 +1146,6 @@ function filterF(sev, btn) {{
   document.querySelectorAll('.finding-card').forEach(c => {{
     c.style.display = (sev === 'ALL' || c.dataset.severity === sev) ? '' : 'none';
   }});
-}}
-
-// ── Trace Engine ──────────────────────────────────────────────────────────────
-let currentTraceMode = 'downstream';
-let traceInitDone = false;
-
-// Strong relationship types that deserve bold styling
-const STRONG_RELS = new Set(['LOADS','CALLS','EXPOSES','IMPORTS','RECOVERS']);
-
-// Human-readable relationship labels
-const REL_LABELS = {{
-  LOADS:'Loads',IMPORTS:'Imports',CALLS:'Calls',EXPOSES:'Exposes',
-  ACCEPTS:'Accepts',OBSERVED_ON:'Observed on',RELATED_TO:'Related to',
-  HOSTS:'Hosts',REFERENCES:'References',RECOVERS:'Recovers'
-}};
-
-// Node type full names
-const KIND_LABELS = {{
-  PAGE:'Page',JS:'JS Asset',ENDPOINT:'Endpoint',SECRET:'Secret',
-  WORKER:'Worker',PARAMETER:'Parameter',HOST:'Host',
-  CHUNK:'Chunk',SOURCEMAP:'Source Map',CONFIG:'Config'
-}};
-
-function initTrace() {{
-  if (!traceInitDone) {{ traceInitDone = true; renderTraces('downstream'); }}
-}}
-
-function setTraceMode(mode, btn) {{
-  currentTraceMode = mode;
-  document.querySelectorAll('.te-toggle-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  renderTraces(mode);
-}}
-
-function renderTraces(mode) {{
-  const container = document.getElementById('trace-list');
-  const lbl = document.getElementById('trace-count-label');
-  if (!TRACE_DATA || TRACE_DATA.length === 0) {{
-    container.innerHTML = '<div class="te-empty"><div class="te-empty-icon">&#x21E2;</div><div class="te-empty-title">No trace data available</div><div class="te-empty-sub">Scan a target with graph analysis enabled to generate attack path traces.</div></div>';
-    if(lbl) lbl.textContent = '';
-    return;
-  }}
-  const q = ((document.getElementById('trace-search')||{{}}).value||'').toLowerCase();
-  const filtered = TRACE_DATA.filter(tr => tr.direction === mode && (!q || (tr.origin_label||'').toLowerCase().includes(q)));
-  if(lbl) lbl.textContent = filtered.length + ' origin' + (filtered.length !== 1 ? 's' : '');
-  if (filtered.length === 0) {{
-    container.innerHTML = '<div class="te-empty"><div class="te-empty-icon">&#x21E2;</div><div class="te-empty-title">No matching origins</div><div class="te-empty-sub">No ' + mode + ' traces' + (q ? ' matching <strong>' + escHtml(q) + '</strong>' : '') + '.</div></div>';
-    return;
-  }}
-  container.innerHTML = filtered.map((tr, idx) => buildOriginCard(tr, idx)).join('');
-}}
-
-// Build the breadcrumb summary for a single path
-function buildPathSummary(path, originLabel) {{
-  if (!path || path.length === 0) return '';
-  const crumbs = [];
-  // Start node
-  const startKind = (path[0]||{{}}).from_kind || 'PAGE';
-  const startLabel = (path[0]||{{}}).from_label || originLabel || '—';
-  crumbs.push('<span class="te-sum-node tn-' + startKind + '">' + escHtml(shortLabel(startLabel, 22)) + '</span>');
-  path.forEach(step => {{
-    const rel = step.edge_kind || '';
-    const relTxt = REL_LABELS[rel] || rel.toLowerCase().replace(/_/g,' ') || '→';
-    crumbs.push('<span class="te-sum-arrow">→</span>');
-    crumbs.push('<span class="te-sum-rel">' + escHtml(relTxt) + '</span>');
-    crumbs.push('<span class="te-sum-arrow">→</span>');
-    crumbs.push('<span class="te-sum-node tn-' + (step.to_kind||'') + '">' + escHtml(shortLabel(step.to_label||'', 22)) + '</span>');
-  }});
-  return '<div class="te-summary-bar">' + crumbs.join('') + '</div>';
-}}
-
-function buildOriginCard(tr, idx) {{
-  const paths     = tr.paths     || [];
-  const secrets   = tr.secrets   || [];
-  const endpoints = tr.endpoints || [];
-  const hasSecret = secrets.length   > 0;
-  const hasEP     = endpoints.length > 0;
-
-  // Risk level for left border accent
-  const riskCls = hasSecret ? ' risk-critical' : hasEP ? ' risk-high' : ' risk-low';
-
-  // Summary pills
-  const pills = '<div class="te-pills">'
-    + '<span class="te-pill-path">&#x21E2; ' + paths.length + ' path' + (paths.length!==1?'s':'') + '</span>'
-    + (hasSecret  ? '<span class="te-pill-secret">&#x26A0; ' + secrets.length   + ' secret'   + (secrets.length>1?'s':'')   + '</span>' : '')
-    + (hasEP      ? '<span class="te-pill-ep">&#x21C4; ' + endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') + '</span>' : '')
-    + '</div>';
-
-  const subTxt = [
-    paths.length + ' path' + (paths.length!==1?'s':''),
-    hasSecret  ? secrets.length   + ' secret'   + (secrets.length>1?'s':'')   : '',
-    hasEP      ? endpoints.length + ' endpoint' + (endpoints.length>1?'s':'') : ''
-  ].filter(Boolean).join(' · ');
-
-  const truncWarn = tr.truncated
-    ? '<div class="te-truncated">&#x26A0;&nbsp; Trace truncated — maximum depth reached. Some paths may be incomplete.</div>'
-    : '';
-
-  // Build paths HTML
-  let pathsHtml = '';
-  paths.forEach((path, pi) => {{
-    if (!path || path.length === 0) return;
-    const pathHasSecret = path.some(s => s.to_kind === 'SECRET');
-    const pathHasEP     = path.some(s => s.to_kind === 'ENDPOINT');
-    const flags = (pathHasSecret ? '<span class="te-path-flag secret">Secret</span>'   : '')
-                + (pathHasEP     ? '<span class="te-path-flag endpoint">Endpoint</span>' : '');
-
-    const originKind  = (path[0]||{{}}).from_kind  || 'PAGE';
-    const originLabel = (path[0]||{{}}).from_label || tr.origin_label || '—';
-
-    // Summary breadcrumb
-    const summaryBar = buildPathSummary(path, originLabel);
-
-    // Full chain
-    let chainHtml = '';
-    const totalNodes = path.length + 1;
-    // Origin node
-    chainHtml += '<div class="te-chain-row">'
-      + '<div class="te-chain-left"><div class="te-chain-dot td-' + originKind + '"></div><div class="te-chain-line tl-' + originKind + '"></div></div>'
-      + '<div class="te-chain-right"><div class="te-node-card tn-' + originKind + ' is-origin">'
-      + '<div class="te-node-type">' + escHtml(KIND_LABELS[originKind]||originKind) + '</div>'
-      + '<div class="te-node-label" title="' + escAttr(originLabel) + '">' + escHtml(shortLabel(originLabel, 70)) + '</div>'
-      + '</div></div></div>';
-
-    path.forEach((step, si) => {{
-      const isLastNode = (si === path.length - 1);
-      const toKind  = step.to_kind  || '';
-      const toLabel = step.to_label || '';
-      const edge    = step.edge_kind || '';
-      const ev      = step.evidence || '';
-
-      // Relationship row
-      const isStrong = STRONG_RELS.has(edge);
-      const relTxt   = REL_LABELS[edge] || edge || '';
-      const evBlock  = ev ? '<div class="te-evidence">' + escHtml(ev.length > 120 ? ev.slice(0,120)+'…' : ev) + '</div>' : '';
-      chainHtml += '<div class="te-rel-row">'
-        + '<div class="te-chain-left"><div class="te-chain-dot" style="visibility:hidden;width:10px;height:10px"></div><div class="te-chain-line tl-' + (toKind||'PAGE') + '"></div></div>'
-        + '<div class="te-chain-right"><span class="te-rel-label' + (isStrong ? ' strong' : '') + '">' + escHtml(relTxt.toUpperCase()) + '</span>' + evBlock + '</div>'
-        + '</div>';
-
-      // Target node
-      chainHtml += '<div class="te-chain-row">'
-        + '<div class="te-chain-left"><div class="te-chain-dot td-' + toKind + '"></div>' + (isLastNode ? '' : '<div class="te-chain-line tl-' + toKind + '"></div>') + '</div>'
-        + '<div class="te-chain-right"><div class="te-node-card tn-' + toKind + (isLastNode ? ' is-last' : '') + '">'
-        + '<div class="te-node-type">' + escHtml(KIND_LABELS[toKind]||toKind) + '</div>'
-        + '<div class="te-node-label" title="' + escAttr(toLabel) + '">' + escHtml(shortLabel(toLabel, 70)) + '</div>'
-        + '</div></div></div>';
-    }});
-
-    pathsHtml += '<div class="te-path">'
-      + '<div class="te-path-hd">'
-      + '<span class="te-path-num">Path ' + (pi+1) + '</span>'
-      + '<span class="te-path-len">' + path.length + ' step' + (path.length!==1?'s':'') + '</span>'
-      + '<div class="te-path-flags">' + flags + '</div>'
-      + '</div>'
-      + summaryBar
-      + '<div class="te-chain">' + chainHtml + '</div>'
-      + '</div>';
-  }});
-
-  const bodyId = 'te-body-' + idx;
-  const chevId = 'te-chev-' + idx;
-
-  return '<div class="te-origin' + riskCls + '" id="te-origin-' + idx + '">'
-    + '<div class="te-origin-hd" onclick="toggleOrigin(' + idx + ')">'
-    + '<svg class="te-pg-icon" viewBox="0 0 20 20" fill="none"><rect x="3" y="2" width="14" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="7" x2="14" y2="7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="10" x2="14" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="13" x2="11" y2="13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
-    + '<div class="te-origin-text">'
-    + '<div class="te-origin-url" title="' + escAttr(tr.origin_label||'') + '">' + escHtml(tr.origin_label||'—') + '</div>'
-    + '<div class="te-origin-sub">' + escHtml(subTxt) + '</div>'
-    + '</div>'
-    + pills
-    + '<span class="te-chevron" id="' + chevId + '">&#x25B6;</span>'
-    + '</div>'
-    + '<div class="te-origin-body" id="' + bodyId + '">'
-    + truncWarn
-    + '<div class="te-paths">' + pathsHtml + '</div>'
-    + '</div>'
-    + '</div>';
-}}
-
-function toggleOrigin(idx) {{
-  const body = document.getElementById('te-body-' + idx);
-  const chev = document.getElementById('te-chev-' + idx);
-  if (!body) return;
-  const open = body.classList.contains('open');
-  body.classList.toggle('open', !open);
-  if(chev) {{ chev.classList.toggle('open', !open); chev.innerHTML = open ? '&#x25B6;' : '&#x25BC;'; }}
-}}
-
-function shortLabel(s, max) {{
-  s = String(s||'');
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}}
-
-function escHtml(s) {{
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}}
-function escAttr(s) {{
-  return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }}
 
 // ── Graph ─────────────────────────────────────────────────────────────────────
@@ -1394,17 +1176,13 @@ function initGraph() {{
   svg.call(gZoom);
 
   const R = {{PAGE:14,JS:12,ENDPOINT:10,SECRET:12,WORKER:10,PARAMETER:6,HOST:11,CHUNK:9,SOURCEMAP:8,CONFIG:8}};
-  const LD = {{LOADS:110,IMPORTS:90,CALLS:120,EXPOSES:110,ACCEPTS:80,OBSERVED_ON:130,RELATED_TO:115,HOSTS:140}};
+  const LD = {{LOADS:90,IMPORTS:70,CALLS:110,EXPOSES:90,ACCEPTS:50,OBSERVED_ON:120,RELATED_TO:100,HOSTS:130}};
 
   const sim = d3.forceSimulation(nodes)
-    .alphaDecay(0.04)
-    .velocityDecay(0.55)
-    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||110).strength(.7))
-    .force('charge', d3.forceManyBody().strength(-180).distanceMax(320))
-    .force('center', d3.forceCenter(W/2, H/2).strength(0.08))
-    .force('col', d3.forceCollide(d=>(R[d.kind]||10)+4))
-    .force('x', d3.forceX(W/2).strength(0.04))
-    .force('y', d3.forceY(H/2).strength(0.04));
+    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||100).strength(.4))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('col', d3.forceCollide(d=>(R[d.kind]||10)+6));
 
   const link = g.append('g').selectAll('line').data(edges).join('line')
     .attr('stroke', e => {{ const s = byId[e.source.id||e.source]; return s ? (NC[s.kind]||'#475569') : '#475569'; }})
