@@ -599,10 +599,13 @@ def extract_all_endpoints(
             _get_col(content, m.start()), 0.78, _evidence(content, m.start()))
 
     # ── Template literals ─────────────────────────────────────────────────────
+    # Accept any resolved path that starts with "/" — the add() function already
+    # filters out placeholders, empty strings, and known skip patterns.
+    # Restricting to /api / /v here silently drops /admin, /auth, /graphql, etc.
     for m in RE_TEMPLATE.finditer(content):
         path = m.group(1)
         resolved = env.resolve_template(path)
-        if resolved.startswith("/api") or resolved.startswith("/v"):
+        if resolved.startswith("/"):
             add(resolved, "UNKNOWN", _get_line(content, m.start()),
                 _get_col(content, m.start()), 0.80, _evidence(content, m.start()))
 
