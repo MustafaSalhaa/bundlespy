@@ -1,0 +1,306 @@
+<items burpVersion="2024.1" exportTime="BundleSpy Export">
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/about</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/about</path>
+    <extension/>
+    <request base64="true">R0VUIC9hYm91dCBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/blog</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/blog</path>
+    <extension/>
+    <request base64="true">R0VUIC9ibG9nIEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/blog/post?postId=3</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/blog/post</path>
+    <extension/>
+    <request base64="true">R0VUIC9ibG9nL3Bvc3QgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/catalog</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/catalog</path>
+    <extension/>
+    <request base64="true">R0VUIC9jYXRhbG9nIEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/catalog/cart</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/catalog/cart</path>
+    <extension/>
+    <request base64="true">R0VUIC9jYXRhbG9nL2NhcnQgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/catalog/product/stock</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/catalog/product/stock</path>
+    <extension/>
+    <request base64="true">R0VUIC9jYXRhbG9nL3Byb2R1Y3Qvc3RvY2sgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/catalog/product?productId=17</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/catalog/product</path>
+    <extension/>
+    <request base64="true">R0VUIC9jYXRhbG9nL3Byb2R1Y3QgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/login</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/login</path>
+    <extension/>
+    <request base64="true">R0VUIC9sb2dpbiBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/logout</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/logout</path>
+    <extension/>
+    <request base64="true">R0VUIC9sb2dvdXQgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/my-account</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/my-account</path>
+    <extension/>
+    <request base64="true">R0VUIC9teS1hY2NvdW50IEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/footer/js/scanme.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/footer/js/scanme.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvZm9vdGVyL2pzL3NjYW5tZS5qcyBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/angular_1-7-7.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/angular_1-7-7.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvYW5ndWxhcl8xLTctNy5qcyBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/deparam.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/deparam.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvZGVwYXJhbS5qcyBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/react-dom.development.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/react-dom.development.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvcmVhY3QtZG9tLmRldmVsb3BtZW50LmpzIEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/react.development.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/react.development.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvcmVhY3QuZGV2ZWxvcG1lbnQuanMgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/searchLogger.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/searchLogger.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvc2VhcmNoTG9nZ2VyLmpzIEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/stockCheck.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/stockCheck.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvc3RvY2tDaGVjay5qcyBIVFRQLzEuMQ0KSG9zdDogZ2luYW5kanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/subscribeNow.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/subscribeNow.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMvc3Vic2NyaWJlTm93LmpzIEhUVFAvMS4xDQpIb3N0OiBnaW5hbmRqdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://ginandjuice.shop/resources/js/xmlStockCheckPayload.js</url>
+    <host ip="">ginandjuice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/resources/js/xmlStockCheckPayload.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yZXNvdXJjZXMvanMveG1sU3RvY2tDaGVja1BheWxvYWQuanMgSFRUUC8xLjENCkhvc3Q6IGdpbmFuZGp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+</items>

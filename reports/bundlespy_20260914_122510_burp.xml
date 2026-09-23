@@ -1,0 +1,338 @@
+<items burpVersion="2024.1" exportTime="BundleSpy Export">
+  <item>
+    <time>0</time>
+    <url>https://accounts.google.com/o/oauth2/v2/auth</url>
+    <host ip="">accounts.google.com</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/o/oauth2/v2/auth</path>
+    <extension/>
+    <request base64="true">R0VUIC9vL29hdXRoMi92Mi9hdXRoIEhUVFAvMS4xDQpIb3N0OiBhY2NvdW50cy5nb29nbGUuY29tDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://angular.dev/best-practices/security#preventing-cross-site-scripting-xss</url>
+    <host ip="">angular.dev</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/best-practices/security</path>
+    <extension/>
+    <request base64="true">R0VUIC9iZXN0LXByYWN0aWNlcy9zZWN1cml0eSBIVFRQLzEuMQ0KSG9zdDogYW5ndWxhci5kZXYNCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://bsky.app/intent/compose?text=</url>
+    <host ip="">bsky.app</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/intent/compose</path>
+    <extension/>
+    <request base64="true">R0VUIC9pbnRlbnQvY29tcG9zZSBIVFRQLzEuMQ0KSG9zdDogYnNreS5hcHANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://bsky.app/profile/</url>
+    <host ip="">bsky.app</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/profile/</path>
+    <extension/>
+    <request base64="true">R0VUIC9wcm9maWxlLyBIVFRQLzEuMQ0KSG9zdDogYnNreS5hcHANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/chunk-DAJ4olp_.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/chunk-DAJ4olp_.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9jaHVuay1EQUo0b2xwXy5qcyBIVFRQLzEuMQ0KSG9zdDogZGVtby5vd2FzcC1qdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/chunk-DBPdFzgj.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/chunk-DBPdFzgj.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9jaHVuay1EQlBkRnpnai5qcyBIVFRQLzEuMQ0KSG9zdDogZGVtby5vd2FzcC1qdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/chunk-eYAgyLdn.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/chunk-eYAgyLdn.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9jaHVuay1lWUFneUxkbi5qcyBIVFRQLzEuMQ0KSG9zdDogZGVtby5vd2FzcC1qdWljZS5zaG9wDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/main.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/main.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9tYWluLmpzIEhUVFAvMS4xDQpIb3N0OiBkZW1vLm93YXNwLWp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/polyfills.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/polyfills.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9wb2x5ZmlsbHMuanMgSFRUUC8xLjENCkhvc3Q6IGRlbW8ub3dhc3AtanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/rolldown-runtime-BoHGiXSq.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/rolldown-runtime-BoHGiXSq.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9yb2xsZG93bi1ydW50aW1lLUJvSEdpWFNxLmpzIEhUVFAvMS4xDQpIb3N0OiBkZW1vLm93YXNwLWp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/scripts.js</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/scripts.js</path>
+    <extension/>
+    <request base64="true">R0VUIC9zY3JpcHRzLmpzIEhUVFAvMS4xDQpIb3N0OiBkZW1vLm93YXNwLWp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://demo.owasp-juice.shop/socket.io/?EIO=4&amp;transport=polling&amp;t=Q2VuKWh</url>
+    <host ip="">demo.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/socket.io/</path>
+    <extension/>
+    <request base64="true">R0VUIC9zb2NrZXQuaW8vIEhUVFAvMS4xDQpIb3N0OiBkZW1vLm93YXNwLWp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://mastodonshare.com/?text=</url>
+    <host ip="">mastodonshare.com</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/</path>
+    <extension/>
+    <request base64="true">R0VUIC8gSFRUUC8xLjENCkhvc3Q6IG1hc3RvZG9uc2hhcmUuY29tDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://opensea.io/collection/juice-shop</url>
+    <host ip="">opensea.io</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/collection/juice-shop</path>
+    <extension/>
+    <request base64="true">R0VUIC9jb2xsZWN0aW9uL2p1aWNlLXNob3AgSFRUUC8xLjENCkhvc3Q6IG9wZW5zZWEuaW8NCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://owasp-juice.shop</url>
+    <host ip="">owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/</path>
+    <extension/>
+    <request base64="true">R0VUIC8gSFRUUC8xLjENCkhvc3Q6IG93YXNwLWp1aWNlLnNob3ANCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://pwning.owasp-juice.shop/companion-guide/latest/part3/donations.html</url>
+    <host ip="">pwning.owasp-juice.shop</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/companion-guide/latest/part3/donations.html</path>
+    <extension/>
+    <request base64="true">R0VUIC9jb21wYW5pb24tZ3VpZGUvbGF0ZXN0L3BhcnQzL2RvbmF0aW9ucy5odG1sIEhUVFAvMS4xDQpIb3N0OiBwd25pbmcub3dhc3AtanVpY2Uuc2hvcA0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://testnets.opensea.io/0x8343d2eb2B13A2495De435a1b15e85b98115Ce05</url>
+    <host ip="">testnets.opensea.io</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/0x8343d2eb2B13A2495De435a1b15e85b98115Ce05</path>
+    <extension/>
+    <request base64="true">R0VUIC8weDgzNDNkMmViMkIxM0EyNDk1RGU0MzVhMWIxNWU4NWI5ODExNUNlMDUgSFRUUC8xLjENCkhvc3Q6IHRlc3RuZXRzLm9wZW5zZWEuaW8NCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://testnets.opensea.io/assets/mumbai/0xf4817631372dca68a25a18eb7a0b36d54f3dbcf7/0</url>
+    <host ip="">testnets.opensea.io</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/assets/mumbai/0xf4817631372dca68a25a18eb7a0b36d54f3dbcf7/0</path>
+    <extension/>
+    <request base64="true">R0VUIC9hc3NldHMvbXVtYmFpLzB4ZjQ4MTc2MzEzNzJkY2E2OGEyNWExOGViN2EwYjM2ZDU0ZjNkYmNmNy8wIEhUVFAvMS4xDQpIb3N0OiB0ZXN0bmV0cy5vcGVuc2VhLmlvDQoNCg==</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://www.cookiesandyou.com</url>
+    <host ip="">www.cookiesandyou.com</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/</path>
+    <extension/>
+    <request base64="true">R0VUIC8gSFRUUC8xLjENCkhvc3Q6IHd3dy5jb29raWVzYW5keW91LmNvbQ0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://www.freeprivacypolicy.com/</url>
+    <host ip="">www.freeprivacypolicy.com</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/</path>
+    <extension/>
+    <request base64="true">R0VUIC8gSFRUUC8xLjENCkhvc3Q6IHd3dy5mcmVlcHJpdmFjeXBvbGljeS5jb20NCg0K</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+  <item>
+    <time>0</time>
+    <url>https://www.googleapis.com/oauth2/v1/userinfo?alt=json&amp;access_token=</url>
+    <host ip="">www.googleapis.com</host>
+    <port>443</port>
+    <protocol>https</protocol>
+    <method>GET</method>
+    <path>/oauth2/v1/userinfo</path>
+    <extension/>
+    <request base64="true">R0VUIC9vYXV0aDIvdjEvdXNlcmluZm8gSFRUUC8xLjENCkhvc3Q6IHd3dy5nb29nbGVhcGlzLmNvbQ0KDQo=</request>
+    <status/>
+    <responselength>0</responselength>
+    <mimetype/>
+    <response base64="true"/>
+    <comment>Discovered by BundleSpy</comment>
+  </item>
+</items>
