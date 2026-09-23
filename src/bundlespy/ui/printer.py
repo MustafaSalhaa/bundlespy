@@ -779,6 +779,38 @@ def print_graphql(schemas):
     _p()
 
 
+# ── GraphQL operations (statically extracted) ────────────────────────────────
+
+def print_graphql_operations(ops):
+    """Print GraphQL operations discovered statically in JS source."""
+    if not ops:
+        return
+    queries   = [op for op in ops if op.op_type == "query"]
+    mutations = [op for op in ops if op.op_type == "mutation"]
+    subs      = [op for op in ops if op.op_type == "subscription"]
+    _section("GRAPHQL OPERATIONS", str(len(ops)), A.PURPLE)
+    _p(f"  {_label('Source')}Static JS analysis")
+    _p(f"  {_label('Queries')}{len(queries)}")
+    _p(f"  {_label('Mutations')}{len(mutations)}")
+    _p(f"  {_label('Subscriptions')}{len(subs)}")
+    if queries:
+        _p(f"\n  {A.GREY}Queries:{A.RESET}")
+        for op in queries[:15]:
+            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
+            _p(f"  {A.WHITE}  {op.name}{A.RESET}  {A.GREY}line {op.line} in {fname}{A.RESET}")
+    if mutations:
+        _p(f"\n  {A.ORANGE}Mutations:{A.RESET}")
+        for op in mutations[:15]:
+            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
+            _p(f"  {A.ORANGE}  {op.name}{A.RESET}  {A.GREY}line {op.line} in {fname}{A.RESET}")
+    if subs:
+        _p(f"\n  {A.GREY}Subscriptions:{A.RESET}")
+        for op in subs[:10]:
+            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
+            _p(f"  {A.GREY}  {op.name}  line {op.line} in {fname}{A.RESET}")
+    _p()
+
+
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
 def print_infrastructure(items):
@@ -972,6 +1004,10 @@ def print_report(
 
     if graphql_schemas:
         print_graphql(graphql_schemas)
+
+    gql_ops = extras.get("graphql_operations", [])
+    if gql_ops:
+        print_graphql_operations(gql_ops)
 
     print_infrastructure(result.infrastructure)
 
