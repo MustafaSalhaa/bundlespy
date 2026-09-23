@@ -527,6 +527,38 @@ def run_scan(args) -> int:
             phase_done("Crawl complete",
                 f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
 
+    # ── Passive intelligence collection ──────────────────────────────────────
+    # Runs on every scan (active, headless, or passive mode).
+    # Collects robots.txt, sitemaps, well-known paths, response headers, CSP,
+    # OpenAPI schemas, and meta-tag intelligence - all without exploitation.
+    try:
+        from .discovery.intelligence import run_intelligence_collection
+        if not args.quiet:
+            phase("Collecting passive intelligence")
+        _html_content = getattr(crawler, "homepage_html", "") if crawler else ""
+        _intel_result = run_intelligence_collection(
+            target_url   = target,
+            fetcher      = fetcher,
+            scope        = scope,
+            html_content = _html_content,
+        )
+        extras["intelligence"] = _intel_result
+        # Feed sitemap-discovered URLs into scope for the rest of the scan
+        if _intel_result.sitemap_urls:
+            for _su in _intel_result.sitemap_urls:
+                if scope.in_scope(_su) and _su not in {js.source_page for js in all_js}:
+                    pass  # URLs handed to coverage; JS fetch happens via crawler only
+        if not args.quiet:
+            _intel_summary = (
+                f"{len(_intel_result.sitemap_urls)} sitemap URLs  "
+                f"{len(_intel_result.technologies)} tech detected  "
+                f"{len(_intel_result.interesting_headers)} header flags"
+            )
+            phase_done("Passive intelligence", _intel_summary)
+    except Exception as _ie:
+        import logging as _ilog
+        _ilog.getLogger("bundlespy.cli").warning("Intelligence collection failed: %s", _ie)
+
     # ── Passive ───────────────────────────────────────────────────────────────
     if args.passive:
         if not args.quiet:
