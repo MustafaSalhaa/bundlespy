@@ -233,7 +233,7 @@ class TestContentHashDedup:
         content = 'var x = "/api/users";'
         js1 = _make_js("https://cdn.com/app.js", content)
         js2 = _make_js("https://other.com/app.js", content)  # same sha256
-        _, endpoints, _ = self._run_analyze([js1, js2])
+        _, endpoints, _, _ = self._run_analyze([js1, js2])
         # Should find /api/users only once, not twice
         urls = [e.url for e in endpoints]
         assert urls.count("/api/users") <= 1
@@ -241,7 +241,7 @@ class TestContentHashDedup:
     def test_different_content_both_analyzed(self):
         js1 = _make_js("a.js", 'var x = "/api/users";')
         js2 = _make_js("b.js", 'var y = "/api/orders";')
-        _, endpoints, _ = self._run_analyze([js1, js2])
+        _, endpoints, _, _ = self._run_analyze([js1, js2])
         urls = [e.url for e in endpoints]
         assert "/api/users" in urls
         assert "/api/orders" in urls
@@ -249,7 +249,7 @@ class TestContentHashDedup:
     def test_no_content_skipped(self):
         js = _make_js("a.js", "")
         js.content = ""
-        findings, endpoints, _ = self._run_analyze([js])
+        findings, endpoints, _, _ = self._run_analyze([js])
         assert findings == []
         assert endpoints == []
 
