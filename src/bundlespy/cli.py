@@ -18,7 +18,10 @@ from .crawler.scope import ScopeChecker
 from .crawler.crawler import Crawler
 from .analysis.secrets import SecretScanner
 from .analysis.endpoints import extract_endpoints
-from .analysis.ast_endpoints import extract_all_endpoints
+from .analysis.ast_endpoints import (
+    extract_all_endpoints, extract_dynamic_imports, extract_workers,
+    extract_graphql_operations,
+)
 from .analysis.route_extractor import extract_routes
 from .analysis.endpoint_intel import extract_endpoint_intelligence
 from .analysis.infrastructure import extract_infrastructure
@@ -223,11 +226,15 @@ def _analyze(
                                  in the final static-analysis pass to avoid
                                  double-counting.
     """
-    findings:   list = []
-    endpoints:  list = []
-    infra:      list = []
-    seen_finds: set  = set()
-    seen_eps:   set  = set()
+    findings:      list = []
+    endpoints:     list = []
+    infra:         list = []
+    graphql_ops:   list = []
+    dynamic_urls:  list = []   # worker / chunk / dynamic-import URLs to fetch
+    seen_finds:    set  = set()
+    seen_eps:      set  = set()
+    seen_gql:      set  = set()
+    seen_dyn:      set  = set()
     # Track which worker/chunk URLs have already been fetched to avoid loops
     fetched_urls: set = set()
 
@@ -294,6 +301,23 @@ def _analyze(
         # Infrastructure detection
         infra.extend(extract_infrastructure(content, primary_js.url))
 
+        # GraphQL operation extraction
+        for op in extract_graphql_operations(content, primary_js.url):
+            key = f"{op.op_type}:{op.name}"
+            if key not in seen_gql:
+                seen_gql.add(key)
+                graphql_ops.append(op)
+
+        # Collect worker / dynamic-import URLs for second-pass fetching
+        for di in extract_workers(content, primary_js.url):
+            if di.url and di.url not in seen_dyn:
+                seen_dyn.add(di.url)
+                dynamic_urls.append(di.url)
+        for di in extract_dynamic_imports(content, primary_js.url):
+            if di.url and di.url not in seen_dyn:
+                seen_dyn.add(di.url)
+                dynamic_urls.append(di.url)
+
     for sha, group in content_groups.items():
         # Skip hashes the headless engine already handled inline
         if sha in _inline_skip:
@@ -306,24 +330,19 @@ def _analyze(
         _process(js, [js.url])
 
     # Worker / dynamic-import chunk fetching.
-    # After the initial pass, check if any discovered endpoints look like
-    # JS worker files or chunk URLs that should be fetched and analyzed too.
+    # Second pass: fetch every worker / chunk / dynamic-import URL discovered
+    # during static analysis and analyze its content too.
+    # Uses the dedicated dynamic_urls list (populated by extract_workers /
+    # extract_dynamic_imports) rather than filtering the endpoints list, so
+    # only real JS resources are fetched, not arbitrary API endpoints.
     if fetcher is not None:
-        worker_queue: list = [
-            ep for ep in endpoints
-            if ep.url and (
-                ep.url.endswith(".js")
-                or getattr(ep, "kind", None) in ("worker", "chunk", "dynamic_import")
-            )
-        ]
-        for ep in worker_queue:
-            url = ep.url
-            # Resolve relative URLs — not possible without a base, skip
+        for url in dynamic_urls:
+            # Relative URLs cannot be fetched without a base URL — skip
             if not url.startswith("http"):
                 continue
             if url in fetched_urls:
                 continue
-            if scope is not None and not scope.allowed(url):
+            if scope is not None and not scope.in_scope(url):
                 continue
             fetched_urls.add(url)
             try:
@@ -338,7 +357,7 @@ def _analyze(
                 continue
             _process(chunk_js, [url])
 
-    return findings, endpoints, infra, []
+    return findings, endpoints, infra, graphql_ops
 
 
 def run_scan(args) -> int:
