@@ -309,14 +309,25 @@ def _analyze(
                 graphql_ops.append(op)
 
         # Collect worker / dynamic-import URLs for second-pass fetching
+        from urllib.parse import urljoin
         for di in extract_workers(content, primary_js.url):
-            if di.url and di.url not in seen_dyn:
-                seen_dyn.add(di.url)
-                dynamic_urls.append(di.url)
+            raw = di.url
+            if not raw:
+                continue
+            if not raw.startswith("http") and primary_js.url:
+                raw = urljoin(primary_js.url, raw)
+            if raw and raw not in seen_dyn:
+                seen_dyn.add(raw)
+                dynamic_urls.append(raw)
         for di in extract_dynamic_imports(content, primary_js.url):
-            if di.url and di.url not in seen_dyn:
-                seen_dyn.add(di.url)
-                dynamic_urls.append(di.url)
+            raw = di.url
+            if not raw:
+                continue
+            if not raw.startswith("http") and primary_js.url:
+                raw = urljoin(primary_js.url, raw)
+            if raw and raw not in seen_dyn:
+                seen_dyn.add(raw)
+                dynamic_urls.append(raw)
 
     for sha, group in content_groups.items():
         # Skip hashes the headless engine already handled inline
@@ -336,9 +347,14 @@ def _analyze(
     # extract_dynamic_imports) rather than filtering the endpoints list, so
     # only real JS resources are fetched, not arbitrary API endpoints.
     if fetcher is not None:
+        import hashlib as _hashlib
+        from datetime import datetime as _dt
         for url in dynamic_urls:
-            # Relative URLs cannot be fetched without a base URL — skip
+            # Skip relative URLs (should already be resolved, but guard anyway)
             if not url.startswith("http"):
+                continue
+            # Skip unresolvable template literals (e.g. ./chunks/${id}.js → .../${id}.js)
+            if "${" in url or "{dynamic}" in url:
                 continue
             if url in fetched_urls:
                 continue
@@ -346,15 +362,33 @@ def _analyze(
                 continue
             fetched_urls.add(url)
             try:
-                chunk_js = fetcher(url)
+                result = fetcher.get(url)
             except Exception:
                 continue
-            if chunk_js is None:
+            # fetcher.get() returns (content, status_code, content_type, sha256)
+            if result is None:
                 continue
+            try:
+                chunk_content, chunk_status, chunk_ctype, chunk_sha = result
+            except (TypeError, ValueError):
+                continue
+            if not chunk_content or chunk_status not in (200,):
+                continue
+            if not chunk_sha:
+                chunk_sha = _hashlib.sha256(chunk_content.encode()).hexdigest()
             # Skip if content already analyzed (inline or main pass)
-            chunk_hash = getattr(chunk_js, "sha256", None)
-            if chunk_hash and (chunk_hash in _inline_skip or chunk_hash in content_groups):
+            if chunk_sha and (chunk_sha in _inline_skip or chunk_sha in content_groups):
                 continue
+            chunk_js = JSFile(
+                url=url,
+                source_page=url,
+                status_code=chunk_status,
+                content_type=chunk_ctype or "application/javascript",
+                size_bytes=len(chunk_content),
+                sha256=chunk_sha,
+                content=chunk_content,
+                discovered_at=_dt.utcnow(),
+            )
             _process(chunk_js, [url])
 
     return findings, endpoints, infra, graphql_ops
