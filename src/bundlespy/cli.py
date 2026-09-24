@@ -81,11 +81,6 @@ examples:
     scan.add_argument("--stealth",        action="store_true")
     scan.add_argument("--interact",       action="store_true", help="Enable full page interaction in headless mode (slower but finds more lazy JS)")
     scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
-
-    # Cache
-    scan.add_argument("--no-cache",    action="store_true", help="Disable cache reads (re-fetch everything; still writes to cache)")
-    scan.add_argument("--clear-cache", action="store_true", help="Wipe the local HTTP cache before scanning")
-    scan.add_argument("--cache-dir",   default="", metavar="PATH", help="Override the cache directory (default: ~/.cache/bundlespy/http)")
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
                       help="Extra header to include in all requests (can use multiple times)")
@@ -147,7 +142,7 @@ def _write_reports(
     """Write file reports. Returns dict of format -> path."""
     ts       = started.strftime("%Y%m%d_%H%M%S")
     stem     = report_name.strip() if report_name else f"bundlespy_{ts}"
-    # Strip any extension the user may have added - we add the right one
+    # Strip any extension the user may have added — we add the right one
     for ext in (".html", ".json", ".csv", ".xml", ".txt"):
         if stem.lower().endswith(ext):
             stem = stem[:-len(ext)]
@@ -197,13 +192,7 @@ def _write_reports(
     return paths
 
 
-def _analyze(
-    js_files: list,
-    scanner: SecretScanner,
-    inline_analyzed_hashes: set = None,
-    fetcher=None,
-    scope=None,
-) -> tuple:
+def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
     """
     Analyze JS files for secrets, endpoints, and infrastructure.
 
@@ -211,23 +200,14 @@ def _analyze(
     analyze the content only once but attribute findings/endpoints
     to ALL file URLs that share that content (provenance preserved).
 
-    Static-to-runtime endpoint correlation: same canonical URL seen in
-    both static JS and runtime interception -> one entity, higher confidence.
-
-    Workers and dynamic imports are fetched and analyzed when fetcher/scope
-    are supplied. GraphQL operations are extracted and returned separately.
+    Static↔runtime endpoint correlation: same canonical URL seen in
+    both static JS and runtime interception → one entity, higher confidence.
     """
-    from .analysis.ast_endpoints import (
-        extract_workers, extract_dynamic_imports, extract_graphql_operations,
-    )
-    from urllib.parse import urljoin
-
-    findings:      list = []
-    endpoints:     list = []
-    infra:         list = []
-    graphql_ops:   list = []
-    seen_finds:    set  = set()
-    seen_eps:      set  = set()
+    findings:   list = []
+    endpoints:  list = []
+    infra:      list = []
+    seen_finds: set  = set()
+    seen_eps:   set  = set()
 
     # Content-hash dedup: sha256 -> list of JSFile sharing that content
     from collections import defaultdict
@@ -242,35 +222,11 @@ def _analyze(
         else:
             no_hash.append(js)
 
-    # Set of sha256 hashes already processed by the inline analyzer (avoid double-counting)
-    _inline_analyzed = inline_analyzed_hashes or set()
-
-    # Track worker/dynamic-import URLs already fetched to avoid loops
-    _fetched_extra: set = set()
-
-    def _add_ep(ep, source_type: str = "static") -> bool:
-        key = ep.url.rstrip("/").lower().split("?")[0]
-        if key not in seen_eps:
-            seen_eps.add(key)
-            ep.source_type = source_type
-            endpoints.append(ep)
-            return True
-        return False
-
     # Analyze each unique content once; attribute to all occurrences
     def _process(primary_js: "JSFile", all_urls: list) -> None:
-        # Skip files already fully analyzed inline during headless session.
-        # The inline analyzer already recorded their findings/endpoints on the engine.
-        # We only skip the content analysis; infrastructure detection still runs
-        # because inline analysis stores infra back as api_calls, not infra items.
-        if primary_js.sha256 and primary_js.sha256 in _inline_analyzed:
-            return
-        if getattr(primary_js, "_inline_analyzed", False):
-            return
-
         content = primary_js.content
 
-        # Secret detection - scan once against primary URL
+        # Secret detection — scan once against primary URL
         for f in scanner.scan(content, primary_js.url, primary_js.source_page):
             if f.sha256 not in seen_finds:
                 seen_finds.add(f.sha256)
@@ -279,115 +235,50 @@ def _analyze(
                     f.occurrences = [f"{u}:{f.line_number}" for u in all_urls]
                 findings.append(f)
 
-        # Endpoint extraction - deduplicate by canonical key
+        # Frontend route extraction runs FIRST so ROUTE-category paths claim
+        # their URL keys before the generic extractors can register the same
+        # paths as UNKNOWN. Order matters: _add_ep deduplicates by URL key,
+        # so whichever extractor fires first wins the category label.
+        # React Router, Vue Router, Angular, Next.js, SvelteKit, Nuxt,
+        # Tanstack Router, Backbone, generic navigation APIs.
+        _eps_this_file = []
+        for ep in extract_routes(content, primary_js.url):
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
+
+        # Endpoint extraction — deduplicate by canonical key
         for ep in extract_all_endpoints(content, primary_js.url):
-            _add_ep(ep, "static")
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
 
         for ep in extract_endpoints(content, primary_js.url):
-            _add_ep(ep, "static")
-
-        # Frontend route extraction - React Router, Vue Router, Angular, Next.js,
-        # SvelteKit, Nuxt, Tanstack Router, Backbone, generic navigation APIs.
-        # Runs separately so route paths (category=ROUTE) are always included
-        # even when not wrapped in a fetch/axios call.
-        for ep in extract_routes(content, primary_js.url):
-            _add_ep(ep, "static")
-
-        # GraphQL operations - extracted from every JS file, deduplicated by op_type:name
-        for op in extract_graphql_operations(content, primary_js.url):
-            key = f"{op.op_type}:{op.name}"
-            if not any(f"{o.op_type}:{o.name}" == key for o in graphql_ops):
-                graphql_ops.append(op)
-
-        # Workers - fetch and analyze inline when fetcher is available.
-        # extract_workers() covers new Worker(), SharedWorker, sw.register, importScripts.
-        if fetcher and scope:
-            _process_workers(content, primary_js.url)
-            _process_dynamic_imports(content, primary_js.url)
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                ep.source_type = "static"
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
 
         # Infrastructure detection
         infra.extend(extract_infrastructure(content, primary_js.url))
 
-    def _fetch_and_analyze(url: str, source_page: str) -> None:
-        """Fetch one extra JS file (worker/dynamic-import) and run _process on it."""
-        norm = url.rstrip("?#")
-        if norm in _fetched_extra:
-            return
-        _fetched_extra.add(norm)
-        try:
-            content, status, ct, sha256 = fetcher.get(url)
-        except Exception:
-            return
-        if not content or status not in range(200, 300):
-            return
-        # Deduplicate by content hash
-        if sha256 and sha256 in content_groups:
-            return  # already analyzed as part of main set
-        from .storage.models import JSFile as _JSFile
-        extra_js = _JSFile(
-            url=url, source_page=source_page, status_code=status,
-            content_type=ct, size_bytes=len(content), sha256=sha256,
-            content=content,
-        )
-        # Register in content_groups so subsequent duplicates are skipped
-        if sha256:
-            if sha256 in content_groups:
-                content_groups[sha256].append(extra_js)
-                return
-            content_groups[sha256] = [extra_js]
-        _process(extra_js, [url])
-
-    def _process_workers(content: str, file_url: str) -> None:
-        """Extract worker URLs and analyze their content."""
-        for w in extract_workers(content, file_url):
-            wurl = w.url
-            if not wurl or wurl.startswith("blob:") or wurl.startswith("data:"):
-                continue
-            # Resolve relative URLs against the file that references them
-            if not wurl.startswith("http"):
-                wurl = urljoin(file_url, wurl)
-            if scope and not scope.in_scope(wurl):
-                continue
-            _fetch_and_analyze(wurl, file_url)
-
-    def _process_dynamic_imports(content: str, file_url: str) -> None:
-        """Extract dynamic import() / require() URLs and analyze them."""
-        for di in extract_dynamic_imports(content, file_url):
-            durl = di.url
-            if not durl or durl.startswith("blob:") or durl.startswith("data:"):
-                continue
-            # Skip template-literal placeholders that could not be resolved
-            if "${" in durl:
-                continue
-            if not durl.startswith("http"):
-                durl = urljoin(file_url, durl)
-            if scope and not scope.in_scope(durl):
-                continue
-            _fetch_and_analyze(durl, file_url)
-
-    # Snapshot keys before iteration - _process() may add new entries to
-    # content_groups via _fetch_and_analyze() (workers, dynamic imports).
-    # Iterate a copy so the dict can grow without raising RuntimeError.
-    processed: set = set()
-
-    def _process_all() -> None:
-        """Process all unprocessed content groups, including ones added mid-run."""
-        changed = True
-        while changed:
-            changed = False
-            for sha, group in list(content_groups.items()):
-                if sha in processed:
-                    continue
-                processed.add(sha)
-                changed = True
-                _process(group[0], [js.url for js in group])
-
-    _process_all()
+    for sha, group in content_groups.items():
+        primary = group[0]
+        all_urls = [js.url for js in group]
+        _process(primary, all_urls)
 
     for js in no_hash:
         _process(js, [js.url])
 
-    return findings, endpoints, infra, graphql_ops
+    return findings, endpoints, infra, []
 
 
 def run_scan(args) -> int:
@@ -407,7 +298,7 @@ def run_scan(args) -> int:
 
     target = args.target.strip()
 
-    # Normalize URL - fix common input mistakes
+    # Normalize URL — fix common input mistakes
     # Collapse duplicate schemes: https://https://x -> https://x
     while re.match(r'^https?://https?://', target):
         target = re.sub(r'^https?://(https?://)', r'\1', target)
@@ -415,7 +306,7 @@ def run_scan(args) -> int:
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    # Safety check - fail cleanly, no prompt
+    # Safety check — fail cleanly, no prompt
     safe, reason = validate_url(target, check_dns=False)
     if not safe:
         phase_error(f"Target blocked by safety policy: {reason}")
@@ -443,32 +334,11 @@ def run_scan(args) -> int:
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
 
-    # ── HTTP cache ────────────────────────────────────────────────────────────
-    from .crawler.cache import FetchCache
-    from pathlib import Path as _Path
-    _cache_path = _Path(args.cache_dir) if getattr(args, "cache_dir", "") else None
-    _fetch_cache = FetchCache(
-        path=_cache_path,
-        disabled=getattr(args, "no_cache", False),
-    )
-    if getattr(args, "clear_cache", False):
-        _cleared = _fetch_cache.clear()
-        if not args.quiet:
-            phase_done("Cache cleared", f"{_cleared} entries removed")
-    else:
-        # Evict stale entries in background - fast, no network
-        try:
-            _fetch_cache.evict_expired()
-        except Exception:
-            pass
-    extras["cache"] = _fetch_cache
-
     fetcher = Fetcher(
         timeout=args.timeout,
         requests_per_second=args.rate,
         stealth=args.stealth,
         extra_headers=extra_headers,
-        cache=_fetch_cache,
     )
     scope = ScopeChecker(
         target_url=target,
@@ -507,39 +377,6 @@ def run_scan(args) -> int:
         # Include HTML attribute findings from crawler
         html_findings_from_crawler = getattr(crawler, "html_findings", [])
 
-        # Surface technology-stack intelligence from HTTP response headers.
-        # Server:, X-Powered-By:, Via:, CSP, etc. are collected by the crawler
-        # and stored as InfrastructureItem objects for the final report.
-        _observed_headers = getattr(crawler, "observed_headers", [])
-        if _observed_headers:
-            from .storage.models import InfrastructureItem as _InfraItem
-            _header_infra = []
-            _seen_hdr_vals: set = set()
-            for _hdr_entry in _observed_headers:
-                _page_url = _hdr_entry.get("url", target)
-                for _key, _label in [
-                    ("server",           "HTTP Server"),
-                    ("x_powered_by",     "X-Powered-By"),
-                    ("via",              "Via Proxy"),
-                    ("x_generator",      "Generator"),
-                    ("x_aspnet_version", "ASP.NET Version"),
-                    ("x_aspnetmvc_version", "ASP.NET MVC"),
-                    ("x_drupal_cache",   "Drupal CMS"),
-                    ("x_wp_total",       "WordPress REST"),
-                ]:
-                    _val = _hdr_entry.get(_key, "")
-                    if _val and _val not in _seen_hdr_vals:
-                        _seen_hdr_vals.add(_val)
-                        _header_infra.append(_InfraItem(
-                            value          = f"{_label}: {_val}",
-                            classification = "TECHNOLOGY_DISCLOSURE",
-                            source_file    = f"http-header:{_page_url}",
-                            line_number    = 0,
-                            confidence     = 0.99,
-                            action         = "report_only",
-                        ))
-            extras["header_infra"] = _header_infra
-
         for idx, (script_content, source_page) in enumerate(crawler.inline_scripts):
             import hashlib
             content_hash = hashlib.sha256(
@@ -560,38 +397,6 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Crawl complete",
                 f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
-
-    # ── Passive intelligence collection ──────────────────────────────────────
-    # Runs on every scan (active, headless, or passive mode).
-    # Collects robots.txt, sitemaps, well-known paths, response headers, CSP,
-    # OpenAPI schemas, and meta-tag intelligence - all without exploitation.
-    try:
-        from .discovery.intelligence import run_intelligence_collection
-        if not args.quiet:
-            phase("Collecting passive intelligence")
-        _html_content = getattr(crawler, "homepage_html", "") if crawler else ""
-        _intel_result = run_intelligence_collection(
-            target_url   = target,
-            fetcher      = fetcher,
-            scope        = scope,
-            html_content = _html_content,
-        )
-        extras["intelligence"] = _intel_result
-        # Feed sitemap-discovered URLs into scope for the rest of the scan
-        if _intel_result.sitemap_urls:
-            for _su in _intel_result.sitemap_urls:
-                if scope.in_scope(_su) and _su not in {js.source_page for js in all_js}:
-                    pass  # URLs handed to coverage; JS fetch happens via crawler only
-        if not args.quiet:
-            _intel_summary = (
-                f"{len(_intel_result.sitemap_urls)} sitemap URLs  "
-                f"{len(_intel_result.technologies)} tech detected  "
-                f"{len(_intel_result.interesting_headers)} header flags"
-            )
-            phase_done("Passive intelligence", _intel_summary)
-    except Exception as _ie:
-        import logging as _ilog
-        _ilog.getLogger("bundlespy.cli").warning("Intelligence collection failed: %s", _ie)
 
     # ── Passive ───────────────────────────────────────────────────────────────
     if args.passive:
@@ -630,7 +435,6 @@ def run_scan(args) -> int:
         # Extract routes from already-collected JS files
         # so headless visits every Angular/React/Vue route
         from .analysis.ast_endpoints import extract_all_endpoints as _extract_eps
-        from .analysis.route_extractor import extract_routes as _extract_routes
         from urllib.parse import urlparse as _urlparse
         _parsed = _urlparse(target)
         _base   = f"{_parsed.scheme}://{_parsed.netloc}"
@@ -638,13 +442,10 @@ def run_scan(args) -> int:
         for _js in all_js:
             if not _js.content:
                 continue
-            # Pull page-navigation routes from the dedicated route extractor
-            for _ep in _extract_routes(_js.content, _js.url):
-                if _ep.url.startswith("/") and not _ep.url.startswith("//"):
-                    _static_routes.add(_base + _ep.url.split("?")[0])
-            # Also pull from endpoint extractor but filter to non-API paths only
             for _ep in _extract_eps(_js.content, _js.url):
+                # Only relative paths — these are frontend routes
                 if _ep.url.startswith("/") and not _ep.url.startswith("//"):
+                    # Skip API paths — we want page routes not API endpoints
                     if not any(k in _ep.url.lower() for k in [
                         "/api/", "/rest/", "/graphql", "/v1/", "/v2/",
                         "/upload", "/download", "/socket",
@@ -689,7 +490,7 @@ def run_scan(args) -> int:
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats     = headless_result.get("stats", {})
 
-        # Store auth result - used for mode label correction and report
+        # Store auth result — used for mode label correction and report
         _auth_result = headless_result.get("auth_result")
         if _auth_result:
             extras["auth_result"] = _auth_result
@@ -785,35 +586,9 @@ def run_scan(args) -> int:
     _logger = _logging.getLogger("bundlespy.cli")
     _t_analysis = _time.monotonic()
     scanner = SecretScanner()
-    # Pass hashes already analyzed inline by the headless engine so _analyze()
-    # skips those files and avoids double-counting findings/endpoints.
-    _headless_analyzed_hashes = locals().get("headless_result", {}).get("analyzed_hashes", set()) if "headless_result" in locals() else set()
-    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(
-        all_js, scanner,
-        inline_analyzed_hashes=_headless_analyzed_hashes,
-        fetcher=fetcher,
-        scope=scope,
-    )
+    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(all_js, scanner)
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
     _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
-
-    # Store extracted GraphQL operations for the report (Gap 8).
-    # These are statically extracted operation names (query/mutation/subscription)
-    # from JS source - distinct from GraphQL introspection schemas.
-    extras["graphql_operations"] = _graphql_ops
-    if _graphql_ops and not args.quiet:
-        _gql_queries = sum(1 for op in _graphql_ops if op.op_type == "query")
-        _gql_muts    = sum(1 for op in _graphql_ops if op.op_type == "mutation")
-        _gql_subs    = sum(1 for op in _graphql_ops if op.op_type == "subscription")
-        _logger.info(
-            "GraphQL operations extracted: %d queries, %d mutations, %d subscriptions",
-            _gql_queries, _gql_muts, _gql_subs,
-        )
-
-    # Merge HTTP header infrastructure items (technology disclosure from Server:, X-Powered-By:, etc.)
-    _header_infra = extras.pop("header_infra", [])
-    if _header_infra:
-        all_infra.extend(_header_infra)
 
     # Re-categorize UNKNOWN endpoints using full classifier
     from .analysis.endpoints import _categorize_path as _recat
@@ -832,7 +607,7 @@ def run_scan(args) -> int:
             seen_html.add(f.sha256)
             all_findings.append(f)
 
-    # Per-file analysis breakdown - prove every file was analyzed
+    # Per-file analysis breakdown — prove every file was analyzed
     # Build per-file stats from already-computed findings and endpoints
     # Strip all URL prefixes for matching (html:, inline:, sourcemap://, etc.)
     def _strip_url_prefix(url: str) -> str:
@@ -853,13 +628,13 @@ def run_scan(args) -> int:
         _ekey = _strip_url_prefix(getattr(_ep, "source_file", "") or "")
         _endpoints_by_stripped[_ekey] = _endpoints_by_stripped.get(_ekey, 0) + 1
 
-    # Per-file stats - run each extractor on each file individually
+    # Per-file stats — run each extractor on each file individually
     # HTML attribute findings (html: prefix) are PAGE-level, not script-level
-    # They are shown separately - we do NOT assign them to inline scripts
+    # They are shown separately — we do NOT assign them to inline scripts
     from .analysis.endpoint_intel import extract_endpoint_intelligence as _ep_intel
     from .analysis.ast_endpoints import extract_all_endpoints as _ast_ep
 
-    # Per-file stats - map already-computed findings/endpoints back to each file
+    # Per-file stats — map already-computed findings/endpoints back to each file
     # This is accurate because it uses the SAME findings already verified correct
     # Re-running the scanner would get different results due to env/path differences
 
@@ -912,7 +687,7 @@ def run_scan(args) -> int:
             "note":       "",
         })
 
-    # HTML attribute findings - completely separate section, never merged into inline JS
+    # HTML attribute findings — completely separate section, never merged into inline JS
     # Each page that has html: findings gets its own row, independent of inline scripts
     _html_pages = {}
     for _f in all_findings:
@@ -999,27 +774,11 @@ def run_scan(args) -> int:
                     _ep_path = _upep(ep.url).path or ep.url
                     ep.category = _cat_path(_ep_path)
                 all_endpoints.append(ep)
-
-        # Static-to-runtime correlation: same canonical URL seen in static JS and
-        # real network traffic -> upgrade to source_type="correlated", boost confidence.
-        # Only run when we have real runtime endpoints to correlate against.
-        if all_endpoints_extra:
-            from .analysis.endpoints import correlate_endpoints as _correlate
-            _static_eps  = [ep for ep in all_endpoints if getattr(ep, "source_type", "static") == "static"]
-            _runtime_eps = [ep for ep in all_endpoints if getattr(ep, "source_type", "runtime") == "runtime"]
-            if _static_eps and _runtime_eps:
-                _correlated = _correlate(_static_eps, _runtime_eps)
-                # Replace static+runtime portion of all_endpoints with correlated set;
-                # keep crawled-page routes and any other source_type entries intact.
-                _other_eps = [ep for ep in all_endpoints
-                              if getattr(ep, "source_type", "static") not in ("static", "runtime")]
-                all_endpoints = _other_eps + _correlated
-
     if not args.quiet:
         phase_done("Analysis complete",
             f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
 
-    # Deduplicate findings by rule + value - same secret on multiple pages
+    # Deduplicate findings by rule + value — same secret on multiple pages
     # becomes ONE finding with all occurrences listed
     _finding_map = {}
     _deduped_findings = []
@@ -1041,7 +800,7 @@ def run_scan(args) -> int:
             _deduped_findings.append(f)
     all_findings = _deduped_findings
 
-    # Remove bare target root from endpoints - it's not an API endpoint
+    # Remove bare target root from endpoints — it's not an API endpoint
     _target_base = target.rstrip("/").lower()
     all_endpoints = [
         ep for ep in all_endpoints
@@ -1049,7 +808,7 @@ def run_scan(args) -> int:
         and not (ep.url.rstrip("/").lower() == _target_base and ep.method == "UNKNOWN")
     ]
 
-    # Final endpoint dedup - keep parameterized endpoints distinct
+    # Final endpoint dedup — keep parameterized endpoints distinct
     # Dedup by path + sorted param names (not param values)
     # so /product?productId=1 and /product?productId=2 merge to one,
     # but /product?productId and /product?category stay separate
@@ -1187,7 +946,7 @@ def run_scan(args) -> int:
 
     # ── Attack surface graph ───────────────────────────────────────────────────
     # Build the relationship graph from the completed scan result.
-    # This is O(n) and adds no network I/O - pure in-memory assembly.
+    # This is O(n) and adds no network I/O — pure in-memory assembly.
     try:
         from .storage.graph import AttackSurfaceGraph
         result.graph = AttackSurfaceGraph.from_scan_result(result)
@@ -1217,19 +976,6 @@ def run_scan(args) -> int:
     )
     extras["coverage"] = coverage
 
-    # ── Cache stats ───────────────────────────────────────────────────────────
-    _cache_summary = _fetch_cache.summary()
-    extras["cache_stats"] = _cache_summary
-    if not args.quiet and (_cache_summary["hits"] > 0 or _cache_summary["revalidated"] > 0):
-        _saved_mb = _cache_summary["saved_bytes"] / 1_048_576
-        phase_done(
-            "Cache",
-            f"{_cache_summary['hits']} hits  "
-            f"{_cache_summary['revalidated']} revalidated  "
-            f"{_cache_summary['misses']} misses  "
-            f"{_saved_mb:.1f} MB saved",
-        )
-
     # ── Reports ───────────────────────────────────────────────────────────────
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
@@ -1251,7 +997,7 @@ def run_scan(args) -> int:
             report_paths        = file_paths,
         )
     elif getattr(args, "silent", False):
-        # Silent mode - print only findings, one per line
+        # Silent mode — print only findings, one per line
         real = [f for f in all_findings if f.status != "likely_false_positive"]
         for f in real:
             print(f"[{f.severity}] {f.title} | {f.file_url}:{f.line_number} | {f.matched_value}")
