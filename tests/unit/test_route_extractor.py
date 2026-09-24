@@ -576,3 +576,67 @@ class TestRealWorldPatterns:
             element: <AuthLayout />,
             children: [
               { path: 'dashboard', element: <Dashboard /> },
+                          { path: 'profile', element: <Profile /> },
+              { path: 'settings', element: <Settings /> },
+              { path: 'admin', element: <Admin /> },
+              { path: 'admin/users', element: <AdminUsers /> },
+              { path: 'admin/users/:id', element: <UserDetail /> },
+            ],
+          },
+        ]);
+        """
+        paths = _paths(js)
+        assert "/login" in paths
+        assert "/register" in paths
+        assert "/app" in paths
+        assert "/app/dashboard" in paths or "dashboard" in paths
+        assert "/admin/users" in paths or "admin/users" in paths
+
+    def test_vue_router_v4_full_config(self):
+        js = """
+        const router = createRouter({
+          history: createWebHistory(),
+          routes: [
+            { path: '/', component: Home },
+            { path: '/login', component: Login },
+            { path: '/register', component: Register },
+            {
+              path: '/admin',
+              component: AdminLayout,
+              children: [
+                { path: '', component: AdminHome },
+                { path: 'users', component: UserList },
+                { path: 'users/:id', component: UserDetail },
+                { path: 'settings', component: AdminSettings },
+              ],
+            },
+          ],
+        });
+        """
+        paths = _paths(js)
+        assert "/login" in paths
+        assert "/register" in paths
+        assert "/admin" in paths
+        assert "users" in paths or "/admin/users" in paths
+
+    def test_angular_lazy_routing(self):
+        js = """
+        const routes: Routes = [
+          { path: '', redirectTo: '/home', pathMatch: 'full' },
+          { path: 'home', component: HomeComponent },
+          { path: 'login', component: LoginComponent },
+          { path: 'register', component: RegisterComponent },
+          { path: 'dashboard', component: DashboardComponent, canActivate: [AuthGuard] },
+          {
+            path: 'admin',
+            loadChildren: () => import('./admin/admin.module').then(m => m.AdminModule),
+            canActivate: [AdminGuard],
+          },
+          { path: '**', redirectTo: '/home' },
+        ];
+        """
+        paths = _paths(js)
+        assert "home" in paths or "/home" in paths
+        assert "login" in paths or "/login" in paths
+        assert "dashboard" in paths or "/dashboard" in paths
+        assert "/home" in paths  # from redirectTo
