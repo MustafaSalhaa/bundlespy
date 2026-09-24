@@ -3,19 +3,15 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-*.so
-*.egg
+.Python
+
+# Packaging / distribution
 *.egg-info/
+.eggs/
 dist/
 build/
-.eggs/
-*.egg-link
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
+*.egg
+MANIFEST
 
 # Testing
 .pytest_cache/
@@ -23,17 +19,32 @@ ENV/
 htmlcov/
 .tox/
 
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
+# Local test scratch dirs
+TEST/
 
-# BundleSpy outputs
-*.html
-*.json
-bundlespy_output/
+# Logs
+*.log
+*.log.*
+
+# Secrets / env
+.env
+.env.*
+*.pem
+*.key
