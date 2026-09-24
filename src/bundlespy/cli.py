@@ -192,7 +192,14 @@ def _write_reports(
     return paths
 
 
-def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
+def _analyze(
+    js_files: list,
+    scanner: SecretScanner,
+    *,
+    fetcher=None,
+    scope=None,
+    inline_analyzed_hashes: set = None,
+) -> tuple:
     """
     Analyze JS files for secrets, endpoints, and infrastructure.
 
@@ -202,12 +209,29 @@ def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
 
     Static↔runtime endpoint correlation: same canonical URL seen in
     both static JS and runtime interception → one entity, higher confidence.
+
+    Args:
+        js_files: List of JSFile objects to analyze.
+        scanner: SecretScanner instance.
+        fetcher: Optional callable(url) -> JSFile | None for fetching
+                 worker/chunk URLs discovered during analysis.
+        scope: Optional ScopeChecker instance. URLs that fail scope check
+               are not fetched even when fetcher is provided.
+        inline_analyzed_hashes: Set of sha256 hashes already processed by
+                                 the headless inline engine. Files whose
+                                 content hash is in this set are skipped
+                                 in the final static-analysis pass to avoid
+                                 double-counting.
     """
     findings:   list = []
     endpoints:  list = []
     infra:      list = []
     seen_finds: set  = set()
     seen_eps:   set  = set()
+    # Track which worker/chunk URLs have already been fetched to avoid loops
+    fetched_urls: set = set()
+
+    _inline_skip: set = inline_analyzed_hashes or set()
 
     # Content-hash dedup: sha256 -> list of JSFile sharing that content
     from collections import defaultdict
@@ -271,12 +295,48 @@ def _analyze(js_files: list, scanner: SecretScanner) -> tuple:
         infra.extend(extract_infrastructure(content, primary_js.url))
 
     for sha, group in content_groups.items():
+        # Skip hashes the headless engine already handled inline
+        if sha in _inline_skip:
+            continue
         primary = group[0]
         all_urls = [js.url for js in group]
         _process(primary, all_urls)
 
     for js in no_hash:
         _process(js, [js.url])
+
+    # Worker / dynamic-import chunk fetching.
+    # After the initial pass, check if any discovered endpoints look like
+    # JS worker files or chunk URLs that should be fetched and analyzed too.
+    if fetcher is not None:
+        worker_queue: list = [
+            ep for ep in endpoints
+            if ep.url and (
+                ep.url.endswith(".js")
+                or getattr(ep, "kind", None) in ("worker", "chunk", "dynamic_import")
+            )
+        ]
+        for ep in worker_queue:
+            url = ep.url
+            # Resolve relative URLs — not possible without a base, skip
+            if not url.startswith("http"):
+                continue
+            if url in fetched_urls:
+                continue
+            if scope is not None and not scope.allowed(url):
+                continue
+            fetched_urls.add(url)
+            try:
+                chunk_js = fetcher(url)
+            except Exception:
+                continue
+            if chunk_js is None:
+                continue
+            # Skip if content already analyzed (inline or main pass)
+            chunk_hash = getattr(chunk_js, "sha256", None)
+            if chunk_hash and (chunk_hash in _inline_skip or chunk_hash in content_groups):
+                continue
+            _process(chunk_js, [url])
 
     return findings, endpoints, infra, []
 
