@@ -19,6 +19,7 @@ from .crawler.crawler import Crawler
 from .analysis.secrets import SecretScanner
 from .analysis.endpoints import extract_endpoints
 from .analysis.ast_endpoints import extract_all_endpoints
+from .analysis.route_extractor import extract_routes
 from .analysis.endpoint_intel import extract_endpoint_intelligence
 from .analysis.infrastructure import extract_infrastructure
 from .analysis.jwt import find_jwts
@@ -54,7 +55,7 @@ examples:
 
     sub = parser.add_subparsers(dest="command")
 
-    # -- scan -------------------------------------------------------------
+    # ── scan ──────────────────────────────────────────────────────────────────
     scan = sub.add_parser("scan", help="Scan a target URL")
     scan.add_argument("target")
 
@@ -85,7 +86,6 @@ examples:
     scan.add_argument("--no-cache",    action="store_true", help="Disable cache reads (re-fetch everything; still writes to cache)")
     scan.add_argument("--clear-cache", action="store_true", help="Wipe the local HTTP cache before scanning")
     scan.add_argument("--cache-dir",   default="", metavar="PATH", help="Override the cache directory (default: ~/.cache/bundlespy/http)")
-
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
                       help="Extra header to include in all requests (can use multiple times)")
@@ -104,7 +104,7 @@ examples:
     scan.add_argument("--show-fp",        action="store_true", help="Show likely false positives in output")
     scan.add_argument("--silent",         action="store_true", help="Findings only - no progress, no headers")
 
-    # -- local ------------------------------------------------------------
+    # ── local ─────────────────────────────────────────────────────────────────
     local = sub.add_parser("local", help="Scan local JS files")
     local.add_argument("path")
     local.add_argument("--format",   default="terminal")
@@ -112,7 +112,7 @@ examples:
     local.add_argument("-v", "--verbose", action="store_true")
     local.add_argument("--no-color", action="store_true")
 
-    # -- demo -------------------------------------------------------------
+    # ── demo ──────────────────────────────────────────────────────────────────
     sub.add_parser("demo", help="Run offline demo")
 
     return parser
@@ -286,6 +286,13 @@ def _analyze(
         for ep in extract_endpoints(content, primary_js.url):
             _add_ep(ep, "static")
 
+        # Frontend route extraction - React Router, Vue Router, Angular, Next.js,
+        # SvelteKit, Nuxt, Tanstack Router, Backbone, generic navigation APIs.
+        # Runs separately so route paths (category=ROUTE) are always included
+        # even when not wrapped in a fetch/axios call.
+        for ep in extract_routes(content, primary_js.url):
+            _add_ep(ep, "static")
+
         # GraphQL operations - extracted from every JS file, deduplicated by op_type:name
         for op in extract_graphql_operations(content, primary_js.url):
             key = f"{op.op_type}:{op.name}"
@@ -436,7 +443,7 @@ def run_scan(args) -> int:
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
 
-    # -- HTTP cache -------------------------------------------------------
+    # ── HTTP cache ────────────────────────────────────────────────────────────
     from .crawler.cache import FetchCache
     from pathlib import Path as _Path
     _cache_path = _Path(args.cache_dir) if getattr(args, "cache_dir", "") else None
@@ -473,7 +480,7 @@ def run_scan(args) -> int:
     all_js: list = []
     errors: list = []
 
-    # -- Active crawl -----------------------------------------------------
+    # ── Active crawl ──────────────────────────────────────────────────────────
     # Skip crawler when headless + credentials are supplied.
     # The unauthenticated crawler would only hit the login page and waste time.
     # Headless handles full discovery with the authenticated session instead.
@@ -554,7 +561,7 @@ def run_scan(args) -> int:
             phase_done("Crawl complete",
                 f"{crawler.pages_crawled} pages  {len(crawler.js_files)} JS files")
 
-    # -- Passive intelligence collection ----------------------------------
+    # ── Passive intelligence collection ──────────────────────────────────────
     # Runs on every scan (active, headless, or passive mode).
     # Collects robots.txt, sitemaps, well-known paths, response headers, CSP,
     # OpenAPI schemas, and meta-tag intelligence - all without exploitation.
@@ -586,7 +593,7 @@ def run_scan(args) -> int:
         import logging as _ilog
         _ilog.getLogger("bundlespy.cli").warning("Intelligence collection failed: %s", _ie)
 
-    # -- Passive ----------------------------------------------------------
+    # ── Passive ───────────────────────────────────────────────────────────────
     if args.passive:
         if not args.quiet:
             phase("Collecting from web archives")
@@ -615,7 +622,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Passive collection", f"{len(passive_urls)} archive URLs  {new_js} JS assets")
 
-    # -- Headless ---------------------------------------------------------
+    # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
         if not args.quiet:
             phase("Launching advanced headless browser")
@@ -623,6 +630,7 @@ def run_scan(args) -> int:
         # Extract routes from already-collected JS files
         # so headless visits every Angular/React/Vue route
         from .analysis.ast_endpoints import extract_all_endpoints as _extract_eps
+        from .analysis.route_extractor import extract_routes as _extract_routes
         from urllib.parse import urlparse as _urlparse
         _parsed = _urlparse(target)
         _base   = f"{_parsed.scheme}://{_parsed.netloc}"
@@ -630,10 +638,13 @@ def run_scan(args) -> int:
         for _js in all_js:
             if not _js.content:
                 continue
-            for _ep in _extract_eps(_js.content, _js.url):
-                # Only relative paths - these are frontend routes
+            # Pull page-navigation routes from the dedicated route extractor
+            for _ep in _extract_routes(_js.content, _js.url):
                 if _ep.url.startswith("/") and not _ep.url.startswith("//"):
-                    # Skip API paths - we want page routes not API endpoints
+                    _static_routes.add(_base + _ep.url.split("?")[0])
+            # Also pull from endpoint extractor but filter to non-API paths only
+            for _ep in _extract_eps(_js.content, _js.url):
+                if _ep.url.startswith("/") and not _ep.url.startswith("//"):
                     if not any(k in _ep.url.lower() for k in [
                         "/api/", "/rest/", "/graphql", "/v1/", "/v2/",
                         "/upload", "/download", "/socket",
@@ -717,7 +728,7 @@ def run_scan(args) -> int:
                 f"{headless_stats.get('routes',0)} routes"
             )
 
-    # -- Source maps ------------------------------------------------------
+    # ── Source maps ───────────────────────────────────────────────────────────
     sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
     if args.source_maps:
         if not args.quiet:
@@ -745,7 +756,7 @@ def run_scan(args) -> int:
             phase_done("Source map analysis",
                 f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
 
-    # -- Webpack chunks ---------------------------------------------------
+    # ── Webpack chunks ────────────────────────────────────────────────────────
     chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0}
     if args.chunks:
         if not args.quiet:
@@ -766,7 +777,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Chunk discovery", f"{len(chunk_files)} chunks")
 
-    # -- Analysis ---------------------------------------------------------
+    # ── Analysis ──────────────────────────────────────────────────────────────
     if not args.quiet:
         phase("Analyzing JavaScript")
     import time as _time
@@ -786,7 +797,7 @@ def run_scan(args) -> int:
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
     _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
 
-    # Store extracted GraphQL operations for the report.
+    # Store extracted GraphQL operations for the report (Gap 8).
     # These are statically extracted operation names (query/mutation/subscription)
     # from JS source - distinct from GraphQL introspection schemas.
     extras["graphql_operations"] = _graphql_ops
@@ -1058,12 +1069,12 @@ def run_scan(args) -> int:
             deduped.append(ep)
     all_endpoints = deduped
 
-    # -- Attack surface analysis ------------------------------------------
+    # ── Attack surface analysis ────────────────────────────────────────────────
     from .analysis.attack_surface import analyze_attack_surface
     attack_surface = analyze_attack_surface(all_endpoints)
     extras["attack_surface"] = attack_surface
 
-    # -- Vulnerable library detection -------------------------------------
+    # ── Vulnerable library detection ───────────────────────────────────────────
     if not args.quiet and not getattr(args, "silent", False):
         phase("Scanning for vulnerable libraries")
     from .analysis.library_scanner import scan_for_vulnerable_libraries
@@ -1098,7 +1109,7 @@ def run_scan(args) -> int:
         chunk_stats["findings"]  = len([f for f in all_findings if any(c.technology == "webpack-chunk" for c in all_js if c.url == f.file_url)])
         chunk_stats["endpoints"] = len([e for e in all_endpoints if any(c.technology == "webpack-chunk" for c in all_js if c.url == e.source_file)])
 
-    # -- Subdomain harvesting ---------------------------------------------
+    # ── Subdomain harvesting ──────────────────────────────────────────────────
     subdomains = []
     if args.harvest_subs:
         if not args.quiet:
@@ -1113,7 +1124,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Subdomain harvest", f"{len(subdomains)} subdomains")
 
-    # -- Endpoint validation ----------------------------------------------
+    # ── Endpoint validation ───────────────────────────────────────────────────
     validation_results = []
     if args.validate and all_endpoints:
         if not args.quiet:
@@ -1127,7 +1138,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Endpoint validation", f"{interesting} interesting")
 
-    # -- GraphQL ----------------------------------------------------------
+    # ── GraphQL ───────────────────────────────────────────────────────────────
     graphql_schemas = []
     if args.graphql and all_endpoints:
         if not args.quiet:
@@ -1143,7 +1154,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("GraphQL", f"{len(gql_urls)} endpoints  {total_ops} operations")
 
-    # -- Secret validation ------------------------------------------------
+    # ── Secret validation ─────────────────────────────────────────────────────
     if args.validate_secrets and all_findings:
         if not args.quiet:
             phase("Validating secrets")
@@ -1160,7 +1171,7 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("Secret validation", f"{validated} confirmed active")
 
-    # -- Build result -----------------------------------------------------
+    # ── Build result ──────────────────────────────────────────────────────────
     finished = datetime.utcnow()
     result = ScanResult(
         target_url     = target,
@@ -1174,7 +1185,7 @@ def run_scan(args) -> int:
         errors         = errors,
     )
 
-    # -- Attack surface graph ---------------------------------------------
+    # ── Attack surface graph ───────────────────────────────────────────────────
     # Build the relationship graph from the completed scan result.
     # This is O(n) and adds no network I/O - pure in-memory assembly.
     try:
@@ -1185,7 +1196,7 @@ def run_scan(args) -> int:
         import logging as _gl
         _gl.getLogger("bundlespy.cli").warning("Graph build failed: %s", _ge)
 
-    # -- Coverage metrics -------------------------------------------------
+    # ── Coverage metrics ──────────────────────────────────────────────────────
     from .analysis.coverage import compute_coverage
     coverage = compute_coverage(
         js_files            = all_js,
@@ -1206,7 +1217,7 @@ def run_scan(args) -> int:
     )
     extras["coverage"] = coverage
 
-    # -- Cache stats ------------------------------------------------------
+    # ── Cache stats ───────────────────────────────────────────────────────────
     _cache_summary = _fetch_cache.summary()
     extras["cache_stats"] = _cache_summary
     if not args.quiet and (_cache_summary["hits"] > 0 or _cache_summary["revalidated"] > 0):
@@ -1219,7 +1230,7 @@ def run_scan(args) -> int:
             f"{_saved_mb:.1f} MB saved",
         )
 
-    # -- Reports ----------------------------------------------------------
+    # ── Reports ───────────────────────────────────────────────────────────────
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
     if file_formats:
