@@ -82,7 +82,10 @@ examples:
     scan.add_argument("--harvest-subs",   action="store_true")
     scan.add_argument("--validate-secrets", action="store_true")
     scan.add_argument("--stealth",        action="store_true")
-    scan.add_argument("--interact",       action="store_true", help="Enable full page interaction in headless mode (slower but finds more lazy JS)")
+    scan.add_argument("--interact",    dest="interact", action="store_true",  default=True,
+                      help="Interact with page elements to trigger lazy-loaded JS (default: ON)")
+    scan.add_argument("--no-interact", dest="interact", action="store_false",
+                      help="Disable page interaction (use for prod-sensitive targets or speed)")
     scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
@@ -589,7 +592,7 @@ def run_scan(args) -> int:
             max_pages     = args.max_pages,
             external_seen = crawler_seen,
             seed_urls     = all_seed_urls,
-            interact      = getattr(args, "interact", False),
+            interact      = getattr(args, "interact", True),
             workers       = getattr(args, "workers", 3),
             cookies       = _playwright_cookies,
             extra_headers = extra_headers,
