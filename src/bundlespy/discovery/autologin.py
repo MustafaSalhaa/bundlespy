@@ -128,6 +128,38 @@ def _find_login_form(page):
     return best_form, best_fields
 
 
+def _find_formless_login(page):
+    """
+    Fallback for pages with no <form> tag — find a bare password input + submit button.
+    Returns field_map dict (same shape as _find_login_form's second return value).
+    """
+    try:
+        pw = page.query_selector("input[type='password']")
+        if not pw:
+            return {}
+        # Find a nearby button or input[type=submit/button]
+        submit = (
+            page.query_selector("button[onclick]") or
+            page.query_selector("button[type='submit']") or
+            page.query_selector("button:not([type])") or
+            page.query_selector("input[type='submit']") or
+            page.query_selector("input[type='button']")
+        )
+        # Username: optional bare text/email input
+        username = (
+            page.query_selector("input[type='email']") or
+            page.query_selector("input[type='text']")
+        )
+        return {
+            "username": username,
+            "password": pw,
+            "submit":   submit,
+            "csrf":     None,
+        }
+    except Exception:
+        return {}
+
+
 def _capture_session(page, domain: str) -> dict:
     """
     Capture all session material after login:
@@ -316,11 +348,17 @@ def auto_login(
             except Exception:
                 pass
 
-        if not form or not fields.get("password"):
-            result["method"] = "no_form_found"
-            result["error"]  = "No login form with a password field found on page"
-            step("No login form found")
-            return result
+        if not fields.get("password"):
+            # Formless fallback — bare password input with no <form> wrapper
+            fields = _find_formless_login(page)
+            if fields.get("password"):
+                step("No <form> found — using formless input detection")
+                result["method"] = "formless"
+            else:
+                result["method"] = "no_form_found"
+                result["error"]  = "No login form with a password field found on page"
+                step("No login form found")
+                return result
 
         # Get field names for reporting
         u_field = fields.get("username")
@@ -381,7 +419,8 @@ def auto_login(
                 result["error"] = f"Enter key failed: {e}"
                 return result
 
-        result["method"] = "form_submit"
+        if result["method"] != "formless":
+            result["method"] = "form_submit"
 
         # Step 6: Wait for navigation / response
         try:
