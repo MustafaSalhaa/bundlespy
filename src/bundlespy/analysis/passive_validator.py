@@ -22,7 +22,7 @@ Design constraints:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import requests
 import urllib3
@@ -102,7 +102,7 @@ def _probe_source_url(
     url:      str,
     stealth:  bool  = False,
     timeout:  int   = PROBE_TIMEOUT,
-) -> tuple[int, bytes, str]:
+) -> Tuple[int, bytes, str]:
     """
     Fetch up to MAX_RESPONSE_BYTES from *url* using GET.
     Returns (http_status, body_bytes, error_string).
