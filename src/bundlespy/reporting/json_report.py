@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from ..storage.models import ScanResult
+from ..storage.models import ScanResult, Provenance
 from ..storage.graph import AttackSurfaceGraph
 
 
@@ -41,7 +41,23 @@ def _build_graph_dict(result: ScanResult) -> dict:
         }
 
 
-def generate(result: ScanResult, show_sensitive: bool = False) -> str:
+def _get_provenance(obj, factory) -> dict:
+    """
+    Return the provenance dict for a finding or endpoint.
+    Builds a baseline on-the-fly if .provenance was not set by the scanner.
+    """
+    prov = getattr(obj, "provenance", None)
+    if prov is None:
+        prov = factory(obj)
+    return prov.to_dict()
+
+
+def generate(
+    result:             ScanResult,
+    show_sensitive:     bool = False,
+    coverage_ledger=None,        # CoverageLedger | None
+    passive_report=None,         # PassiveValidationReport | None
+) -> str:
     """Generate a JSON report from scan results."""
     data = {
         "scan": {
@@ -75,6 +91,8 @@ def generate(result: ScanResult, show_sensitive: bool = False) -> str:
                 "description":  f.description,
                 "remediation":  f.remediation,
                 "occurrences":  f.occurrences,
+                # Stage 5: provenance block
+                "provenance":   _get_provenance(f, Provenance.from_finding),
             }
             for f in result.findings
         ],
@@ -85,6 +103,8 @@ def generate(result: ScanResult, show_sensitive: bool = False) -> str:
                 "method":    e.method,
                 "source":    e.source_file,
                 "line":      e.line_number,
+                # Stage 5: provenance block
+                "provenance": _get_provenance(e, Provenance.from_endpoint),
             }
             for e in result.endpoints
         ],
@@ -116,4 +136,18 @@ def generate(result: ScanResult, show_sensitive: bool = False) -> str:
         ),
         "attack_surface_graph": _build_graph_dict(result),
     }
+
+    # Stage 5: coverage ledger and passive validation report
+    if coverage_ledger is not None:
+        try:
+            data["coverage_ledger"] = coverage_ledger.to_dict()
+        except Exception:
+            pass
+
+    if passive_report is not None:
+        try:
+            data["passive_validation"] = passive_report.to_dict()
+        except Exception:
+            pass
+
     return json.dumps(data, indent=2, cls=DateTimeEncoder)
