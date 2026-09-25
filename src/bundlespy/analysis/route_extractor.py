@@ -525,7 +525,11 @@ def _run_patterns(content: str, file_url: str, _add) -> None:
         body      = m.group(1)
         line_base = _get_line(content, m.start())
         for inner in RE_BACKBONE_ROUTE_ENTRY.finditer(body):
-            _add(inner.group(1), CONF_HIGH, line_base,
+            path = inner.group(1)
+            # Backbone routes often omit the leading slash — normalise
+            if path and not path.startswith('/'):
+                path = '/' + path
+            _add(path, CONF_HIGH, line_base,
                  _evidence(content, m.start()))
 
     # history.pushState
