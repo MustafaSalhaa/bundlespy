@@ -90,6 +90,13 @@ examples:
     scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
     scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
                       help="Extra header to include in all requests (can use multiple times)")
+    scan.add_argument("--login", default="", metavar="SPEC",
+                      help=(
+                          "Auto-login before scanning. Formats:\n"
+                          "  url=https://site.com/login,user=admin,pass=secret\n"
+                          "  https://site.com/login,user=admin,pass=secret\n"
+                          "  user=admin,pass=secret  (uses target URL as login page)"
+                      ))
 
     # Output
     scan.add_argument("--format", default="terminal")
@@ -432,11 +439,17 @@ def run_scan(args) -> int:
     started = datetime.utcnow()
     extras  = {}
 
+    # Determine if login will run (before header print so mode label is accurate)
+    _login_spec = getattr(args, "login", "").strip()
+    _login_result = None   # populated below after Playwright is available
+
     if not args.quiet:
         mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
         if args.stealth:
             mode += " + Stealth"
-        if args.cookie or args.header:
+        if _login_spec:
+            mode += " + Auto-Login"
+        elif args.cookie or args.header:
             mode += " + Credentials supplied"
         scope_label = "Subdomains included" if args.subdomains else "Strict"
         print_header(target, mode=mode, scope=scope_label, version=PROJECT_VERSION, author=AUTHOR_NAME)
@@ -542,6 +555,105 @@ def run_scan(args) -> int:
         }
         if not args.quiet:
             phase_done("Passive collection", f"{len(passive_urls)} archive URLs  {new_js} JS assets")
+
+    # ── Auto-Login ────────────────────────────────────────────────────────────
+    if _login_spec:
+        from .discovery.autologin import parse_login_arg, auto_login as _auto_login
+        _login_cfg = parse_login_arg(_login_spec)
+        if not _login_cfg["valid"]:
+            phase_error(f"--login parse error: {_login_cfg['error']}")
+        else:
+            # Resolve login URL: if not provided, use target as login page
+            _login_url = _login_cfg["url"] or target
+
+            if not args.quiet:
+                phase(f"Auto-login → {_login_url}")
+
+            try:
+                from playwright.sync_api import sync_playwright as _sync_pw
+                with _sync_pw() as _pw:
+                    _browser = _pw.chromium.launch(headless=True)
+                    _ctx     = _browser.new_context(
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/122.0.0.0 Safari/537.36"
+                        ),
+                        extra_http_headers=extra_headers if not args.cookie else {},
+                    )
+                    # Inject any pre-existing cookies before login
+                    if args.cookie:
+                        from .discovery.headless import _parse_cookie_string as _pcs
+                        from urllib.parse import urlparse as _up_login
+                        _pre_domain = _up_login(_login_url).netloc.split(":")[0]
+                        _pre_cks = _pcs(args.cookie, _pre_domain)
+                        if _pre_cks:
+                            _ctx.add_cookies(_pre_cks)
+                    _page = _ctx.new_page()
+                    _login_result = _auto_login(
+                        _page,
+                        login_url = _login_url,
+                        username  = _login_cfg["username"],
+                        password  = _login_cfg["password"],
+                        timeout   = args.timeout,
+                    )
+                    _browser.close()
+
+                # Merge captured cookies into args.cookie so all downstream
+                # components (crawler, headless engine) use the session
+                if _login_result.get("success") and _login_result.get("cookie_string"):
+                    # Merge: autologin cookies override / extend existing --cookie
+                    _existing = args.cookie.strip()
+                    _new_ck   = _login_result["cookie_string"]
+                    if _existing:
+                        # Merge by name: new values win
+                        _merged = {}
+                        for _pair in _existing.split(";"):
+                            _pair = _pair.strip()
+                            if "=" in _pair:
+                                _k, _, _v = _pair.partition("=")
+                                _merged[_k.strip()] = _v.strip()
+                        for _pair in _new_ck.split(";"):
+                            _pair = _pair.strip()
+                            if "=" in _pair:
+                                _k, _, _v = _pair.partition("=")
+                                _merged[_k.strip()] = _v.strip()
+                        args.cookie = "; ".join(f"{k}={v}" for k, v in _merged.items())
+                    else:
+                        args.cookie = _new_ck
+                    # Also update extra_headers so the static fetcher uses the session
+                    extra_headers["Cookie"] = args.cookie
+                    fetcher = Fetcher(
+                        timeout=args.timeout,
+                        requests_per_second=args.rate,
+                        stealth=args.stealth,
+                        extra_headers=extra_headers,
+                    )
+                    if not args.quiet:
+                        phase_done(
+                            "Auto-login successful",
+                            f"{len(_login_result.get('cookies', []))} cookies captured  "
+                            f"→ {_login_result.get('final_url', '')}"
+                        )
+                else:
+                    _err = _login_result.get("error_message") or _login_result.get("error") or "unknown"
+                    if not args.quiet:
+                        phase_warn(f"Auto-login failed: {_err}")
+
+                extras["login_result"] = _login_result
+
+            except Exception as _le:
+                _err_msg = str(_le)
+                if not args.quiet:
+                    phase_warn(f"Auto-login exception: {_err_msg}")
+                extras["login_result"] = {
+                    "success": False, "method": "exception",
+                    "login_url": _login_url, "final_url": _login_url,
+                    "error": _err_msg, "steps": [], "cookie_string": "",
+                    "cookies": [], "local_storage": {}, "session_storage": {},
+                    "token_keys": [], "username_field": "", "password_field": "",
+                    "error_message": _err_msg,
+                }
 
     # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
