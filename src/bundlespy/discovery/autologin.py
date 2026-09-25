@@ -473,9 +473,6 @@ def parse_login_arg(login_str: str) -> dict:
     result["username"] = parts.get("user", parts.get("username", parts.get("email", "")))
     result["password"] = parts.get("pass", parts.get("password", ""))
 
-    if not result["username"]:
-        result["error"] = "Missing user= in --login"
-        return result
     if not result["password"]:
         result["error"] = "Missing pass= in --login"
         return result
