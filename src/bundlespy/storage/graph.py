@@ -79,6 +79,56 @@ class EdgeType(str, Enum):
     RECOVERS    = "RECOVERS"    # JS        → SOURCEMAP
 
 
+# ── Trace / attack-path types ─────────────────────────────────────────────────
+
+@dataclass
+class TraceStep:
+    """
+    One hop in an attack-path trace through the graph.
+
+    A trace is an ordered sequence of TraceSteps that describes how an
+    attacker can move from an entry point (e.g. a public page) to a high-value
+    target (e.g. an exposed secret or a privileged API endpoint).
+
+    Attributes
+    ----------
+    node_id : str
+        ID of the node at this step (matches a Node.id in the same graph).
+    node_kind : NodeType
+        Kind of the node at this step (convenience copy to avoid extra lookups).
+    label : str
+        Human-readable label for the node (file name, URL path, rule name, …).
+    edge_kind : EdgeType | None
+        The edge type used to arrive at this step.  None for the first step.
+    depth : int
+        Zero-based depth in the trace (0 = entry point).
+    confidence : float
+        Propagated confidence for this particular path (product of all edge
+        confidences from the root to this step).
+    data : dict
+        Arbitrary per-step metadata (e.g. severity, category) copied from the
+        underlying node for convenient access without a graph lookup.
+    """
+    node_id:    str
+    node_kind:  NodeType
+    label:      str
+    edge_kind:  Optional[EdgeType]  = None
+    depth:      int                  = 0
+    confidence: float                = 1.0
+    data:       Dict[str, Any]       = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id":    self.node_id,
+            "node_kind":  self.node_kind.value,
+            "label":      self.label,
+            "edge_kind":  self.edge_kind.value if self.edge_kind else None,
+            "depth":      self.depth,
+            "confidence": round(self.confidence, 3),
+            "data":       self.data,
+        }
+
+
 # ── Core node ─────────────────────────────────────────────────────────────────
 
 @dataclass
