@@ -158,17 +158,14 @@ def _extract_js_from_manifest(content: str, base_url: str) -> List[str]:
     return list(set(urls))
 
 
-def _parse_robots_txt(content: str, base_url: str) -> tuple:
+def _parse_robots_txt(content: str, base_url: str) -> List[str]:
     """
-    Parse robots.txt and extract JS-related paths and explicit sitemap URLs.
-    Returns (js_paths, sitemap_urls).
+    Parse robots.txt and extract JS-related paths.
     Some sites list their JS directories in Disallow rules.
-    Sitemap: directives point directly to XML sitemaps that list every page.
     """
-    parsed      = urlparse(base_url)
-    base        = f"{parsed.scheme}://{parsed.netloc}"
-    js_paths    = []
-    sitemap_urls = []
+    parsed   = urlparse(base_url)
+    base     = f"{parsed.scheme}://{parsed.netloc}"
+    js_paths = []
 
     for line in content.splitlines():
         line = line.strip()
@@ -186,16 +183,9 @@ def _parse_robots_txt(content: str, base_url: str) -> tuple:
                 elif _is_js_url(path):
                     js_paths.append(base + path)
         elif line.lower().startswith("sitemap:"):
-            # Extract the absolute sitemap URL declared in robots.txt.
-            # These are the most authoritative sitemap pointers: if the site
-            # has a non-standard sitemap path, robots.txt says so explicitly.
-            sm_url = line.split(":", 1)[1].strip()
-            if sm_url.startswith("http"):
-                sitemap_urls.append(sm_url)
-            elif sm_url.startswith("/"):
-                sitemap_urls.append(base + sm_url)
+            pass  # Could parse sitemap for JS too but out of scope
 
-    return js_paths, sitemap_urls
+    return js_paths
 
 
 def _extract_js_from_link_headers(headers: dict, base_url: str) -> List[str]:
@@ -320,12 +310,6 @@ class Crawler:
         self.html_findings:   List = []  # Findings from HTML attribute scanning
         self.errors:          List[str] = []
         self.pages_crawled:   int = 0
-        # Response headers observed during crawl — infrastructure intelligence.
-        # Each entry: {"url": page_url, "server": "...", "x_powered_by": "...",
-        #              "via": "...", "x_generator": "...", "csp": "..."}.
-        # cli.py uses this to surface technology stack information without storing
-        # raw headers (which can be very large) on every response.
-        self.observed_headers: List[dict] = []
 
     def crawl(self) -> None:
         """Full crawl pipeline."""
@@ -352,11 +336,8 @@ class Crawler:
         queue.append((self.target_url, 0))
         self.visited_pages.add(self.target_url)
 
-        # Feed sitemap URLs into queue so every page gets crawled.
-        # Pass explicit sitemap URLs from robots.txt when present — they are more
-        # authoritative than guessing /sitemap.xml.
-        _robots_sitemaps = getattr(self, "_robots_sitemaps", [])
-        self._feed_sitemap_to_queue(base, queue, explicit_urls=_robots_sitemaps or None)
+        # Feed sitemap URLs into queue so every page gets crawled
+        self._feed_sitemap_to_queue(base, queue)
 
         # Probe common page paths and queue the ones that exist
         for probe_url in getattr(self, "_common_pages_to_probe", []):
@@ -382,9 +363,7 @@ class Crawler:
         """Crawl a single HTML page and extract everything from it."""
         logger.debug("Crawling: %s (depth %d)", url, depth)
 
-        content, status, content_type, _, resp_headers = self.fetcher.get(
-            url, return_headers=True
-        )
+        content, status, content_type, _ = self.fetcher.get(url)
 
         if not content or status not in range(200, 300):
             return
@@ -420,36 +399,6 @@ class Crawler:
             if len(self.js_files) >= self.max_js_files:
                 break
             self._fetch_js(js_url, url)
-
-        # Extract JS from HTTP Link: preload headers (e.g. Link: </app.js>; rel=preload; as=script)
-        # These are set by CDNs and servers for HTTP/2 push or browser preloading —
-        # the JS files referenced here are often not in the HTML at all.
-        if resp_headers:
-            for preload_url in _extract_js_from_link_headers(resp_headers, url):
-                if self.scope.in_scope(preload_url) and len(self.js_files) < self.max_js_files:
-                    self._fetch_js(preload_url, url)
-
-            # Collect technology-stack intelligence from response headers.
-            # Server: nginx, X-Powered-By: PHP, Via: varnish, CSP policy, etc.
-            # These reveal the underlying stack without touching any API.
-            _interesting = {}
-            for _hdr, _key in [
-                ("server",           "server"),
-                ("x-powered-by",     "x_powered_by"),
-                ("via",              "via"),
-                ("x-generator",      "x_generator"),
-                ("x-aspnet-version", "x_aspnet_version"),
-                ("x-aspnetmvc-version", "x_aspnetmvc_version"),
-                ("x-drupal-cache",   "x_drupal_cache"),
-                ("x-wp-total",       "x_wp_total"),
-                ("content-security-policy", "csp"),
-            ]:
-                _val = resp_headers.get(_hdr, "")
-                if _val:
-                    _interesting[_key] = _val
-            if _interesting:
-                _interesting["url"] = url
-                self.observed_headers.append(_interesting)
 
         # Extract and dedup inline scripts by content hash
         for script in extract_inline_scripts(content):
@@ -505,12 +454,8 @@ class Crawler:
         if sw_m:
             sw_path = sw_m.group(1) or sw_m.group(2)
             sw_url  = urljoin(base_url, sw_path)
-            sw_content, sw_status, sw_ct, sw_sha = self.fetcher.get(sw_url)
+            sw_content, sw_status, _, _ = self.fetcher.get(sw_url)
             if sw_content and sw_status == 200:
-                # Analyze the service worker file itself — it may contain secrets,
-                # API endpoints, and push-subscription URLs that never appear in
-                # the app bundles. Add it to js_files so _analyze() processes it.
-                self._fetch_js(sw_url, base_url)
                 for u in _extract_js_from_service_worker(sw_content, sw_url):
                     if self.scope.in_scope(u):
                         urls.add(u)
@@ -526,53 +471,35 @@ class Crawler:
 
         return result
 
-    def _feed_sitemap_to_queue(self, base: str, queue: deque,
-                               explicit_urls: list = None) -> None:
+    def _feed_sitemap_to_queue(self, base: str, queue: deque) -> None:
         """
         Parse sitemap.xml and add all discovered HTML pages to the crawl queue.
         This ensures every page in the sitemap gets crawled for JS files.
-
-        explicit_urls: list of absolute sitemap URLs declared in robots.txt.
-        These are tried first because they are authoritative; the standard
-        default paths are tried only if no explicit URL worked.
         """
+        sitemap_paths = [
+            "/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml",
+            "/wp-sitemap.xml", "/sitemaps/sitemap.xml",
+        ]
         import xml.etree.ElementTree as ET2
-
-        # Prefer explicit sitemap URLs from robots.txt over guessing paths
-        candidate_urls = list(explicit_urls or [])
-        if not candidate_urls:
-            sitemap_paths = [
-                "/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml",
-                "/wp-sitemap.xml", "/sitemaps/sitemap.xml",
-            ]
-            candidate_urls = [base + p for p in sitemap_paths]
-
-        def _parse_sitemap_url(url: str) -> bool:
-            """Fetch and parse one sitemap URL. Returns True if pages were added."""
+        for path in sitemap_paths:
+            url = base + path
             content, status, _, _ = self.fetcher.get(url)
             if not content or status != 200:
-                return False
+                continue
             try:
                 root = ET2.fromstring(content)
                 ns   = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-                added = 0
                 for loc in root.findall(".//sm:url/sm:loc", ns):
                     if loc.text:
                         page_url = loc.text.strip()
                         if page_url not in self.visited_pages and self.scope.in_scope(page_url):
                             self.visited_pages.add(page_url)
                             queue.append((page_url, 1))
-                            added += 1
-                if added:
-                    logger.info("Sitemap %s: added %d URLs to crawl queue", url, added)
-                    return True
+                if queue:
+                    logger.info("Sitemap: added %d URLs to crawl queue", len(queue))
+                    return
             except Exception:
                 pass
-            return False
-
-        for url in candidate_urls:
-            if _parse_sitemap_url(url):
-                return  # One successful sitemap is enough
 
     def _discover_from_manifests(self, base: str) -> None:
         """
@@ -601,26 +528,18 @@ class Crawler:
 
     def _discover_from_robots(self, base: str) -> None:
         """
-        Parse robots.txt for JS path hints and explicit Sitemap: directives.
+        Parse robots.txt for JS path hints.
         Passive - just reads what's already publicly listed.
-        Sitemap URLs from robots.txt are stored on self._robots_sitemaps so the
-        crawl phase can feed them to the queue before starting page traversal.
         """
         robots_url = base + "/robots.txt"
         content, status, _, _ = self.fetcher.get(robots_url)
         if not content or status != 200:
             return
 
-        js_paths, sitemap_urls = _parse_robots_txt(content, base)
+        js_paths = _parse_robots_txt(content, base)
         for path in js_paths:
             if self.scope.in_scope(path):
                 self._fetch_js(path, robots_url)
-
-        # Store for consumption in crawl() once the queue exists
-        if sitemap_urls:
-            self._robots_sitemaps = getattr(self, "_robots_sitemaps", [])
-            self._robots_sitemaps.extend(sitemap_urls)
-            logger.debug("robots.txt declared %d sitemap(s): %s", len(sitemap_urls), sitemap_urls)
 
     def _fetch_js(self, url: str, source_page: str, retry: bool = True) -> None:
         """
