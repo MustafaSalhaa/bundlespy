@@ -744,6 +744,10 @@ class AttackSurfaceGraph:
                     "source_type":  getattr(ep, "source_type", "static"),
                     "auth_context": ep.auth_context or "",
                     "kind":         ep.kind or "api",
+                    # Stage 6: Application State Intelligence
+                    "http_status":  getattr(ep, "http_status",  0),
+                    "access_state": getattr(ep, "access_state", "UNKNOWN"),
+                    "route_state":  getattr(ep, "route_state",  "DISCOVERED"),
                 },
             ))
             ep_ids[ep.url] = nid
