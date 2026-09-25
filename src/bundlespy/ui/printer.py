@@ -70,6 +70,60 @@ def print_header(target, mode="Active", scope="Strict", version="1.0.0", author=
 
 # ── Authentication result ─────────────────────────────────────────────────────
 
+def print_login_result(login: dict) -> None:
+    """
+    Print the auto-login result block.
+    Called when --login was used.
+    """
+    if not login:
+        return
+
+    _section("AUTO-LOGIN", "", A.CYAN)
+    success    = login.get("success", False)
+    method     = login.get("method", "unknown")
+    login_url  = login.get("login_url", "")
+    final_url  = login.get("final_url", "")
+    u_field    = login.get("username_field", "")
+    p_field    = login.get("password_field", "")
+    cookies    = login.get("cookies", [])
+    token_keys = login.get("token_keys", [])
+    ls         = login.get("local_storage", {})
+    ss         = login.get("session_storage", {})
+    error_msg  = login.get("error_message", "") or login.get("error", "")
+    steps      = login.get("steps", [])
+
+    _p(f"  {_label('Login URL')}{login_url}")
+    _p(f"  {_label('Method')}{method.replace('_', ' ').title()}")
+
+    if u_field:
+        _p(f"  {_label('Username field')}{u_field}")
+    if p_field:
+        _p(f"  {_label('Password field')}{p_field}")
+
+    if success:
+        _p(f"  {_label('Result')}{A.GREEN}{A.BOLD}SUCCESS{A.RESET}")
+        _p(f"  {_label('Final URL')}{final_url}")
+        _p(f"  {_label('Cookies')}{len(cookies)} captured")
+        if token_keys:
+            _p(f"  {_label('Tokens found')}{A.YELLOW}{', '.join(token_keys[:8])}{A.RESET}")
+        if ls:
+            _p(f"  {_label('localStorage')}{len(ls)} keys")
+        if ss:
+            _p(f"  {_label('sessionStorage')}{len(ss)} keys")
+    else:
+        _p(f"  {_label('Result')}{A.RED}{A.BOLD}FAILED{A.RESET}")
+        if error_msg:
+            _p(f"  {_label('Reason')}{A.GREY}{error_msg[:120]}{A.RESET}")
+
+    if steps:
+        _p()
+        _p(f"  {A.GREY}Steps:{A.RESET}")
+        for s in steps:
+            _p(f"  {A.GREY}  · {s}{A.RESET}")
+
+    _p()
+
+
 def print_auth_result(auth: dict) -> None:
     """
     Print the authentication verification block.
@@ -779,38 +833,6 @@ def print_graphql(schemas):
     _p()
 
 
-# ── GraphQL operations (statically extracted) ────────────────────────────────
-
-def print_graphql_operations(ops):
-    """Print GraphQL operations discovered statically in JS source."""
-    if not ops:
-        return
-    queries   = [op for op in ops if op.op_type == "query"]
-    mutations = [op for op in ops if op.op_type == "mutation"]
-    subs      = [op for op in ops if op.op_type == "subscription"]
-    _section("GRAPHQL OPERATIONS", str(len(ops)), A.PURPLE)
-    _p(f"  {_label('Source')}Static JS analysis")
-    _p(f"  {_label('Queries')}{len(queries)}")
-    _p(f"  {_label('Mutations')}{len(mutations)}")
-    _p(f"  {_label('Subscriptions')}{len(subs)}")
-    if queries:
-        _p(f"\n  {A.GREY}Queries:{A.RESET}")
-        for op in queries[:15]:
-            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
-            _p(f"  {A.WHITE}  {op.name}{A.RESET}  {A.GREY}line {op.line} in {fname}{A.RESET}")
-    if mutations:
-        _p(f"\n  {A.ORANGE}Mutations:{A.RESET}")
-        for op in mutations[:15]:
-            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
-            _p(f"  {A.ORANGE}  {op.name}{A.RESET}  {A.GREY}line {op.line} in {fname}{A.RESET}")
-    if subs:
-        _p(f"\n  {A.GREY}Subscriptions:{A.RESET}")
-        for op in subs[:10]:
-            fname = op.source_file.split("/")[-1] if "/" in op.source_file else op.source_file
-            _p(f"  {A.GREY}  {op.name}  line {op.line} in {fname}{A.RESET}")
-    _p()
-
-
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
 def print_infrastructure(items):
@@ -1004,10 +1026,6 @@ def print_report(
 
     if graphql_schemas:
         print_graphql(graphql_schemas)
-
-    gql_ops = extras.get("graphql_operations", [])
-    if gql_ops:
-        print_graphql_operations(gql_ops)
 
     print_infrastructure(result.infrastructure)
 
