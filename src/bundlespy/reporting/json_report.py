@@ -16,7 +16,7 @@ class DateTimeEncoder(json.JSONEncoder):
 def _build_graph_dict(result: ScanResult) -> dict:
     """Build the attack_surface_graph dict, always present even when empty."""
     try:
-        graph = AttackSurfaceGraph.from_scan_result(result)
+        graph = result.graph if result.graph is not None else AttackSurfaceGraph.from_scan_result(result)
         graph_dict = graph.to_dict()
         # Rename stats keys to match test expectations
         raw_stats = graph_dict.get("stats", {})
