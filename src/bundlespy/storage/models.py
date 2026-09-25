@@ -4,9 +4,109 @@ All findings, JS files, endpoints, and infrastructure items use these.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 import hashlib
+
+
+# ── Stage 5: Provenance Model ─────────────────────────────────────────────────
+
+@dataclass
+class Provenance:
+    """
+    Explains exactly how and where a finding or endpoint was discovered.
+
+    Every field answers one question a security engineer would ask:
+      - How was this found?     → source
+      - Where exactly?          → discovered_in / line_number
+      - Was it runtime-observed? → observed_at
+      - Cross-corroborated?     → correlation
+      - Confirmed still live?   → validation_status / validation_http_status
+      - Auth-gated?             → auth_required
+      - Why was something skipped? → skipped_reason
+    """
+    # ── Discovery ─────────────────────────────────────────────────────────────
+    source:               str   = "static"        # static | runtime | correlated | passive
+    discovered_in:        str   = ""              # JS file URL or page URL where found
+    line_number:          int   = 0               # Line inside discovered_in (0 = unknown)
+    observed_at:          str   = ""              # Page URL where endpoint/finding was observed at runtime
+    correlation:          str   = ""              # "static+runtime" | "static+passive" | "single"
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    validation_status:    str   = "NOT_VALIDATED" # NOT_VALIDATED | CONFIRMED | UNREACHABLE | ERROR
+    validation_http_status: int = 0               # HTTP status from passive probe (0 = not probed)
+    validation_error:     str   = ""              # Error message if probe failed
+
+    # ── Access context ────────────────────────────────────────────────────────
+    auth_required:        Optional[bool] = None   # None = unknown, True/False = observed
+    access_level:         str   = "UNKNOWN"       # PUBLIC | AUTHENTICATED | UNKNOWN
+
+    # ── Skip tracking ─────────────────────────────────────────────────────────
+    skipped_reason:       str   = ""              # Why this was not fully analyzed (empty = analyzed)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source":               self.source,
+            "discovered_in":        self.discovered_in,
+            "line_number":          self.line_number,
+            "observed_at":          self.observed_at,
+            "correlation":          self.correlation,
+            "validation_status":    self.validation_status,
+            "validation_http_status": self.validation_http_status,
+            "validation_error":     self.validation_error,
+            "auth_required":        self.auth_required,
+            "access_level":         self.access_level,
+            "skipped_reason":       self.skipped_reason,
+        }
+
+    @classmethod
+    def from_finding(cls, finding: "Finding") -> "Provenance":
+        """
+        Build a baseline Provenance from a Finding's existing fields.
+        Called at report-time — no network I/O.
+        """
+        source = "static"
+        if getattr(finding, "source_type", "static") == "runtime":
+            source = "runtime"
+
+        return cls(
+            source        = source,
+            discovered_in = finding.file_url,
+            line_number   = finding.line_number,
+            observed_at   = finding.source_page or "",
+            correlation   = "single",
+        )
+
+    @classmethod
+    def from_endpoint(cls, endpoint: "Endpoint") -> "Provenance":
+        """
+        Build a baseline Provenance from an Endpoint's existing fields.
+        Called at report-time — no network I/O.
+        """
+        source = getattr(endpoint, "source_type", "static") or "static"
+
+        # Correlated = we have both a static source file AND a runtime observed_at
+        correlation = "single"
+        if source == "runtime":
+            correlation = "single"
+        elif source == "correlated":
+            correlation = "static+runtime"
+
+        return cls(
+            source        = source,
+            discovered_in = endpoint.source_file,
+            line_number   = endpoint.line_number,
+            observed_at   = "",   # populated by headless layer if available
+            correlation   = correlation,
+            auth_required = (
+                True  if endpoint.auth_context and endpoint.auth_context not in ("", "None") else
+                None
+            ),
+            access_level  = (
+                "AUTHENTICATED" if endpoint.auth_context and endpoint.auth_context not in ("", "None")
+                else "UNKNOWN"
+            ),
+        )
 
 
 @dataclass
@@ -49,6 +149,8 @@ class Finding:
     classification: str = ""  # PUBLIC_IDENTIFIER / SECRET / CREDENTIAL / TOKEN / CONFIG
     first_seen: datetime = field(default_factory=datetime.utcnow)
     occurrences: List[str] = field(default_factory=list)
+    # Stage 5: populated lazily at report-time or by passive validator
+    provenance: Optional["Provenance"] = field(default=None, repr=False)
 
     @staticmethod
     def make_id(rule_id: str, value: str, file_url: str) -> str:
@@ -81,6 +183,8 @@ class Endpoint:
     evidence:        str   = ""     # Raw JS snippet that revealed this endpoint
     kind:            str   = "api"  # api / route / external / websocket / graphql
     source_type:     str   = "static"  # static | runtime | correlated
+    # Stage 5: populated lazily at report-time or by passive validator
+    provenance: Optional["Provenance"] = field(default=None, repr=False)
 
 
 @dataclass
