@@ -434,7 +434,23 @@ def auto_login(
         result["final_url"] = page.url
 
         # Step 7: Check if still on login page
-        if _is_still_on_login(page, login_url):
+        # For formless/JS-only auth the URL never changes — check DOM instead
+        if result["method"] == "formless":
+            # Success = password input gone/hidden OR a new content section appeared
+            try:
+                pw_visible = page.is_visible("input[type='password']")
+            except Exception:
+                pw_visible = True
+            if not pw_visible:
+                result["success"] = True
+                step("Login successful — password field no longer visible (JS auth)")
+            else:
+                # Also check for error text visible on page
+                error_msg = _detect_error_message(page)
+                result["success"]       = False
+                result["error_message"] = error_msg or "JS auth: password field still visible after submit"
+                step(f"Login failed — {result['error_message']}")
+        elif _is_still_on_login(page, login_url):
             error_msg = _detect_error_message(page)
             result["success"]       = False
             result["error_message"] = error_msg or "Still on login page after submit"
