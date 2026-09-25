@@ -4,9 +4,102 @@ All findings, JS files, endpoints, and infrastructure items use these.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import hashlib
+
+
+# ── Stage 6: Application State Intelligence ───────────────────────────────────
+
+class AccessState:
+    """
+    Per-endpoint access classification based on observed HTTP behavior.
+
+    PUBLIC         — Responded 2xx with no auth challenge
+    AUTHENTICATED  — Responded 2xx only after login, or 401/403 observed
+    PRIVILEGED     — Responded 2xx only in an elevated session (admin etc.)
+    UNKNOWN        — Never reached or status inconclusive
+    """
+    PUBLIC        = "PUBLIC"
+    AUTHENTICATED = "AUTHENTICATED"
+    PRIVILEGED    = "PRIVILEGED"
+    UNKNOWN       = "UNKNOWN"
+
+    ALL = {PUBLIC, AUTHENTICATED, PRIVILEGED, UNKNOWN}
+
+
+class RouteState:
+    """
+    Per-route lifecycle state from crawl to verification.
+
+    DISCOVERED   — Found in JS/HTML but never visited
+    VISITED      — HTTP request was made; response captured
+    OBSERVED     — Seen in runtime network traffic (browser intercept)
+    AUTH_REQUIRED — Returned 401
+    FORBIDDEN    — Returned 403
+    REDIRECTED   — Returned 301/302
+    UNREACHABLE  — Connection error, timeout, or 4xx/5xx other than 401/403
+    """
+    DISCOVERED    = "DISCOVERED"
+    VISITED       = "VISITED"
+    OBSERVED      = "OBSERVED"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    FORBIDDEN     = "FORBIDDEN"
+    REDIRECTED    = "REDIRECTED"
+    UNREACHABLE   = "UNREACHABLE"
+
+    ALL = {DISCOVERED, VISITED, OBSERVED, AUTH_REQUIRED, FORBIDDEN, REDIRECTED, UNREACHABLE}
+
+
+@dataclass
+class StateTransition:
+    """
+    A single observed HTTP status transition, e.g. /admin → 403 → FORBIDDEN.
+    Recorded in order so callers can reconstruct the access chain.
+    """
+    url:          str
+    http_status:  int
+    route_state:  str                  # RouteState constant
+    access_state: str                  # AccessState constant
+    redirected_to: str = ""           # populated if route_state == REDIRECTED
+    observed_at:  str  = ""           # ISO timestamp or empty
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "url":           self.url,
+            "http_status":   self.http_status,
+            "route_state":   self.route_state,
+            "access_state":  self.access_state,
+            "redirected_to": self.redirected_to,
+            "observed_at":   self.observed_at,
+        }
+
+
+@dataclass
+class PageAccessRecord:
+    """
+    What BundleSpy learned about a page's access requirements during the crawl.
+    One record per visited URL; stored in ScanResult.page_states.
+    """
+    url:           str
+    http_status:   int        = 0
+    route_state:   str        = RouteState.DISCOVERED
+    access_state:  str        = AccessState.UNKNOWN
+    redirected_to: str        = ""
+    auth_required: Optional[bool] = None   # None = unknown
+    # Chain of transitions if the page was retried (e.g. unauthenticated then authenticated)
+    transitions:   List[StateTransition] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "url":           self.url,
+            "http_status":   self.http_status,
+            "route_state":   self.route_state,
+            "access_state":  self.access_state,
+            "redirected_to": self.redirected_to,
+            "auth_required": self.auth_required,
+            "transitions":   [t.to_dict() for t in self.transitions],
+        }
 
 
 # ── Stage 5: Provenance Model ─────────────────────────────────────────────────
@@ -39,7 +132,7 @@ class Provenance:
 
     # ── Access context ────────────────────────────────────────────────────────
     auth_required:        Optional[bool] = None   # None = unknown, True/False = observed
-    access_level:         str   = "UNKNOWN"       # PUBLIC | AUTHENTICATED | UNKNOWN
+    access_level:         str   = "UNKNOWN"       # PUBLIC | AUTHENTICATED | PRIVILEGED | UNKNOWN
 
     # ── Skip tracking ─────────────────────────────────────────────────────────
     skipped_reason:       str   = ""              # Why this was not fully analyzed (empty = analyzed)
@@ -185,6 +278,10 @@ class Endpoint:
     source_type:     str   = "static"  # static | runtime | correlated
     # Stage 5: populated lazily at report-time or by passive validator
     provenance: Optional["Provenance"] = field(default=None, repr=False)
+    # Stage 6: Application State Intelligence — populated by crawler + state_intelligence
+    http_status:   int = 0                        # Last observed HTTP status (0 = not visited)
+    access_state:  str = AccessState.UNKNOWN      # PUBLIC | AUTHENTICATED | PRIVILEGED | UNKNOWN
+    route_state:   str = RouteState.DISCOVERED    # DISCOVERED | VISITED | AUTH_REQUIRED | ...
 
 
 @dataclass
@@ -211,3 +308,5 @@ class ScanResult:
     # Attack surface graph — populated after scan, None until built
     # Import lazily to avoid circular imports
     graph: Optional[Any] = field(default=None, repr=False)
+    # Stage 6: per-URL access records keyed by URL string
+    page_states: Dict[str, "PageAccessRecord"] = field(default_factory=dict, repr=False)
