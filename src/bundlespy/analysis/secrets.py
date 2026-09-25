@@ -79,6 +79,99 @@ def _get_context(content: str, pos: int, chars: int = 120) -> str:
     return content[start:end].replace("\n", " ").strip()
 
 
+# Known CDN / library hostnames — secrets found in these files are almost
+# certainly false positives from example keys embedded in documentation or
+# source comments shipped with the library itself.
+_LIBRARY_HOSTS = {
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "unpkg.com",
+    "cdn.skypack.dev",
+    "esm.sh",
+    "esm.run",
+    "cdn.bootcdn.net",
+    "ajax.googleapis.com",
+    "ajax.aspnetcdn.com",
+    "stackpath.bootstrapcdn.com",
+    "maxcdn.bootstrapcdn.com",
+    "code.jquery.com",
+    "cdn.plot.ly",
+    "d3js.org",
+    "cdn.datatables.net",
+    "cdn.auth0.com",
+    "cdn.segment.com",
+    "js.stripe.com",
+    "js.braintreegateway.com",
+    "static.hotjar.com",
+    "cdn.optimizely.com",
+    "assets.adobedtm.com",
+}
+
+# URL path fragments that strongly indicate a vendored / bundled library
+_LIBRARY_PATH_PATTERNS = [
+    "/vendor/",
+    "/vendors/",
+    "/vendors~",
+    "/node_modules/",
+    "/lib/",
+    "/dist/",
+    "/static/js/chunk-",
+    "/static/js/vendors-",
+    ".min.js",
+    "-bundle.js",
+    "-bundle.min.js",
+    "/polyfill",
+    "/runtime.",
+    "/commons.",
+    "jquery",
+    "lodash",
+    "moment.js",
+    "bootstrap",
+    "react.development",
+    "react.production",
+]
+
+
+def _is_library_url(url: str) -> bool:
+    """
+    Return True if *url* looks like a third-party CDN or vendored library
+    resource that should be excluded from secret scanning.
+
+    This is a fast heuristic — it checks the hostname against a known CDN
+    list and the path against common vendor / dist patterns.  False negatives
+    (returning False for a real library) are acceptable; false positives would
+    suppress genuine secrets in first-party code, so the bar for inclusion in
+    the CDN list is deliberately high (only universally-recognised CDNs).
+    """
+    if not url:
+        return False
+
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+    except Exception:
+        return False
+
+    # Exact CDN hostname match
+    if host in _LIBRARY_HOSTS:
+        return True
+
+    # Subdomain of a known CDN (e.g. my-org.cdn.jsdelivr.net)
+    for cdn in _LIBRARY_HOSTS:
+        if host.endswith("." + cdn):
+            return True
+
+    # Path-based heuristics (applies to any host, including self-hosted)
+    path_lower = path.lower()
+    for pattern in _LIBRARY_PATH_PATTERNS:
+        if pattern in path_lower:
+            return True
+
+    return False
+
+
 def _get_line_number(content: str, pos: int) -> int:
     return content[:pos].count("\n") + 1
 
