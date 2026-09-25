@@ -11,6 +11,7 @@ from ..ui.printer import (
     print_headless, print_graphql, print_secret_analysis,
     print_attack_surface, print_coverage, _print_libraries,
     print_login_result,
+    print_passive_validation, print_coverage_ledger,
 )
 
 
@@ -25,6 +26,8 @@ def print_report(
     subdomains:         list  = None,
     report_paths:       dict  = None,
     verbose:            bool  = False,
+    passive_report=None,       # PassiveValidationReport | None
+    coverage_ledger=None,      # CoverageLedger | None
 ) -> None:
     extras = extras or {}
 
@@ -102,5 +105,12 @@ def print_report(
     coverage = extras.get("coverage")
     if coverage:
         print_coverage(coverage)
+
+    # Stage 5: passive validation and provenance ledger
+    if passive_report is not None:
+        print_passive_validation(passive_report)
+
+    if coverage_ledger is not None:
+        print_coverage_ledger(coverage_ledger)
 
     print_summary(result, extras=extras, report_paths=report_paths)
