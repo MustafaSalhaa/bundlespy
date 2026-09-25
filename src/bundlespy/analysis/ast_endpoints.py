@@ -424,17 +424,12 @@ def extract_all_endpoints(
     """
     Extract all endpoints from JS content.
 
-    Pipeline:
-    1. Tree-sitter AST pre-pass (ast_parser.py) - structural walk that resolves
-       multi-hop variable chains, destructuring, ternary branches and object
-       property access that the regex layer can't reach. Also emits endpoints
-       directly from call sites it identifies.
-    2. Regex + data-flow pass (this function) - covers minified bundles and
-       patterns not modelled by the AST walk.
-    3. Results from both passes are merged and deduplicated by path key.
-
-    Every finding includes accurate line/column, evidence snippet, confidence
-    score, and source_type = "static".
+    Uses data-flow analysis to resolve variable references before
+    applying regex patterns. Every finding includes:
+    - accurate line/column
+    - evidence snippet
+    - confidence score
+    - source_type = "static"
     """
     if not content:
         return []
@@ -444,33 +439,8 @@ def extract_all_endpoints(
     endpoints: List[Endpoint] = []
     seen: Set[str]            = set()
 
-    # ── AST pre-pass (tree-sitter) ────────────────────────────────────────────
-    try:
-        from .ast_parser import augment_env_and_extract
-        ast_env, ast_endpoints = augment_env_and_extract(content, file_url, base_origin)
-        # Seed the seen set and endpoint list with AST results first
-        # (higher confidence since they come from structural analysis)
-        for ep in ast_endpoints:
-            key = re.sub(r'\{[^}]+\}', '*', ep.path.lower().rstrip("/").split("?")[0])
-            if key not in seen:
-                seen.add(key)
-                endpoints.append(ep)
-    except Exception as _ast_err:
-        logger.debug("AST pre-pass failed for %s: %s", file_url, _ast_err)
-        ast_env = None
-
     # ── Build data-flow environment ───────────────────────────────────────────
     env = build_env(content)
-    # Merge AST-resolved variable bindings into the regex-layer env so that
-    # fetch(multiHopVar) etc. resolve correctly in the passes below.
-    if ast_env is not None:
-        try:
-            env.vars.update(
-                {k: v for k, v in ast_env.vars.items()
-                 if k not in env.vars}
-            )
-        except Exception:
-            pass
 
     def _elapsed() -> float:
         return time.monotonic() - _t_start
@@ -629,13 +599,10 @@ def extract_all_endpoints(
             _get_col(content, m.start()), 0.78, _evidence(content, m.start()))
 
     # ── Template literals ─────────────────────────────────────────────────────
-    # Accept any resolved path that starts with "/" — the add() function already
-    # filters out placeholders, empty strings, and known skip patterns.
-    # Restricting to /api / /v here silently drops /admin, /auth, /graphql, etc.
     for m in RE_TEMPLATE.finditer(content):
         path = m.group(1)
         resolved = env.resolve_template(path)
-        if resolved.startswith("/"):
+        if resolved.startswith("/api") or resolved.startswith("/v"):
             add(resolved, "UNKNOWN", _get_line(content, m.start()),
                 _get_col(content, m.start()), 0.80, _evidence(content, m.start()))
 
