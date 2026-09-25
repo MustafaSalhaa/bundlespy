@@ -461,7 +461,8 @@ class AttackSurfaceGraph:
 
         paths:     List[List[TraceStep]] = []
         truncated: bool                  = False
-        visited_nodes: Set[str]          = set()
+        # Include origin in visited_nodes so max_nodes count is accurate
+        visited_nodes: Set[str]          = {origin_id}
 
         # Each stack entry: (current_node_id, path_so_far, visited_in_branch)
         stack: List[tuple] = [(origin_id, [], {origin_id})]
@@ -484,6 +485,7 @@ class AttackSurfaceGraph:
                     truncated = True
                 continue
 
+            any_expanded = False
             for edge in outgoing:
                 tgt_id = edge.target
                 if tgt_id in branch_visited:
@@ -512,6 +514,12 @@ class AttackSurfaceGraph:
                 new_path    = current_path + [step]
                 new_visited = branch_visited | {tgt_id}
                 stack.append((tgt_id, new_path, new_visited))
+                any_expanded = True
+
+            # If all outgoing edges were skipped (cycle guard or node missing),
+            # still record the path so far — it terminates here.
+            if not any_expanded and current_path:
+                paths.append(current_path)
 
         # Sort paths deterministically
         def _path_key(p: List[TraceStep]) -> tuple:
