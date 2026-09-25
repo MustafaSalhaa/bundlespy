@@ -12,6 +12,7 @@ from ..ui.printer import (
     print_attack_surface, print_coverage, _print_libraries,
     print_login_result,
     print_passive_validation, print_coverage_ledger,
+    print_state_intelligence,
 )
 
 
@@ -28,6 +29,7 @@ def print_report(
     verbose:            bool  = False,
     passive_report=None,       # PassiveValidationReport | None
     coverage_ledger=None,      # CoverageLedger | None
+    state_report=None,         # StateIntelligenceReport | None (Stage 6)
 ) -> None:
     extras = extras or {}
 
@@ -112,5 +114,17 @@ def print_report(
 
     if coverage_ledger is not None:
         print_coverage_ledger(coverage_ledger)
+
+    # Stage 6: Application State Intelligence
+    if state_report is None and getattr(result, "page_states", None):
+        # Build on-the-fly if not pre-computed
+        try:
+            from ..analysis.state_intelligence import build_state_intelligence_report
+            state_report = build_state_intelligence_report(result)
+        except Exception:
+            pass
+
+    if state_report is not None:
+        print_state_intelligence(state_report)
 
     print_summary(result, extras=extras, report_paths=report_paths)
