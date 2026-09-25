@@ -23,7 +23,6 @@ import queue
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -83,41 +82,6 @@ SKIP_FORM_CONTEXTS = {
     "order", "purchase", "buy", "transaction", "stripe",
     "paypal", "braintree", "adyen", "square", "invoice",
 }
-
-
-# ── Interaction safety classification ────────────────────────────────────────
-
-class InteractionClass(Enum):
-    SAFE        = "SAFE"        # UI-reveal only: tabs, accordions, hover
-    CAUTION     = "CAUTION"     # may trigger a read XHR; execute with observation
-    DESTRUCTIVE = "DESTRUCTIVE" # blocked unconditionally
-
-# Mutation methods that indicate a state-changing side effect
-STATE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-
-# CAUTION keyword signals - element may trigger a write but isn't obviously destructive
-CAUTION_KEYWORDS = {
-    "save", "update", "upload", "apply", "confirm", "continue",
-    "next", "submit", "create", "add", "edit", "change", "proceed",
-}
-
-
-@dataclass
-class InteractionEvent:
-    """Record of a single engine interaction and its observed effects."""
-    element_label:  str                 # descriptive label (tag + text)
-    classification: InteractionClass
-    page_url:       str
-    pre_requests:   int                 # network request count before action
-    post_requests:  int                 # network request count after action
-    mutation_methods: List[str]         # HTTP methods of NEW requests triggered
-    side_effect:    str                 # "NONE" | "READ_XHR" | "STATE_MUTATION"
-    halted:         bool = False        # True if engine stopped further interaction
-    # Intelligence delta - how much this interaction contributed
-    new_js_assets:  int = 0            # JS files captured after this interaction
-    new_routes:     int = 0            # routes discovered after this interaction
-    new_endpoints:  int = 0            # endpoints discovered after this interaction
-    new_findings:   int = 0            # secrets found after this interaction
 
 
 # ── Form fill values ──────────────────────────────────────────────────────────
@@ -263,24 +227,6 @@ document.createElement = function(tag, ...a) {
     }
     return el;
 };
-
-// History/pushState tracking for SPA navigation
-(function() {
-    window.__bspy_nav_history = [];
-    const _origPush = history.pushState.bind(history);
-    const _origReplace = history.replaceState.bind(history);
-    history.pushState = function(s, t, url) {
-        if (url) { try { window.__bspy_nav_history.push(String(url)); } catch(e) {} }
-        return _origPush(s, t, url);
-    };
-    history.replaceState = function(s, t, url) {
-        if (url) { try { window.__bspy_nav_history.push(String(url)); } catch(e) {} }
-        return _origReplace(s, t, url);
-    };
-    window.addEventListener('popstate', function() {
-        try { window.__bspy_nav_history.push(location.pathname); } catch(e) {}
-    });
-})();
 """ + STABILITY_INIT_JS
 
 
@@ -572,360 +518,6 @@ class PageStabilizer:
             self.wait(max_ms=1000, quiet_ms=150)
 
 
-# ── Inline chunk route extractor (JS regex, no external deps) ────────────────
-
-# These patterns cover the most common route-bearing patterns in JS chunks.
-# They are intentionally conservative - high precision over high recall.
-# The full analysis pipeline (SecretScanner + ast_endpoints) runs separately.
-
-_RE_CHUNK_ROUTE = re.compile(
-    r'["\x27`]'
-    r'(/(?:api|v\d+|auth|admin|graphql|rest|ws|socket|uploads?|downloads?|'
-    r'users?|accounts?|settings?|profile|dashboard|search|orders?|products?|'
-    r'checkout|billing|webhooks?|integrations?|oauth|token|session|'
-    r'[a-z][a-z0-9_\-]{1,30})'
-    r'(?:/[a-zA-Z0-9_\-{}:]{1,60})*/?)'
-    r'["\x27`]',
-    re.IGNORECASE,
-)
-
-_RE_DYNAMIC_IMPORT = re.compile(
-    r'import\s*\(\s*["\x27`]([^"\'`]+)["\x27`]\s*\)',
-    re.IGNORECASE,
-)
-
-_RE_REQUIRE_CHUNK = re.compile(
-    r'require\.ensure\s*\(\s*\[([^\]]*)\]',
-    re.IGNORECASE,
-)
-
-_SKIP_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff",
-    ".woff2", ".ttf", ".eot", ".css", ".map", ".json",
-}
-
-_SKIP_ROUTE_PREFIXES = {
-    "/node_modules", "//", "/http", "/https",
-}
-
-
-def _extract_routes_from_chunk(content: str, base_url: str) -> Set[str]:
-    """
-    Fast regex-based route extraction from a JS chunk.
-    Returns absolute paths only. No external deps.
-    """
-    routes: Set[str] = set()
-
-    for m in _RE_CHUNK_ROUTE.finditer(content):
-        path = m.group(1).split("?")[0].split("#")[0]
-        if any(path.startswith(p) for p in _SKIP_ROUTE_PREFIXES):
-            continue
-        ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.split("/")[-1] else ""
-        if ext in _SKIP_EXTENSIONS:
-            continue
-        if len(path) > 1:
-            routes.add(path)
-
-    # Dynamic import paths - may be JS chunk URLs but also sometimes route hints
-    parsed_base = urlparse(base_url)
-    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    for m in _RE_DYNAMIC_IMPORT.finditer(content):
-        path = m.group(1).strip()
-        if path.startswith("/") and not any(path.startswith(p) for p in _SKIP_ROUTE_PREFIXES):
-            ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.split("/")[-1] else ""
-            if ext not in _SKIP_EXTENSIONS and len(path) > 1:
-                routes.add(path)
-
-    return routes
-
-
-class _InlineChunkAnalyzer:
-    """
-    Background worker that drains a queue of newly captured JS chunks
-    and runs the full analysis pipeline on each one immediately:
-
-      1. Route extraction  -> fed back into the engine's live route set
-                             so the Phase 2 loop can visit them this session
-      2. Endpoint extraction (ast_endpoints + regex)
-      3. Secret detection
-      4. Infrastructure detection
-
-    Runs in a single daemon thread to avoid blocking the Playwright
-    event loop. Results accumulate in thread-safe lists on the engine.
-
-    Imported lazily so headless.py stays importable even without the
-    analysis package (e.g. in unit tests that mock it out).
-    """
-
-    _SENTINEL = None  # signals the worker to stop
-
-    def __init__(self, engine: "HeadlessEngine"):
-        self._engine  = engine
-        self._queue:  "queue.Queue[Optional[JSFile]]" = queue.Queue()
-        self._thread  = threading.Thread(target=self._worker, daemon=True)
-        self._started = False
-
-        # Accumulated inline results (separate from CLI-level _analyze pass)
-        self.inline_findings:  list = []
-        self.inline_endpoints: list = []
-        self.inline_routes:    Set[str] = set()
-        self._lock = threading.Lock()
-
-        # Dedup keys - prevent double-reporting the same finding/endpoint
-        self._seen_find_hashes: Set[str] = set()
-        self._seen_ep_keys:     Set[str] = set()
-
-        # Track hashes analyzed inline so cli.py _analyze() can skip them
-        self._analyzed_hashes:  Set[str] = set()
-
-        # Lazy-imported analyzers (set on first use in worker thread)
-        self._secret_scanner   = None
-        self._extract_all_eps  = None
-        self._extract_eps      = None
-        self._extract_infra    = None
-
-    def start(self) -> None:
-        if not self._started:
-            self._thread.start()
-            self._started = True
-
-    def submit(self, js_file: "JSFile") -> None:
-        """Non-blocking. Called from the Playwright response handler."""
-        if self._started:
-            self._queue.put(js_file)
-
-    def stop(self, timeout: float = 8.0) -> None:
-        """Signal stop and wait for the queue to drain."""
-        if self._started:
-            self._queue.put(self._SENTINEL)
-            self._thread.join(timeout=timeout)
-
-    def _load_analyzers(self) -> bool:
-        """
-        Import analysis modules lazily. Returns True if all loaded.
-        Isolated so import failures don't crash the crawl.
-        """
-        if self._secret_scanner is not None:
-            return True
-        try:
-            from ..analysis.secrets import SecretScanner
-            from ..analysis.ast_endpoints import extract_all_endpoints
-            from ..analysis.endpoints import extract_endpoints
-            from ..analysis.infrastructure import extract_infrastructure
-            self._secret_scanner  = SecretScanner()
-            self._extract_all_eps = extract_all_endpoints
-            self._extract_eps     = extract_endpoints
-            self._extract_infra   = extract_infrastructure
-            return True
-        except Exception as e:
-            logger.debug("Inline analyzer: failed to load analysis modules: %s", e)
-            return False
-
-    def _worker(self) -> None:
-        """Drain the queue and analyze each chunk."""
-        analyzers_ok = self._load_analyzers()
-        engine = self._engine
-
-        while True:
-            try:
-                js_file = self._queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-
-            if js_file is self._SENTINEL:
-                break
-
-            if not js_file or not js_file.content:
-                continue
-
-            try:
-                self._analyze_chunk(js_file, analyzers_ok)
-            except Exception as e:
-                logger.debug("Inline analyzer error for %s: %s", js_file.url, e)
-
-    def _fetch_and_analyze(self, path: str, parent_url: str) -> None:
-        """
-        Fetch a JS file referenced by a dynamic import and analyze it inline.
-        Bounded by the engine's AssetRegistry (dedup by URL and hash).
-        Only fetches paths that are absolute or start with '/'.
-        """
-        engine = self._engine
-        try:
-            # Resolve to full URL
-            if path.startswith("http://") or path.startswith("https://"):
-                full_url = path
-            elif path.startswith("/"):
-                parsed = urlparse(parent_url)
-                full_url = "{}://{}{}".format(parsed.scheme, parsed.netloc, path)
-            else:
-                # Relative path - resolve against parent
-                full_url = urljoin(parent_url, path)
-
-            # Validate scope and URL safety
-            safe, _ = validate_url(full_url)
-            if not safe or not engine.scope.in_scope(full_url):
-                return
-
-            # Dedup by URL
-            if not engine.registry.register_url(full_url):
-                return
-
-            import requests as _req
-            resp = _req.get(
-                full_url,
-                timeout=8,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"},
-            )
-            if resp.status_code != 200 or not resp.content:
-                return
-
-            h = __import__("hashlib").sha256(resp.content).hexdigest()
-            if not engine.registry.register_hash(h):
-                return
-
-            js_file = engine._make_js_file(full_url, resp.content, parent_url, "dynamic-import")
-            if engine._add_js_file(js_file):
-                logger.debug("Dynamic import fetched: %s (from %s)", full_url, parent_url)
-                # Analyze inline immediately (recursive, bounded by registry dedup above)
-                analyzers_ok = self._secret_scanner is not None
-                self._analyze_chunk(js_file, analyzers_ok)
-        except Exception as e:
-            logger.debug("Dynamic import fetch failed %s (parent %s): %s", path, parent_url, e)
-
-    def _analyze_chunk(self, js_file: "JSFile", full_analysis: bool) -> None:
-        """
-        Full analysis of one JS chunk. Runs in the worker thread.
-
-        Step 1 - Fast route extraction (always runs, no deps)
-        Step 2 - Full endpoint extraction (ast + regex)
-        Step 3 - Secret detection
-        Step 4 - Infrastructure detection
-        Step 5 - Feed routes back into engine's live crawl queue
-        Step 6 - Dynamic import chaining (fetch and analyze referenced JS files)
-        """
-        content = js_file.content
-        url     = js_file.url
-        engine  = self._engine
-
-        # Mark this chunk as analyzed inline so cli.py _analyze() can skip it
-        if js_file.sha256:
-            with self._lock:
-                self._analyzed_hashes.add(js_file.sha256)
-            # Tag the JSFile object itself for cli.py's _process() check
-            try:
-                js_file._inline_analyzed = True
-            except Exception:
-                pass
-
-        # Step 1: Fast route extraction - always runs
-        chunk_routes = _extract_routes_from_chunk(content, url)
-        new_routes   = set()
-        for route in chunk_routes:
-            if engine._add_route(route):
-                new_routes.add(route)
-
-        with self._lock:
-            self.inline_routes.update(new_routes)
-
-        if new_routes:
-            logger.debug(
-                "Inline chunk analysis: %d new routes from %s",
-                len(new_routes), url.split("/")[-1],
-            )
-
-        if not full_analysis:
-            return
-
-        # Step 2: Endpoint extraction
-        try:
-            seen_eps = self._seen_ep_keys
-            new_eps  = []
-
-            for ep in self._extract_all_eps(content, url):
-                key = ep.url.rstrip("/").lower().split("?")[0]
-                if key not in seen_eps:
-                    seen_eps.add(key)
-                    ep.source_type = "chunk-inline"
-                    ep.source_file = url  # provenance: the chunk that contained this endpoint
-                    new_eps.append(ep)
-
-            for ep in self._extract_eps(content, url):
-                key = ep.url.rstrip("/").lower().split("?")[0]
-                if key not in seen_eps:
-                    seen_eps.add(key)
-                    ep.source_type = "chunk-inline"
-                    ep.source_file = url  # provenance: the chunk URL
-                    new_eps.append(ep)
-
-            if new_eps:
-                with self._lock:
-                    self.inline_endpoints.extend(new_eps)
-                # Also register endpoint paths as crawlable routes
-                for ep in new_eps:
-                    path = urlparse(ep.url).path
-                    if path and path != "/" and engine._add_route(path):
-                        with self._lock:
-                            self.inline_routes.add(path)
-                logger.debug(
-                    "Inline chunk analysis: %d new endpoints from %s",
-                    len(new_eps), url.split("/")[-1],
-                )
-        except Exception as e:
-            logger.debug("Inline endpoint extraction error %s: %s", url, e)
-
-        # Step 3: Secret detection
-        try:
-            seen_finds = self._seen_find_hashes
-            new_finds  = []
-            for f in self._secret_scanner.scan(content, url, js_file.source_page):
-                if f.sha256 not in seen_finds:
-                    seen_finds.add(f.sha256)
-                    new_finds.append(f)
-            if new_finds:
-                with self._lock:
-                    self.inline_findings.extend(new_finds)
-                logger.debug(
-                    "Inline chunk analysis: %d secrets from %s",
-                    len(new_finds), url.split("/")[-1],
-                )
-        except Exception as e:
-            logger.debug("Inline secret scan error %s: %s", url, e)
-
-        # Step 4: Infrastructure detection
-        try:
-            infra = self._extract_infra(content, url)
-            if infra:
-                with engine._lock:
-                    # Infrastructure goes back to engine as api_calls metadata
-                    # (no dedicated field yet - stored as tagged api_call entries)
-                    for item in infra:
-                        engine.api_calls.append({
-                            "url":    getattr(item, "value", str(item)),
-                            "method": "INFRA",
-                            "type":   "infrastructure",
-                            "tag":    getattr(item, "type", "unknown"),
-                        })
-        except Exception as e:
-            logger.debug("Inline infra extraction error %s: %s", url, e)
-
-        # Step 6: Dynamic import chaining
-        # Look for import("./some.chunk.js") patterns and fetch+analyze them
-        try:
-            for m in _RE_DYNAMIC_IMPORT.finditer(content):
-                imp_path = m.group(1).strip()
-                # Only chase absolute or root-relative JS/MJS paths to avoid
-                # re-fetching relative paths that may not resolve correctly
-                if not imp_path:
-                    continue
-                ext = imp_path.rsplit(".", 1)[-1].lower() if "." in imp_path else ""
-                if ext not in ("js", "mjs", "cjs"):
-                    continue
-                if imp_path.startswith("http") or imp_path.startswith("/"):
-                    self._fetch_and_analyze(imp_path, url)
-        except Exception as e:
-            logger.debug("Dynamic import chaining error %s: %s", url, e)
-
-
 # ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 def _parse_cookie_string(cookie_str: str, domain: str) -> List[dict]:
@@ -1026,12 +618,8 @@ class HeadlessEngine:
         self.api_calls:  List[dict]    = []
         self.ws_urls:    List[str]     = []
         self.routes:     Set[str]      = set()
-        self.pages_visited: int           = 0
-        self.auth_result: Optional[dict]  = None   # populated during run()
-        self.interaction_log: List[InteractionEvent] = []  # evidence trail
-
-        # Inline chunk analyzer - started in run(), stopped before returning
-        self._chunk_analyzer = _InlineChunkAnalyzer(self)
+        self.pages_visited: int        = 0
+        self.auth_result: Optional[dict] = None  # populated during run()
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
@@ -1073,11 +661,7 @@ class HeadlessEngine:
         return any(domain in lower for domain in BLOCK_DOMAINS)
 
     def _handle_response(self, response, source_page: str) -> None:
-        """
-        Capture JS files from network responses. Non-blocking.
-        Newly captured chunks are submitted to the inline analyzer
-        immediately so their routes/secrets feed back into this session.
-        """
+        """Capture JS files from network responses. Non-blocking."""
         try:
             url = response.url
             ct  = response.headers.get("content-type", "")
@@ -1104,10 +688,7 @@ class HeadlessEngine:
                 if self.registry.seen_hash(h):
                     return
                 js_file = self._make_js_file(url, body, source_page)
-                if self._add_js_file(js_file):
-                    # Submit to background inline analyzer immediately.
-                    # This is non-blocking - the analyzer runs in its own thread.
-                    self._chunk_analyzer.submit(js_file)
+                self._add_js_file(js_file)
             except Exception:
                 pass
         except Exception:
@@ -1184,309 +765,77 @@ class HeadlessEngine:
                 h = hashlib.sha256(resp.content).hexdigest()
                 if self.registry.register_hash(h):
                     js_file = self._make_js_file(worker_url, resp.content, source_page, "webworker")
-                    if self._add_js_file(js_file):
-                        logger.info("WebWorker captured: %s", worker_url)
-                        # Analyze worker JS inline immediately - same pipeline as chunks
-                        self._chunk_analyzer.submit(js_file)
+                    self._add_js_file(js_file)
+                    logger.info("WebWorker captured: %s", worker_url)
         except Exception as e:
             logger.debug("Worker fetch failed %s: %s", worker_url, e)
 
-    # ── Evidence-based safety layer ───────────────────────────────────────────
-
-    def _snapshot_network(self, page) -> int:
-        """Return total network request count at this moment."""
+    def _interact(self, page, stabilizer: PageStabilizer) -> None:
+        """
+        Safe interaction engine. Adaptive waits after each action.
+        """
+        # Phase 1: Adaptive scroll
         try:
-            reqs = page.evaluate("(window.__bundlespy_requests || []).length")
-            return int(reqs) if reqs is not None else 0
+            heights = [0.25, 0.5, 0.75, 1.0, 0]
+            for frac in heights:
+                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {frac});")
+                stabilizer.wait_after_interaction(max_ms=500)
         except Exception:
-            return 0
+            pass
 
-    def _delta_network(self, page, pre_count: int) -> List[str]:
-        """
-        Return HTTP methods of requests that fired AFTER pre_count.
-        These are the side effects of the last interaction.
-        """
-        try:
-            all_reqs = page.evaluate("window.__bundlespy_requests || []") or []
-            new_reqs = all_reqs[pre_count:]
-            return [r.get("method", "GET").upper() for r in new_reqs
-                    if isinstance(r, dict)]
-        except Exception:
-            return []
-
-    def _classify_element(self, el) -> InteractionClass:
-        """
-        3-tier element classification. Destructive is blocked unconditionally.
-        Caution is allowed but executed under observation.
-        Safe executes freely.
-        """
-        try:
-            text = (el.inner_text() or "").lower().strip()
-        except Exception:
-            text = ""
-        try:
-            role  = (el.get_attribute("role") or "").lower()
-            tag   = el.evaluate("el => el.tagName.toLowerCase()") or ""
-            label = (el.get_attribute("aria-label") or "").lower()
-            cls   = (el.get_attribute("class") or "").lower()
-            typ   = (el.get_attribute("type") or "").lower()
-        except Exception:
-            role = tag = label = cls = typ = ""
-
-        # Tier 1: Destructive - hard block
-        if any(kw in text for kw in DESTRUCTIVE_KEYWORDS):
-            return InteractionClass.DESTRUCTIVE
-        if any(kw in label for kw in DESTRUCTIVE_KEYWORDS):
-            return InteractionClass.DESTRUCTIVE
-        if typ in ("submit", "reset") and any(kw in text for kw in CAUTION_KEYWORDS):
-            return InteractionClass.DESTRUCTIVE
-
-        # Tier 2: Caution - execute under observation
-        if any(kw in text for kw in CAUTION_KEYWORDS):
-            return InteractionClass.CAUTION
-        if any(kw in label for kw in CAUTION_KEYWORDS):
-            return InteractionClass.CAUTION
-        if typ == "submit":
-            return InteractionClass.CAUTION
-
-        # Tier 3: Safe - UI-reveal elements
-        return InteractionClass.SAFE
-
-    def _safe_interact_element(
-        self,
-        page,
-        el,
-        stabilizer: PageStabilizer,
-        page_url: str,
-        action_label: str,
-        halt_on_mutation: bool = True,
-    ) -> Optional[InteractionEvent]:
-        """
-        Classify -> execute -> observe. Returns an InteractionEvent.
-        If a STATE_MUTATION is detected and halt_on_mutation is True,
-        marks the event as halted so the caller can stop the interaction loop.
-        Returns None if the element was blocked (DESTRUCTIVE).
-        """
-        cls = self._classify_element(el)
-
-        if cls == InteractionClass.DESTRUCTIVE:
-            logger.debug("Blocked DESTRUCTIVE element: %s", action_label)
-            return None
-
-        pre = self._snapshot_network(page)
-
-        # Snapshot counts before interaction for delta calculation
-        with self._lock:
-            pre_js_count       = len(self.js_files)
-            pre_routes_count   = len(self.routes)
-        pre_endpoints_count    = len(self._chunk_analyzer.inline_endpoints)
-        pre_findings_count     = len(self._chunk_analyzer.inline_findings)
-
-        try:
-            el.click(timeout=1000)
-        except Exception:
-            return None
-
-        wait_ms = 1200 if cls == InteractionClass.CAUTION else 800
-        stabilizer.wait_after_interaction(max_ms=wait_ms)
-
-        new_methods  = self._delta_network(page, pre)
-        post         = self._snapshot_network(page)
-
-        mutation_methods = [m for m in new_methods if m in STATE_MUTATION_METHODS]
-
-        if mutation_methods:
-            side_effect = "STATE_MUTATION"
-        elif new_methods:
-            side_effect = "READ_XHR"
-        else:
-            side_effect = "NONE"
-
-        halted = bool(mutation_methods) and halt_on_mutation
-
-        # Calculate intelligence deltas after interaction settled
-        with self._lock:
-            post_js_count     = len(self.js_files)
-            post_routes_count = len(self.routes)
-        post_endpoints_count  = len(self._chunk_analyzer.inline_endpoints)
-        post_findings_count   = len(self._chunk_analyzer.inline_findings)
-
-        event = InteractionEvent(
-            element_label    = action_label,
-            classification   = cls,
-            page_url         = page_url,
-            pre_requests     = pre,
-            post_requests    = post,
-            mutation_methods = mutation_methods,
-            side_effect      = side_effect,
-            halted           = halted,
-            new_js_assets    = max(0, post_js_count - pre_js_count),
-            new_routes       = max(0, post_routes_count - pre_routes_count),
-            new_endpoints    = max(0, post_endpoints_count - pre_endpoints_count),
-            new_findings     = max(0, post_findings_count - pre_findings_count),
-        )
-
-        with self._lock:
-            self.interaction_log.append(event)
-
-        if halted:
-            logger.warning(
-                "STATE_MUTATION detected after '%s' on %s (%s) - halting interaction branch",
-                action_label, page_url, ", ".join(mutation_methods),
-            )
-
-        return event
-
-    def _interact(self, page, stabilizer: PageStabilizer) -> Set[str]:
-        """
-        Evidence-based interaction engine.
-
-        Every interaction goes through 3 layers:
-          1. Pre-execution classification  (SAFE / CAUTION / DESTRUCTIVE)
-          2. Execution
-          3. Post-execution mutation observation
-
-        If a supposedly SAFE or CAUTION element triggers a state-mutating
-        request (POST/PUT/PATCH/DELETE), the branch is halted immediately
-        and the event is recorded with full evidence in self.interaction_log.
-
-        Returns set of new routes discovered during all interactions.
-        """
-        discovered_routes: Set[str] = set()
-        page_url = page.url
-
-        # ── Phase 1: Progressive scroll ───────────────────────────────────────
-        # Scroll is read-only; no classification needed. Re-extract after each
-        # step to catch IntersectionObserver / lazy-load triggers.
-        scroll_fracs = [0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0, 0.0]
-        for frac in scroll_fracs:
-            try:
-                page.evaluate(
-                    f"window.scrollTo({{top: document.body.scrollHeight * {frac}, behavior: 'smooth'}});"
-                )
-                stabilizer.wait_after_interaction(max_ms=600)
-                discovered_routes.update(self._extract_routes(page))
-            except Exception:
-                pass
-
-        # ── Phase 2: Tabs, accordions, toggles ───────────────────────────────
-        # These are expected to be SAFE (UI-reveal). If observation shows
-        # a mutation, the branch halts.
+        # Phase 2: Tabs, accordions, toggles
         tab_selectors = [
             "[role='tab']", "[role='menuitem']",
             "[data-toggle='tab']", "[data-bs-toggle='tab']",
             ".nav-link:not(.active)", "[aria-selected='false']",
             ".accordion-button", "[aria-expanded='false']",
-            "[data-tab]", "[data-panel]",
         ]
         for sel in tab_selectors:
             try:
-                for el in page.query_selector_all(sel)[:8]:
+                for el in page.query_selector_all(sel)[:6]:
                     try:
                         if not el.is_visible() or not el.is_enabled():
                             continue
-                        label = f"tab:{sel}:{(el.inner_text() or '')[:40].strip()}"
-                        event = self._safe_interact_element(
-                            page, el, stabilizer, page_url, label,
-                            halt_on_mutation=True,
-                        )
-                        if event is None:
-                            continue  # blocked as DESTRUCTIVE
-                        discovered_routes.update(self._extract_routes(page))
-                        with self._lock:
-                            self.api_calls.extend(self._extract_api_calls(page))
-                        if event.halted:
-                            break  # stop this selector's loop on mutation
+                        if self._is_destructive(el.inner_text()):
+                            continue
+                        el.click(timeout=800)
+                        stabilizer.wait_after_interaction(max_ms=800)
                     except Exception:
                         pass
             except Exception:
                 pass
 
-        # ── Phase 3: Dropdown toggles ─────────────────────────────────────────
+        # Phase 3: Dropdown toggles
         try:
-            dropdowns = page.query_selector_all(
+            for el in page.query_selector_all(
                 "button[data-toggle],button[data-bs-toggle],"
                 "button[aria-expanded],.dropdown-toggle"
-            )[:10]
-            for el in dropdowns:
+            )[:8]:
                 try:
                     if not el.is_visible() or not el.is_enabled():
                         continue
-                    label = f"dropdown:{(el.inner_text() or '')[:40].strip()}"
-                    event = self._safe_interact_element(
-                        page, el, stabilizer, page_url, label,
-                        halt_on_mutation=True,
-                    )
-                    if event is None:
+                    if self._is_destructive(el.inner_text()):
                         continue
-                    discovered_routes.update(self._extract_routes(page))
-                    try:
-                        page.keyboard.press("Escape")
-                        stabilizer.wait_after_interaction(max_ms=300)
-                    except Exception:
-                        pass
-                    if event.halted:
-                        break
+                    el.click(timeout=800)
+                    stabilizer.wait_after_interaction(max_ms=600)
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # ── Phase 4: Nav hover + revealed link harvest ────────────────────────
-        # Hover is read-only. We only collect hrefs from what becomes visible,
-        # never click the sub-links directly.
+        # Phase 4: Hover over nav items
         try:
-            nav_items = page.query_selector_all(
-                ".dropdown,.has-submenu,nav > ul > li,[class*='nav-item']"
-            )[:8]
-            for el in nav_items:
+            for el in page.query_selector_all(
+                ".dropdown,.has-submenu,nav > ul > li"
+            )[:6]:
                 try:
-                    if not el.is_visible():
-                        continue
-                    el.hover(timeout=600)
-                    stabilizer.wait_after_interaction(max_ms=500)
-                    for link in el.query_selector_all("a[href]")[:4]:
-                        href = link.get_attribute("href") or ""
-                        if href.startswith("/") and not self._is_destructive(link.inner_text()):
-                            discovered_routes.add(href.split("?")[0].split("#")[0])
-                    discovered_routes.update(self._extract_routes(page))
+                    if el.is_visible():
+                        el.hover(timeout=600)
+                        stabilizer.wait_after_interaction(max_ms=400)
                 except Exception:
                     pass
         except Exception:
             pass
-
-        # ── Phase 5: Stepper / wizard navigation ──────────────────────────────
-        # These may be CAUTION. Executed under full observation; mutation halts.
-        stepper_selectors = [
-            "button[aria-label*='next' i]", "button[aria-label*='continue' i]",
-            "[class*='stepper'] [class*='step']:not([class*='active'])",
-            "[class*='wizard'] [class*='step']",
-            "li[class*='step']:not([class*='active']):not([class*='complete'])",
-        ]
-        for sel in stepper_selectors:
-            try:
-                for el in page.query_selector_all(sel)[:4]:
-                    try:
-                        if not el.is_visible() or not el.is_enabled():
-                            continue
-                        label = f"stepper:{sel}:{(el.inner_text() or '')[:40].strip()}"
-                        event = self._safe_interact_element(
-                            page, el, stabilizer, page_url, label,
-                            halt_on_mutation=True,
-                        )
-                        if event is None:
-                            continue
-                        discovered_routes.update(self._extract_routes(page))
-                        with self._lock:
-                            self.api_calls.extend(self._extract_api_calls(page))
-                        if event.halted:
-                            break
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        return discovered_routes
 
     def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
         """
@@ -1529,50 +878,6 @@ class HeadlessEngine:
         except Exception:
             pass
 
-    def _interaction_url_harvest(self, page, stabilizer: PageStabilizer) -> Set[str]:
-        """
-        After all interactions on a page are done, do a final harvest:
-        - Collect all href attributes visible in the DOM (including those revealed by interactions)
-        - Extract data-* route attributes added dynamically
-        - Read window.location history if available
-        """
-        harvested: Set[str] = set()
-        try:
-            # All anchor hrefs now visible in DOM (including inside opened accordions/tabs)
-            hrefs = page.evaluate("""
-                Array.from(document.querySelectorAll('a[href]'))
-                    .map(a => a.getAttribute('href'))
-                    .filter(h => h && h.startsWith('/') && !h.startsWith('//'))
-                    .map(h => h.split('?')[0].split('#')[0])
-                    .filter(h => h.length > 1);
-            """) or []
-            harvested.update(hrefs)
-
-            # data-href, data-url, data-path attributes
-            data_attrs = page.evaluate("""
-                Array.from(document.querySelectorAll('[data-href],[data-url],[data-path],[href-to],[to]'))
-                    .map(el => el.getAttribute('data-href') || el.getAttribute('data-url') ||
-                               el.getAttribute('data-path') || el.getAttribute('href-to') || el.getAttribute('to'))
-                    .filter(v => v && v.startsWith('/'))
-                    .map(v => v.split('?')[0].split('#')[0])
-                    .filter(v => v.length > 1);
-            """) or []
-            harvested.update(data_attrs)
-
-            # Check pushState history stack if we intercepted it
-            history_routes = page.evaluate("""
-                (function() {
-                    try {
-                        return (window.__bspy_nav_history || []).filter(u => u && u.startsWith('/'));
-                    } catch(e) { return []; }
-                })()
-            """) or []
-            harvested.update(history_routes)
-
-        except Exception:
-            pass
-        return harvested
-
     def _visit_page(self, page, url: str, context_page: str) -> Set[str]:
         """Visit a single page and extract all intelligence."""
 
@@ -1603,14 +908,11 @@ class HeadlessEngine:
 
             # Interact if enabled
             if self.interact:
-                interaction_routes = self._interact(page, stabilizer)
-                new_routes = self._extract_routes(page)
-                new_routes.update(interaction_routes)
+                self._interact(page, stabilizer)
                 self._observe_forms(page, stabilizer)
-            else:
-                # Extract everything
-                new_routes = self._extract_routes(page)
 
+            # Extract everything
+            new_routes  = self._extract_routes(page)
             api_calls   = self._extract_api_calls(page)
             ws_urls     = self._extract_ws_urls(page)
             worker_urls = self._extract_worker_urls(page)
@@ -1860,19 +1162,6 @@ class HeadlessEngine:
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
 
-            # Final DOM harvest for revealed links
-            try:
-                hrefs = page.evaluate("""
-                    Array.from(document.querySelectorAll('a[href]'))
-                        .map(a => a.getAttribute('href'))
-                        .filter(h => h && h.startsWith('/') && !h.startsWith('//'))
-                        .map(h => h.split('?')[0].split('#')[0])
-                        .filter(h => h.length > 1);
-                """) or []
-                new_routes.update(hrefs)
-            except Exception:
-                pass
-
             # Reset interceptor buffers for next page
             try:
                 page.evaluate("""
@@ -1899,9 +1188,6 @@ class HeadlessEngine:
 
         logger.info("Starting headless engine: %s", self.target_url)
         self.timer.start("total")
-
-        # Start inline chunk analyzer - runs throughout the entire session
-        self._chunk_analyzer.start()
 
         _seen_dom_states: Set[str] = set()
 
@@ -2017,31 +1303,21 @@ class HeadlessEngine:
             self.timer.stop("phase1_root")
             logger.info("Phase 1 done: %d routes", len(self.routes))
 
-            # ── Phase 2: Live queue — grows as inline analysis discovers new routes ─
-            # Routes found by the background _InlineChunkAnalyzer are fed back
-            # into this queue so they get visited in the same browser session,
-            # not after run() returns. The queue empties naturally; after each
-            # page visit we drain any new routes that the analyzer produced.
+            # ── Phase 2: Visit routes on same page/context — no context reload ─
             self.timer.start("phase2_routes")
+            urls_to_visit = self._build_urls(self.routes)
+            urls_to_visit = sorted(urls_to_visit, key=_route_priority)
+            remaining     = self.max_pages - self.pages_visited
+            urls_to_visit = urls_to_visit[:max(0, remaining)]
 
-            # Build the initial queue from known routes
-            _initial_urls = self._build_urls(self.routes)
-            _initial_urls = sorted(_initial_urls, key=_route_priority)
-            _visit_queue  = deque(_initial_urls)
-            _queued_set   = set(_initial_urls)  # prevent re-queuing same URL
-
+            new_routes_found: Set[str] = set()
             login_loop_count = 0
 
-            while _visit_queue and self.pages_visited < self.max_pages:
-                url = _visit_queue.popleft()
+            for url in urls_to_visit:
+                if self.pages_visited >= self.max_pages:
+                    break
 
                 if not self.registry.register_url(url):
-                    # Drain new inline routes before continuing
-                    for new_route in list(self._chunk_analyzer.inline_routes):
-                        for nu in self._build_urls({new_route}):
-                            if nu not in _queued_set:
-                                _queued_set.add(nu)
-                                _visit_queue.append(nu)
                     continue
 
                 safe, _ = validate_url(url)
@@ -2058,7 +1334,7 @@ class HeadlessEngine:
                     if _is_login_url(final_url) and not _is_login_url(url):
                         login_loop_count += 1
                         if login_loop_count >= 2:
-                            logger.warning("Login loop - stopping route exploration")
+                            logger.warning("Login loop — stopping route exploration")
                             break
                         continue
 
@@ -2067,73 +1343,22 @@ class HeadlessEngine:
                     fp = self._dom_fingerprint(page)
                     if fp and fp in _seen_dom_states:
                         logger.debug("Duplicate DOM state, skipping: %s", url)
-                        # Still drain new inline routes even for skipped pages
-                        for new_route in list(self._chunk_analyzer.inline_routes):
-                            for nu in self._build_urls({new_route}):
-                                if nu not in _queued_set:
-                                    _queued_set.add(nu)
-                                    _visit_queue.append(nu)
                         continue
                     if fp:
                         _seen_dom_states.add(fp)
 
                     if self.interact:
-                        interaction_routes = self._interact(page, stabilizer)
-                        for r in interaction_routes:
-                            self._add_route(r)
+                        self._interact(page, stabilizer)
                         self._observe_forms(page, stabilizer)
 
                     new_routes = self._flush_page_intel(page, url)
-                    for r in new_routes:
-                        if self._add_route(r):
-                            for nu in self._build_urls({r}):
-                                if nu not in _queued_set:
-                                    _queued_set.add(nu)
-                                    _visit_queue.append(nu)
+                    new_routes_found.update(new_routes)
 
                 except Exception as e:
                     logger.debug("Error visiting %s: %s", url, e)
 
-                # After each page, drain newly discovered inline routes into the queue.
-                # This is the core of iterative route discovery - new routes from
-                # JS chunk analysis get visited in this same session.
-                for new_route in list(self._chunk_analyzer.inline_routes):
-                    for nu in self._build_urls({new_route}):
-                        if nu not in _queued_set:
-                            _queued_set.add(nu)
-                            _visit_queue.append(nu)
-
-            # Brief drain window - let analyzer finish any in-flight chunks
-            # before we close the browser and stop the queue
-            try:
-                page.wait_for_timeout(400)
-            except Exception:
-                pass
-            # Final drain of inline routes found in the last drain window
-            for new_route in list(self._chunk_analyzer.inline_routes):
-                for nu in self._build_urls({new_route}):
-                    if nu not in _queued_set and self.pages_visited < self.max_pages:
-                        _queued_set.add(nu)
-                        # Visit remaining inline-only routes if budget allows
-                        if not self.registry.register_url(nu):
-                            continue
-                        safe, _ = validate_url(nu)
-                        if not safe or not self.scope.in_scope(nu):
-                            continue
-                        try:
-                            page.goto(nu, timeout=self.timeout * 1000,
-                                      wait_until="domcontentloaded")
-                            with self._lock:
-                                self.pages_visited += 1
-                            stabilizer.wait_for_framework(max_ms=2000)
-                            fp = self._dom_fingerprint(page)
-                            if fp and fp not in _seen_dom_states:
-                                _seen_dom_states.add(fp)
-                                extra_routes = self._flush_page_intel(page, nu)
-                                for r in extra_routes:
-                                    self._add_route(r)
-                        except Exception as e:
-                            logger.debug("Final inline route visit error %s: %s", nu, e)
+            for r in new_routes_found:
+                self._add_route(r)
 
             self.timer.stop("phase2_routes")
 
@@ -2143,75 +1368,40 @@ class HeadlessEngine:
                 pass
             browser.close()
 
-        # ── Stop inline analyzer and drain remaining queue ────────────────────
-        # Give the worker up to 8s to finish any chunks still in queue
-        self._chunk_analyzer.stop(timeout=8.0)
-
-        # Merge inline-discovered routes (may include routes found in chunks
-        # that were loaded late - ensure they are in self.routes)
-        for r in self._chunk_analyzer.inline_routes:
-            self._add_route(r)
-
         # ── Phase 3: Build endpoints ──────────────────────────────────────────
         self.timer.start("endpoint_build")
         self.endpoints = self._api_calls_to_endpoints()
-
-        # Merge inline endpoints (discovered from chunk analysis) into endpoints
-        # Use canonical key dedup to avoid duplicates with network-intercepted ones
-        _seen_ep_keys: Set[str] = {
-            ep.url.rstrip("/").lower().split("?")[0]
-            for ep in self.endpoints
-        }
-        for ep in self._chunk_analyzer.inline_endpoints:
-            key = ep.url.rstrip("/").lower().split("?")[0]
-            if key not in _seen_ep_keys:
-                _seen_ep_keys.add(key)
-                self.endpoints.append(ep)
-
         self.timer.stop("endpoint_build")
         self.timer.stop("total")
 
         timings = self.timer.summary()
-        workers_found    = [js for js in self.js_files if js.technology == "webworker"]
-        inline_findings  = self._chunk_analyzer.inline_findings
-        inline_endpoints = self._chunk_analyzer.inline_endpoints
-        chunks_analyzed  = len([
-            js for js in self.js_files
-            if getattr(js, "technology", "") not in ("webworker",)
-        ])
+        workers_found = [js for js in self.js_files if js.technology == "webworker"]
 
         stats = {
-            "pages":            self.pages_visited,
-            "js":               len(self.js_files),
-            "xhr":              sum(1 for c in self.api_calls if c.get("type") == "xhr"),
-            "fetch":            sum(1 for c in self.api_calls if c.get("type") == "fetch"),
-            "ws":               len(self.ws_urls),
-            "routes":           len(self.routes),
-            "endpoints":        len(self.endpoints),
-            "workers":          len(workers_found),
-            "chunks_analyzed":  chunks_analyzed,
-            "inline_findings":  len(inline_findings),
-            "inline_endpoints": len(inline_endpoints),
-            "inline_routes":    len(self._chunk_analyzer.inline_routes),
-            "timings":          timings,
+            "pages":     self.pages_visited,
+            "js":        len(self.js_files),
+            "xhr":       sum(1 for c in self.api_calls if c.get("type") == "xhr"),
+            "fetch":     sum(1 for c in self.api_calls if c.get("type") == "fetch"),
+            "ws":        len(self.ws_urls),
+            "routes":    len(self.routes),
+            "endpoints": len(self.endpoints),
+            "workers":   len(workers_found),
+            "timings":   timings,
         }
 
         logger.info(
-            "Headless done: %d pages, %d JS, %d routes, %d inline findings, %.1fs total",
+            "Headless done: %d pages, %d JS, %d routes, %.1fs total",
             self.pages_visited, len(self.js_files),
-            len(self.routes), len(inline_findings), timings.get("total", 0),
+            len(self.routes), timings.get("total", 0),
         )
         return {
-            "js_files":        self.js_files,
-            "endpoints":       self.endpoints,
-            "routes":          list(self.routes),
-            "api_calls":       self.api_calls,
-            "stats":           stats,
-            "timings":         timings,
-            "auth_result":     self.auth_result,
-            "interaction_log": self.interaction_log,
-            "inline_findings": inline_findings,
-            "analyzed_hashes": self._chunk_analyzer._analyzed_hashes,
+            "js_files":   self.js_files,
+            "endpoints":  self.endpoints,
+            "routes":     list(self.routes),
+            "api_calls":  self.api_calls,
+            "stats":      stats,
+            "timings":    timings,
+            "auth_result": self.auth_result,
         }
 
 def _playwright_available() -> bool:
