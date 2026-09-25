@@ -311,6 +311,15 @@ class ProvenanceSummary:
     public:         int = 0   # Confirmed publicly accessible
     unknown_access: int = 0   # Access level not determined
 
+    # Stage 6: Route state breakdown (endpoints only — populated when page_states available)
+    route_discovered:    int = 0
+    route_visited:       int = 0
+    route_observed:      int = 0
+    route_auth_required: int = 0
+    route_forbidden:     int = 0
+    route_redirected:    int = 0
+    route_unreachable:   int = 0
+
     def to_dict(self) -> Dict:
         return {
             "total":           self.total,
@@ -330,6 +339,15 @@ class ProvenanceSummary:
                 "auth_required":  self.auth_required,
                 "public":         self.public,
                 "unknown":        self.unknown_access,
+            },
+            "by_route_state": {
+                "discovered":    self.route_discovered,
+                "visited":       self.route_visited,
+                "observed":      self.route_observed,
+                "auth_required": self.route_auth_required,
+                "forbidden":     self.route_forbidden,
+                "redirected":    self.route_redirected,
+                "unreachable":   self.route_unreachable,
             },
         }
 
@@ -436,5 +454,16 @@ def build_coverage_ledger(findings: list, endpoints: list) -> CoverageLedger:
         if al == "AUTHENTICATED":   eps.auth_required  += 1
         elif al == "PUBLIC":        eps.public         += 1
         else:                       eps.unknown_access += 1
+
+        # Stage 6: Route state breakdown from endpoint.route_state
+        rs = getattr(ep, "route_state", "DISCOVERED")
+        if rs == "DISCOVERED":      eps.route_discovered    += 1
+        elif rs == "VISITED":       eps.route_visited       += 1
+        elif rs == "OBSERVED":      eps.route_observed      += 1
+        elif rs == "AUTH_REQUIRED": eps.route_auth_required += 1
+        elif rs == "FORBIDDEN":     eps.route_forbidden     += 1
+        elif rs == "REDIRECTED":    eps.route_redirected    += 1
+        elif rs == "UNREACHABLE":   eps.route_unreachable   += 1
+        else:                       eps.route_discovered    += 1  # fallback
 
     return ledger
