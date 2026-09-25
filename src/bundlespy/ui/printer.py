@@ -943,10 +943,102 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
                 if auth:
                     _p(f"  {A.YELLOW}         auth: {auth}{A.RESET}")
 
+                # Stage 6: access state and route state
+                access_state = getattr(ep, "access_state", "UNKNOWN")
+                route_state  = getattr(ep, "route_state",  "DISCOVERED")
+                http_status  = getattr(ep, "http_status",  0)
+
+                state_color = {
+                    "PUBLIC":        A.GREEN,
+                    "AUTHENTICATED": A.YELLOW,
+                    "PRIVILEGED":    A.ORANGE,
+                    "UNKNOWN":       A.GREY,
+                }.get(access_state, A.GREY)
+
+                route_color = {
+                    "VISITED":       A.GREEN,
+                    "OBSERVED":      A.CYAN,
+                    "AUTH_REQUIRED": A.YELLOW,
+                    "FORBIDDEN":     A.RED,
+                    "REDIRECTED":    A.ORANGE,
+                    "UNREACHABLE":   A.GREY,
+                    "DISCOVERED":    A.GREY,
+                }.get(route_state, A.GREY)
+
+                status_str = f"  HTTP {http_status}" if http_status else ""
+                _p(f"  {state_color}         access: {access_state}{A.RESET}  {route_color}{route_state}{A.RESET}{A.GREY}{status_str}{A.RESET}")
+
             shown += 1
 
     if shown >= limit and not verbose:
         _p(f"\n  {A.GREY}  ... use -v to show all {len(endpoints)} endpoints{A.RESET}")
+    _p()
+
+
+# ── Stage 6: Application State Intelligence ───────────────────────────────────
+
+def print_state_intelligence(report) -> None:
+    """
+    Print the APPLICATION STATE INTELLIGENCE section.
+
+    Parameters
+    ──────────
+    report : StateIntelligenceReport  (from state_intelligence.build_state_intelligence_report)
+    """
+    if not report or report.total_urls == 0:
+        return
+
+    _section("APPLICATION STATE INTELLIGENCE", "", A.CYAN)
+
+    # ── Access state summary ──────────────────────────────────────────────────
+    _p(f"  {_label('URLs observed')} {report.total_urls}")
+    _p()
+
+    col_map = {
+        "PUBLIC":        A.GREEN,
+        "AUTHENTICATED": A.YELLOW,
+        "PRIVILEGED":    A.ORANGE,
+        "UNKNOWN":       A.GREY,
+    }
+
+    access_rows = [
+        ("PUBLIC",        report.public),
+        ("AUTHENTICATED", report.authenticated),
+        ("PRIVILEGED",    report.privileged),
+        ("UNKNOWN",       report.unknown),
+    ]
+    for label_str, count in access_rows:
+        if count:
+            c = col_map.get(label_str, A.GREY)
+            _p(f"  {c}{label_str:<16}{A.RESET}  {count}")
+
+    _p()
+
+    # ── Route state breakdown ─────────────────────────────────────────────────
+    route_rows = [
+        ("VISITED",       report.visited,       A.GREEN),
+        ("OBSERVED",      report.observed,       A.CYAN),
+        ("AUTH_REQUIRED", report.auth_required,  A.YELLOW),
+        ("FORBIDDEN",     report.forbidden,      A.RED),
+        ("REDIRECTED",    report.redirected,     A.ORANGE),
+        ("UNREACHABLE",   report.unreachable,    A.GREY),
+        ("DISCOVERED",    report.discovered,     A.GREY),
+    ]
+    for rs_label, count, color in route_rows:
+        if count:
+            _p(f"  {color}{rs_label:<16}{A.RESET}  {count}")
+
+    # ── Notable URLs ──────────────────────────────────────────────────────────
+    if report.auth_gated_urls or report.forbidden_urls:
+        _p()
+        for url in report.auth_gated_urls[:5]:
+            _p(f"  {A.YELLOW}AUTH_REQUIRED{A.RESET}  {url}")
+        for url in report.forbidden_urls[:5]:
+            _p(f"  {A.RED}FORBIDDEN    {A.RESET}  {url}")
+        if report.redirected_urls:
+            for url in report.redirected_urls[:3]:
+                _p(f"  {A.ORANGE}REDIRECTED   {A.RESET}  {url}")
+
     _p()
 
 
