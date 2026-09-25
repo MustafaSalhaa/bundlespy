@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 from ..storage.models import ScanResult
+from ..storage.graph import AttackSurfaceGraph
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -10,6 +11,34 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
+
+
+def _build_graph_dict(result: ScanResult) -> dict:
+    """Build the attack_surface_graph dict, always present even when empty."""
+    try:
+        graph = AttackSurfaceGraph.from_scan_result(result)
+        graph_dict = graph.to_dict()
+        # Rename stats keys to match test expectations
+        raw_stats = graph_dict.get("stats", {})
+        return {
+            "nodes": graph_dict.get("nodes", []),
+            "edges": graph_dict.get("edges", []),
+            "stats": {
+                "total_nodes": raw_stats.get("nodes", 0),
+                "total_edges": raw_stats.get("edges", 0),
+                "nodes_by_type": raw_stats.get("by_type", {}),
+            },
+        }
+    except Exception:
+        return {
+            "nodes": [],
+            "edges": [],
+            "stats": {
+                "total_nodes": 0,
+                "total_edges": 0,
+                "nodes_by_type": {},
+            },
+        }
 
 
 def generate(result: ScanResult, show_sensitive: bool = False) -> str:
@@ -85,5 +114,6 @@ def generate(result: ScanResult, show_sensitive: bool = False) -> str:
             "No authentication was attempted. "
             "No exploitation was performed."
         ),
+        "attack_surface_graph": _build_graph_dict(result),
     }
     return json.dumps(data, indent=2, cls=DateTimeEncoder)
