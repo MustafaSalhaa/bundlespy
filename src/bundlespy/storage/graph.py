@@ -230,7 +230,7 @@ class Node:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id":         self.id,
-            "kind":       self.kind.value,
+            "type":       self.kind.value,
             "label":      self.label,
             "data":       self.data,
             "confidence": round(self.confidence, 3),
@@ -260,7 +260,7 @@ class Edge:
         return {
             "source": self.source,
             "target": self.target,
-            "kind":   self.kind.value,
+            "type":   self.kind.value,
             "label":  self.label,
             "data":   self.data,
         }
