@@ -86,47 +86,126 @@ class TraceStep:
     """
     One hop in an attack-path trace through the graph.
 
-    A trace is an ordered sequence of TraceSteps that describes how an
-    attacker can move from an entry point (e.g. a public page) to a high-value
-    target (e.g. an exposed secret or a privileged API endpoint).
+    Each step records the edge traversed and both endpoint nodes so callers
+    never need a graph lookup to inspect a path.
 
     Attributes
     ----------
-    node_id : str
-        ID of the node at this step (matches a Node.id in the same graph).
-    node_kind : NodeType
-        Kind of the node at this step (convenience copy to avoid extra lookups).
-    label : str
-        Human-readable label for the node (file name, URL path, rule name, …).
-    edge_kind : EdgeType | None
-        The edge type used to arrive at this step.  None for the first step.
+    from_node : Node
+        Node at the start of this hop (source side of the edge).
+    to_node : Node
+        Node at the end of this hop (target side of the edge).
+    edge : Edge
+        The edge that connects from_node to to_node.
+    evidence : str
+        Human-readable string explaining why this hop is significant.
     depth : int
-        Zero-based depth in the trace (0 = entry point).
-    confidence : float
-        Propagated confidence for this particular path (product of all edge
-        confidences from the root to this step).
-    data : dict
-        Arbitrary per-step metadata (e.g. severity, category) copied from the
-        underlying node for convenient access without a graph lookup.
+        Zero-based position of this step within its path (0 = first hop).
     """
-    node_id:    str
-    node_kind:  NodeType
-    label:      str
-    edge_kind:  Optional[EdgeType]  = None
-    depth:      int                  = 0
-    confidence: float                = 1.0
-    data:       Dict[str, Any]       = field(default_factory=dict)
+    from_node: "Node"
+    to_node:   "Node"
+    edge:      "Edge"
+    evidence:  str  = ""
+    depth:     int  = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "node_id":    self.node_id,
-            "node_kind":  self.node_kind.value,
-            "label":      self.label,
-            "edge_kind":  self.edge_kind.value if self.edge_kind else None,
-            "depth":      self.depth,
-            "confidence": round(self.confidence, 3),
-            "data":       self.data,
+            "from_node": self.from_node.to_dict(),
+            "to_node":   self.to_node.to_dict(),
+            "edge":      self.edge.to_dict(),
+            "evidence":  self.evidence,
+            "depth":     self.depth,
         }
+
+
+@dataclass
+class TraceResult:
+    """
+    The output of a single trace operation on the graph.
+
+    Attributes
+    ----------
+    origin : Node
+        The node the trace started from.
+    paths : list[list[TraceStep]]
+        Each inner list is one complete path from origin to a leaf.
+        Paths are sorted deterministically (by edge keys).
+    direction : str
+        "downstream" or "upstream".
+    truncated : bool
+        True when max_depth or max_nodes stopped the traversal early.
+    """
+    origin:    "Node"
+    paths:     List[List[TraceStep]]
+    direction: str  = "downstream"
+    truncated: bool = False
+
+    def all_nodes(self) -> List["Node"]:
+        """Deduplicated list of every node touched across all paths."""
+        seen: Dict[str, "Node"] = {}
+        seen[self.origin.id] = self.origin
+        for path in self.paths:
+            for step in path:
+                seen[step.from_node.id] = step.from_node
+                seen[step.to_node.id]   = step.to_node
+        return list(seen.values())
+
+    def endpoints(self) -> List["Node"]:
+        return [n for n in self.all_nodes() if n.kind == NodeType.ENDPOINT]
+
+    def secrets(self) -> List["Node"]:
+        return [n for n in self.all_nodes() if n.kind == NodeType.SECRET]
+
+    def to_dict(self) -> Dict[str, Any]:
+        nodes = self.all_nodes()
+        eps   = self.endpoints()
+        secs  = self.secrets()
+        return {
+            "origin":    self.origin.to_dict(),
+            "direction": self.direction,
+            "truncated": self.truncated,
+            "summary": {
+                "total_paths":    len(self.paths),
+                "total_nodes":    len(nodes),
+                "endpoints":      len(eps),
+                "secrets":        len(secs),
+            },
+            "paths": [
+                [step.to_dict() for step in path]
+                for path in self.paths
+            ],
+        }
+
+
+# ── Evidence helper ────────────────────────────────────────────────────────────
+
+def _evidence_for_edge(edge: "Edge", src: "Node", tgt: "Node") -> str:
+    """Return a human-readable evidence string for a graph edge."""
+    kind = edge.kind
+    src_label = src.label or src.id
+    tgt_label = tgt.label or tgt.id
+    src_url   = src.data.get("url", "")
+
+    if kind == EdgeType.LOADS:
+        return f"Page loads script: {tgt_label}"
+    if kind == EdgeType.CALLS:
+        return f"Script calls endpoint: {tgt_label}"
+    if kind == EdgeType.EXPOSES:
+        return f"Script exposes secret: {tgt_label}"
+    if kind == EdgeType.IMPORTS:
+        return f"Script imports: {tgt_label}"
+    if kind == EdgeType.HOSTS:
+        return f"Host {src_label} serves endpoint: {tgt_label}"
+    if kind == EdgeType.OBSERVED_ON:
+        return f"Endpoint observed on page: {tgt_label}"
+    if kind == EdgeType.RELATED_TO:
+        return f"Secret related to endpoint: {tgt_label}"
+    if kind == EdgeType.RECOVERS:
+        return f"Script recovers source map: {tgt_label}"
+    if kind == EdgeType.REFERENCES:
+        return f"Page references: {tgt_label}"
+    # Fallback
+    return f"{src_label} --[{kind.value}]--> {tgt_label}"
 
 
 # ── Core node ─────────────────────────────────────────────────────────────────
@@ -352,6 +431,206 @@ class AttackSurfaceGraph:
             "edges":      len(self._edges),
             "by_type":    counts,
         }
+
+    # ── Trace engine ──────────────────────────────────────────────────────────
+
+    def trace_downstream(
+        self,
+        origin_id:          str,
+        max_depth:          int  = 10,
+        max_nodes:          int  = 500,
+        include_related_to: bool = False,
+    ) -> "TraceResult":
+        """
+        BFS/DFS from *origin_id* following edges in their natural direction.
+
+        Returns a TraceResult whose paths each end at a leaf node (one with
+        no outgoing edges under the current filters, or at max_depth).
+
+        RELATED_TO edges are excluded by default to keep paths clean; pass
+        include_related_to=True to include them.
+        """
+        origin = self._nodes.get(origin_id)
+        if origin is None:
+            # Return an empty result with a synthetic stub node so callers
+            # never have to guard against origin being None.
+            stub = Node(id=origin_id, kind=NodeType.PAGE, label=origin_id)
+            return TraceResult(origin=stub, paths=[], direction="downstream")
+
+        _excluded = set() if include_related_to else {EdgeType.RELATED_TO}
+
+        paths:     List[List[TraceStep]] = []
+        truncated: bool                  = False
+        visited_nodes: Set[str]          = set()
+
+        # Each stack entry: (current_node_id, path_so_far, visited_in_branch)
+        stack: List[tuple] = [(origin_id, [], {origin_id})]
+
+        while stack:
+            node_id, current_path, branch_visited = stack.pop()
+
+            outgoing = [
+                e for e in self._edges
+                if e.source == node_id and e.kind not in _excluded
+            ]
+            # Sort for determinism
+            outgoing.sort(key=lambda e: (e.kind.value, e.target))
+
+            if not outgoing or len(current_path) >= max_depth:
+                # Leaf (or depth limit) — record path if non-empty
+                if current_path:
+                    paths.append(current_path)
+                if len(current_path) >= max_depth and outgoing:
+                    truncated = True
+                continue
+
+            for edge in outgoing:
+                tgt_id = edge.target
+                if tgt_id in branch_visited:
+                    # Cycle guard
+                    continue
+                tgt_node = self._nodes.get(tgt_id)
+                if tgt_node is None:
+                    continue
+
+                visited_nodes.add(tgt_id)
+                if len(visited_nodes) > max_nodes:
+                    truncated = True
+                    # Seal current path and stop expanding
+                    if current_path:
+                        paths.append(current_path)
+                    break
+
+                src_node = self._nodes[node_id]
+                step = TraceStep(
+                    from_node = src_node,
+                    to_node   = tgt_node,
+                    edge      = edge,
+                    evidence  = _evidence_for_edge(edge, src_node, tgt_node),
+                    depth     = len(current_path),
+                )
+                new_path    = current_path + [step]
+                new_visited = branch_visited | {tgt_id}
+                stack.append((tgt_id, new_path, new_visited))
+
+        # Sort paths deterministically
+        def _path_key(p: List[TraceStep]) -> tuple:
+            return tuple((s.edge.source, s.edge.kind.value, s.edge.target) for s in p)
+
+        paths.sort(key=_path_key)
+
+        return TraceResult(
+            origin    = origin,
+            paths     = paths,
+            direction = "downstream",
+            truncated = truncated,
+        )
+
+    def trace_upstream(
+        self,
+        origin_id: str,
+        max_depth: int = 10,
+        max_nodes: int = 500,
+    ) -> "TraceResult":
+        """
+        Walk edges in *reverse* from *origin_id* to find what leads to it.
+        Useful for tracing a secret or endpoint back to the page that exposed it.
+        """
+        origin = self._nodes.get(origin_id)
+        if origin is None:
+            stub = Node(id=origin_id, kind=NodeType.ENDPOINT, label=origin_id)
+            return TraceResult(origin=stub, paths=[], direction="upstream")
+
+        paths:     List[List[TraceStep]] = []
+        truncated: bool                  = False
+        visited_nodes: Set[str]          = set()
+
+        stack: List[tuple] = [(origin_id, [], {origin_id})]
+
+        while stack:
+            node_id, current_path, branch_visited = stack.pop()
+
+            incoming = [e for e in self._edges if e.target == node_id]
+            incoming.sort(key=lambda e: (e.kind.value, e.source))
+
+            if not incoming or len(current_path) >= max_depth:
+                if current_path:
+                    paths.append(current_path)
+                if len(current_path) >= max_depth and incoming:
+                    truncated = True
+                continue
+
+            for edge in incoming:
+                src_id = edge.source
+                if src_id in branch_visited:
+                    continue
+                src_node = self._nodes.get(src_id)
+                if src_node is None:
+                    continue
+
+                visited_nodes.add(src_id)
+                if len(visited_nodes) > max_nodes:
+                    truncated = True
+                    if current_path:
+                        paths.append(current_path)
+                    break
+
+                tgt_node = self._nodes[node_id]
+                step = TraceStep(
+                    from_node = src_node,
+                    to_node   = tgt_node,
+                    edge      = edge,
+                    evidence  = _evidence_for_edge(edge, src_node, tgt_node),
+                    depth     = len(current_path),
+                )
+                new_path    = current_path + [step]
+                new_visited = branch_visited | {src_id}
+                stack.append((src_id, new_path, new_visited))
+
+        def _path_key(p: List[TraceStep]) -> tuple:
+            return tuple((s.edge.source, s.edge.kind.value, s.edge.target) for s in p)
+
+        paths.sort(key=_path_key)
+
+        return TraceResult(
+            origin    = origin,
+            paths     = paths,
+            direction = "upstream",
+            truncated = truncated,
+        )
+
+    def trace_path(
+        self,
+        from_id:   str,
+        to_id:     str,
+        max_depth: int = 15,
+    ) -> "TraceResult":
+        """
+        Find all simple paths between *from_id* and *to_id*.
+        Only paths whose final step lands on *to_id* are returned.
+        """
+        result = self.trace_downstream(from_id, max_depth=max_depth, max_nodes=1000)
+        filtered = [p for p in result.paths if p and p[-1].to_node.id == to_id]
+        return TraceResult(
+            origin    = result.origin,
+            paths     = filtered,
+            direction = "downstream",
+            truncated = result.truncated,
+        )
+
+    def trace_all_from_pages(self, **kwargs) -> List["TraceResult"]:
+        """Run trace_downstream from every PAGE node in the graph."""
+        results = []
+        for node in self.nodes_of_kind(NodeType.PAGE):
+            results.append(self.trace_downstream(node.id, **kwargs))
+        return results
+
+    def trace_all_to_secrets(self, **kwargs) -> List["TraceResult"]:
+        """
+        Run trace_downstream from every PAGE node and keep only results
+        that reach at least one SECRET node.
+        """
+        return [r for r in self.trace_all_from_pages(**kwargs) if r.secrets()]
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
