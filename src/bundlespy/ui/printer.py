@@ -570,8 +570,50 @@ def _print_finding(f, verbose=False):
     if f.status == "validated":
         _p(f"  {A.RED}{A.BOLD}  ⚡ CONFIRMED ACTIVE{A.RESET}")
 
+    # Stage 5: Provenance block
+    prov = getattr(f, "provenance", None)
+    if prov is not None:
+        _print_provenance(prov)
+
     _p(f"  {A.GREY}{'─' * 60}{A.RESET}")
     _p()
+
+
+def _print_provenance(prov) -> None:
+    """
+    Print a compact provenance block for a finding or endpoint.
+    Called from _print_finding; may be called from endpoint verbose mode.
+    """
+    vs = prov.validation_status or "NOT_VALIDATED"
+    vs_color = (
+        A.GREEN  if vs == "CONFIRMED"    else
+        A.YELLOW if vs == "UNREACHABLE"  else
+        A.RED    if vs == "ERROR"        else
+        A.GREY   # NOT_VALIDATED
+    )
+    src_color = (
+        A.CYAN   if prov.source == "runtime"    else
+        A.GREEN  if prov.source == "correlated" else
+        A.GREY
+    )
+    access_color = (
+        A.GREEN  if prov.access_level == "PUBLIC"        else
+        A.YELLOW if prov.access_level == "AUTHENTICATED" else
+        A.GREY
+    )
+
+    _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
+    _p(f"  {A.GREY}Provenance{A.RESET}")
+    _p(f"  {_label('  Discovery', 14)}{src_color}{prov.source}{A.RESET}")
+    if prov.observed_at:
+        _p(f"  {_label('  Runtime', 14)}{A.GREY}{prov.observed_at[:_w()-20]}{A.RESET}")
+    if prov.correlation and prov.correlation != "single":
+        _p(f"  {_label('  Correlated', 14)}{A.CYAN}{prov.correlation}{A.RESET}")
+    _p(f"  {_label('  Status', 14)}{vs_color}{vs}{A.RESET}"
+       + (f"  {A.GREY}HTTP {prov.validation_http_status}{A.RESET}" if prov.validation_http_status else ""))
+    _p(f"  {_label('  Access', 14)}{access_color}{prov.access_level}{A.RESET}")
+    if prov.skipped_reason:
+        _p(f"  {_label('  Skipped', 14)}{A.GREY}{prov.skipped_reason[:80]}{A.RESET}")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -664,6 +706,106 @@ def print_coverage(coverage) -> None:
             if bs.mitigation:
                 _p(f"  {A.GREY}         → {bs.mitigation}{A.RESET}")
             _p()
+
+
+def print_passive_validation(report) -> None:
+    """
+    Print the passive validation summary block.
+    report is a PassiveValidationReport from passive_validator.py.
+    Only shown when at least one probe was attempted.
+    """
+    if report is None or report.probed == 0:
+        return
+
+    _section("PASSIVE VALIDATION", "", A.CYAN)
+
+    confirmed_c  = A.GREEN  if report.confirmed    else A.GREY
+    unreachable_c = A.YELLOW if report.unreachable  else A.GREY
+    error_c      = A.RED    if report.errors        else A.GREY
+
+    _p(f"  {_label('Probed',  18)}{report.probed}")
+    _p(f"  {_label('Confirmed',18)}{confirmed_c}{report.confirmed}{A.RESET}"
+       + (f"  {A.GREY}(pattern still present in live JS){A.RESET}" if report.confirmed else ""))
+    if report.unreachable:
+        _p(f"  {_label('Unreachable',18)}{unreachable_c}{report.unreachable}{A.RESET}")
+    if report.errors:
+        _p(f"  {_label('Errors',18)}{error_c}{report.errors}{A.RESET}")
+    if report.skipped:
+        _p(f"  {_label('Skipped',18)}{A.GREY}{report.skipped}{A.RESET}"
+           f"  {A.GREY}(inline/scope/low-severity){A.RESET}")
+    _p()
+
+    if report.probes:
+        _p(f"  {A.GREY}Per-finding probes:{A.RESET}")
+        for pr in report.probes[:15]:
+            vs_c = (
+                A.GREEN  if pr.validation_status == "CONFIRMED"   else
+                A.YELLOW if pr.validation_status == "UNREACHABLE" else
+                A.RED    if pr.validation_status == "ERROR"       else
+                A.GREY
+            )
+            sev_c = SEV_COLOR.get(pr.severity, "")
+            short_url = pr.source_url.split("/")[-1] if "/" in pr.source_url else pr.source_url
+            short_url = short_url[:35]
+            _p(
+                f"  {sev_c}{pr.severity:<8}{A.RESET}  "
+                f"{A.GREY}{short_url:<36}{A.RESET}  "
+                f"{vs_c}{pr.validation_status}{A.RESET}"
+                + (f"  {A.GREY}HTTP {pr.http_status}{A.RESET}" if pr.http_status else "")
+            )
+        if len(report.probes) > 15:
+            _p(f"  {A.GREY}  ... and {len(report.probes)-15} more{A.RESET}")
+        _p()
+
+
+def print_coverage_ledger(ledger) -> None:
+    """
+    Print the coverage ledger — provenance breakdown for findings and endpoints.
+    ledger is a CoverageLedger from coverage.py.
+    """
+    if ledger is None:
+        return
+
+    _section("PROVENANCE LEDGER", "", A.CYAN)
+
+    def _prov_summary(label: str, ps) -> None:
+        _p(f"  {A.WHITE}{A.BOLD}{label}{A.RESET}  {A.GREY}({ps.total} total){A.RESET}")
+        # Discovery source row
+        parts = []
+        if ps.from_static:    parts.append(f"{A.GREY}{ps.from_static} static{A.RESET}")
+        if ps.from_runtime:   parts.append(f"{A.CYAN}{ps.from_runtime} runtime{A.RESET}")
+        if ps.from_passive:   parts.append(f"{A.BLUE}{ps.from_passive} passive{A.RESET}")
+        if ps.from_correlated: parts.append(f"{A.GREEN}{ps.from_correlated} corroborated{A.RESET}")
+        if parts:
+            _p(f"  {A.GREY}  Source   {A.RESET}{'  ·  '.join(parts)}")
+        # Validation row
+        vparts = []
+        if ps.confirmed:      vparts.append(f"{A.GREEN}{ps.confirmed} confirmed{A.RESET}")
+        if ps.unreachable:    vparts.append(f"{A.YELLOW}{ps.unreachable} unreachable{A.RESET}")
+        if ps.validation_err: vparts.append(f"{A.RED}{ps.validation_err} error{A.RESET}")
+        if ps.not_validated:  vparts.append(f"{A.GREY}{ps.not_validated} not validated{A.RESET}")
+        if vparts:
+            _p(f"  {A.GREY}  Validated{A.RESET}{'  ·  '.join(vparts)}")
+        # Access row
+        aparts = []
+        if ps.public:         aparts.append(f"{A.GREEN}{ps.public} public{A.RESET}")
+        if ps.auth_required:  aparts.append(f"{A.YELLOW}{ps.auth_required} auth-gated{A.RESET}")
+        if ps.unknown_access: aparts.append(f"{A.GREY}{ps.unknown_access} unknown{A.RESET}")
+        if aparts:
+            _p(f"  {A.GREY}  Access   {A.RESET}{'  ·  '.join(aparts)}")
+        _p()
+
+    _prov_summary("Findings", ledger.findings)
+    _prov_summary("Endpoints", ledger.endpoints)
+
+    if ledger.high_critical_total > 0:
+        probed_c = A.GREEN if ledger.high_critical_probed == ledger.high_critical_total else A.YELLOW
+        _p(f"  {A.WHITE}{A.BOLD}HIGH/CRITICAL Validation{A.RESET}")
+        _p(f"  {_label('  Total', 14)}{ledger.high_critical_total}")
+        _p(f"  {_label('  Probed', 14)}{probed_c}{ledger.high_critical_probed}{A.RESET}")
+        _p(f"  {_label('  Confirmed', 14)}{A.GREEN if ledger.high_critical_confirmed else A.GREY}"
+           f"{ledger.high_critical_confirmed}{A.RESET}")
+        _p()
 
 
 def print_attack_surface(surface):
