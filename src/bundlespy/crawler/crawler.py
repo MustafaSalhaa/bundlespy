@@ -26,7 +26,7 @@ from urllib.parse import urlparse, urljoin, urldefrag, urlunparse
 from .fetcher import Fetcher
 from .scope import ScopeChecker
 from ..discovery.html import extract_js_urls, extract_links, extract_inline_scripts
-from ..storage.models import JSFile
+from ..storage.models import JSFile, RouteState, AccessState
 from ..analysis.html_scanner import scan_html
 
 logger = logging.getLogger("bundlespy.crawler")
@@ -310,6 +310,8 @@ class Crawler:
         self.html_findings:   List = []  # Findings from HTML attribute scanning
         self.errors:          List[str] = []
         self.pages_crawled:   int = 0
+        # Stage 6: HTTP status per URL visited — {url: http_status}
+        self.page_access_states: dict = {}    # url → http_status (int)
 
     def crawl(self) -> None:
         """Full crawl pipeline."""
@@ -344,6 +346,9 @@ class Crawler:
             if probe_url in self.visited_pages:
                 continue
             c_probe, s_probe, ct_probe, _ = self.fetcher.get(probe_url)
+            # Stage 6: Record status of all common-path probes
+            if s_probe and s_probe > 0:
+                self.page_access_states[probe_url] = s_probe
             if c_probe and s_probe in range(200, 300):
                 ct_low = (ct_probe or "").lower()
                 if "html" in ct_low or "text" in ct_low:
@@ -364,6 +369,10 @@ class Crawler:
         logger.debug("Crawling: %s (depth %d)", url, depth)
 
         content, status, content_type, _ = self.fetcher.get(url)
+
+        # Stage 6: Record HTTP status for every URL attempted, including non-2xx
+        if status and status > 0:
+            self.page_access_states[url] = status
 
         if not content or status not in range(200, 300):
             return
