@@ -57,6 +57,7 @@ def generate(
     show_sensitive:     bool = False,
     coverage_ledger=None,        # CoverageLedger | None
     passive_report=None,         # PassiveValidationReport | None
+    state_report=None,           # StateIntelligenceReport | None  (Stage 6)
 ) -> str:
     """Generate a JSON report from scan results."""
     data = {
@@ -98,13 +99,17 @@ def generate(
         ],
         "endpoints": [
             {
-                "url":       e.url,
-                "category":  e.category,
-                "method":    e.method,
-                "source":    e.source_file,
-                "line":      e.line_number,
+                "url":          e.url,
+                "category":     e.category,
+                "method":       e.method,
+                "source":       e.source_file,
+                "line":         e.line_number,
                 # Stage 5: provenance block
-                "provenance": _get_provenance(e, Provenance.from_endpoint),
+                "provenance":   _get_provenance(e, Provenance.from_endpoint),
+                # Stage 6: Application State Intelligence
+                "http_status":  getattr(e, "http_status",  0),
+                "access_state": getattr(e, "access_state", "UNKNOWN"),
+                "route_state":  getattr(e, "route_state",  "DISCOVERED"),
             }
             for e in result.endpoints
         ],
@@ -147,6 +152,30 @@ def generate(
     if passive_report is not None:
         try:
             data["passive_validation"] = passive_report.to_dict()
+        except Exception:
+            pass
+
+    # Stage 6: Application State Intelligence
+    if state_report is None and getattr(result, "page_states", None):
+        try:
+            from ..analysis.state_intelligence import build_state_intelligence_report
+            state_report = build_state_intelligence_report(result)
+        except Exception:
+            pass
+
+    if state_report is not None:
+        try:
+            data["state_intelligence"] = state_report.to_dict()
+        except Exception:
+            pass
+
+    # Include per-URL page_states in JSON output
+    if getattr(result, "page_states", None):
+        try:
+            data["page_states"] = {
+                url: rec.to_dict()
+                for url, rec in result.page_states.items()
+            }
         except Exception:
             pass
 
