@@ -3,10 +3,15 @@ Coverage Reporting — observed facts only, no fake percentages.
 
 Every number here comes from actual scan data.
 No scores are invented or estimated.
+
+Stage 5 additions:
+  - CoverageLedger: per-entity provenance summary (how each finding/endpoint
+    was discovered, corroborated, and validated).
+  - build_coverage_ledger(): aggregates provenance counts from ScanResult.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -277,3 +282,159 @@ def compute_coverage(
         source_maps = source_maps_stat,
         blind_spots = blind_spots,
     )
+
+
+# ── Stage 5: Coverage Ledger ──────────────────────────────────────────────────
+
+@dataclass
+class ProvenanceSummary:
+    """
+    Aggregate counts for one entity class (findings or endpoints).
+    Every field is a real observed count — nothing is estimated.
+    """
+    total:          int = 0
+
+    # ── Discovery source breakdown ────────────────────────────────────────────
+    from_static:    int = 0   # Found in static JS analysis
+    from_runtime:   int = 0   # Observed at runtime via headless browser
+    from_passive:   int = 0   # Sourced from passive recon (Wayback, etc.)
+    from_correlated: int = 0  # Found in both static and runtime
+
+    # ── Validation breakdown ──────────────────────────────────────────────────
+    not_validated:  int = 0   # No probe attempted
+    confirmed:      int = 0   # Probe returned 2xx / pattern still present
+    unreachable:    int = 0   # Probe got 4xx/5xx/timeout
+    validation_err: int = 0   # Probe raised exception
+
+    # ── Access level breakdown ────────────────────────────────────────────────
+    auth_required:  int = 0   # Known auth-gated
+    public:         int = 0   # Confirmed publicly accessible
+    unknown_access: int = 0   # Access level not determined
+
+    def to_dict(self) -> Dict:
+        return {
+            "total":           self.total,
+            "by_source": {
+                "static":      self.from_static,
+                "runtime":     self.from_runtime,
+                "passive":     self.from_passive,
+                "correlated":  self.from_correlated,
+            },
+            "by_validation": {
+                "not_validated":  self.not_validated,
+                "confirmed":      self.confirmed,
+                "unreachable":    self.unreachable,
+                "error":          self.validation_err,
+            },
+            "by_access": {
+                "auth_required":  self.auth_required,
+                "public":         self.public,
+                "unknown":        self.unknown_access,
+            },
+        }
+
+
+@dataclass
+class CoverageLedger:
+    """
+    The provenance ledger for a complete scan.
+
+    Produced by build_coverage_ledger() from a ScanResult after all
+    provenances have been populated.  Safe to attach to CoverageReport
+    or ScanResult — zero breaking changes.
+    """
+    findings:  ProvenanceSummary = field(default_factory=ProvenanceSummary)
+    endpoints: ProvenanceSummary = field(default_factory=ProvenanceSummary)
+
+    # Validation breadth: how many high/critical findings were probed
+    high_critical_total:    int = 0
+    high_critical_probed:   int = 0
+    high_critical_confirmed: int = 0
+
+    def to_dict(self) -> Dict:
+        return {
+            "findings":  self.findings.to_dict(),
+            "endpoints": self.endpoints.to_dict(),
+            "high_critical": {
+                "total":     self.high_critical_total,
+                "probed":    self.high_critical_probed,
+                "confirmed": self.high_critical_confirmed,
+            },
+        }
+
+
+def build_coverage_ledger(findings: list, endpoints: list) -> CoverageLedger:
+    """
+    Build a CoverageLedger from findings and endpoints whose provenance
+    fields have already been populated (either by passive_validator or
+    by lazy construction at report-time via Provenance.from_*).
+
+    This function is pure — no network I/O, no side effects.
+    """
+    from ..storage.models import Provenance
+
+    def _prov(obj, factory) -> "Provenance":
+        """Return the attached provenance or build a baseline from the object."""
+        p = getattr(obj, "provenance", None)
+        if p is not None:
+            return p
+        return factory(obj)
+
+    ledger = CoverageLedger()
+    fs  = ledger.findings
+    eps = ledger.endpoints
+
+    # ── Findings ──────────────────────────────────────────────────────────────
+    for f in findings:
+        fs.total += 1
+        prov = _prov(f, Provenance.from_finding)
+
+        if prov.source == "static":         fs.from_static    += 1
+        elif prov.source == "runtime":      fs.from_runtime   += 1
+        elif prov.source == "passive":      fs.from_passive   += 1
+        elif prov.source == "correlated":   fs.from_correlated += 1
+        else:                               fs.from_static    += 1  # default
+
+        vs = prov.validation_status
+        if vs == "CONFIRMED":       fs.confirmed      += 1
+        elif vs == "UNREACHABLE":   fs.unreachable    += 1
+        elif vs == "ERROR":         fs.validation_err += 1
+        else:                       fs.not_validated  += 1
+
+        al = prov.access_level
+        if al == "AUTHENTICATED":   fs.auth_required  += 1
+        elif al == "PUBLIC":        fs.public         += 1
+        else:                       fs.unknown_access += 1
+
+        # High/critical probe tracking
+        sev = getattr(f, "severity", "")
+        if sev in ("CRITICAL", "HIGH"):
+            ledger.high_critical_total += 1
+            if vs != "NOT_VALIDATED":
+                ledger.high_critical_probed += 1
+            if vs == "CONFIRMED":
+                ledger.high_critical_confirmed += 1
+
+    # ── Endpoints ─────────────────────────────────────────────────────────────
+    for ep in endpoints:
+        eps.total += 1
+        prov = _prov(ep, Provenance.from_endpoint)
+
+        if prov.source == "static":         eps.from_static    += 1
+        elif prov.source == "runtime":      eps.from_runtime   += 1
+        elif prov.source == "passive":      eps.from_passive   += 1
+        elif prov.source == "correlated":   eps.from_correlated += 1
+        else:                               eps.from_static    += 1
+
+        vs = prov.validation_status
+        if vs == "CONFIRMED":       eps.confirmed      += 1
+        elif vs == "UNREACHABLE":   eps.unreachable    += 1
+        elif vs == "ERROR":         eps.validation_err += 1
+        else:                       eps.not_validated  += 1
+
+        al = prov.access_level
+        if al == "AUTHENTICATED":   eps.auth_required  += 1
+        elif al == "PUBLIC":        eps.public         += 1
+        else:                       eps.unknown_access += 1
+
+    return ledger
