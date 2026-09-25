@@ -351,6 +351,65 @@ def _headless_html(headless_stats):
 </div>"""
 
 
+def _login_html(login_result):
+    """Render the auto-login result card for the HTML report."""
+    if not login_result:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>Auto-login was not used</p></div>'
+
+    success    = login_result.get("success", False)
+    method     = login_result.get("method", "unknown").replace("_", " ").title()
+    login_url  = login_result.get("login_url", "")
+    final_url  = login_result.get("final_url", "")
+    u_field    = login_result.get("username_field", "")
+    p_field    = login_result.get("password_field", "")
+    cookies    = login_result.get("cookies", [])
+    token_keys = login_result.get("token_keys", [])
+    ls         = login_result.get("local_storage", {})
+    ss         = login_result.get("session_storage", {})
+    error_msg  = login_result.get("error_message", "") or login_result.get("error", "")
+    steps      = login_result.get("steps", [])
+
+    sc = "#34d399" if success else "#f87171"
+    st = "SUCCESS" if success else "FAILED"
+
+    rows = [("Login URL", _e(login_url)), ("Method", _e(method))]
+    if u_field:
+        rows.append(("Username field", f"<code>{_e(u_field)}</code>"))
+    if p_field:
+        rows.append(("Password field", f"<code>{_e(p_field)}</code>"))
+    if success:
+        rows.append(("Final URL", _e(final_url)))
+        rows.append(("Cookies captured", str(len(cookies))))
+        if token_keys:
+            rows.append(("Tokens in storage", f"<code>{_e(', '.join(token_keys[:8]))}</code>"))
+        if ls:
+            rows.append(("localStorage keys", str(len(ls))))
+        if ss:
+            rows.append(("sessionStorage keys", str(len(ss))))
+    else:
+        if error_msg:
+            rows.append(("Failure reason", f'<span style="color:#f87171">{_e(error_msg[:200])}</span>'))
+
+    meta = "".join(f'<tr><td class="meta-key">{k}</td><td class="meta-val">{v}</td></tr>' for k, v in rows)
+
+    steps_html = ""
+    if steps:
+        step_rows = "".join(
+            f'<tr><td style="color:#8b949e;padding:3px 0;font-size:12px">· {_e(s)}</td></tr>'
+            for s in steps
+        )
+        steps_html = f"""<div style="margin-top:16px">
+  <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6e7681;margin-bottom:6px">Login Steps</div>
+  <table style="width:100%"><tbody>{step_rows}</tbody></table>
+</div>"""
+
+    return f"""<div style="border-left:4px solid {sc};padding-left:14px;margin-bottom:16px">
+  <div style="color:{sc};font-weight:700;font-size:15px;margin-bottom:6px">● {st}</div>
+</div>
+<table class="meta-table">{meta}</table>
+{steps_html}"""
+
+
 def _auth_html(auth_result):
     if not auth_result:
         return '<div class="empty-state"><span class="empty-icon">○</span><p>No credentials supplied — unauthenticated scan</p></div>'
@@ -464,129 +523,6 @@ def _graph_data(result):
     return _j(result.graph.to_dict())
 
 
-def _intelligence_html(intel) -> str:
-    """Render the passive intelligence section from an IntelligenceResult."""
-    if not intel:
-        return '<div class="empty-state"><span class="empty-icon">○</span><p>Passive intelligence collection was not run</p></div>'
-
-    out = []
-
-    # Technologies detected
-    techs = getattr(intel, "technologies", {})
-    if techs:
-        rows = "".join(
-            f'<tr><td class="meta-key">{_e(k)}</td><td class="meta-val"><code>{_e(v)}</code></td></tr>'
-            for k, v in techs.items()
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">Technology Stack <span style="color:var(--text3);font-weight:400;font-size:11px">({len(techs)} detected)</span></div>
-  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
-</div>""")
-
-    # Interesting headers
-    interesting = getattr(intel, "interesting_headers", [])
-    if interesting:
-        rows = "".join(
-            f'<tr><td style="padding:6px 14px;border-bottom:1px solid var(--border);color:var(--text2);font-size:12px"><code>{_e(h)}</code></td></tr>'
-            for h in interesting
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">Header Flags <span style="color:var(--text3);font-weight:400;font-size:11px">({len(interesting)} flagged)</span></div>
-  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
-</div>""")
-
-    # CSP policy
-    csp = getattr(intel, "csp_policy", {})
-    if csp:
-        rows = "".join(
-            f'<tr><td class="meta-key" style="font-family:monospace">{_e(d)}</td>'
-            f'<td class="meta-val" style="word-break:break-all">{_e(" ".join(vals))}</td></tr>'
-            for d, vals in csp.items()
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">Content Security Policy <span style="color:var(--text3);font-weight:400;font-size:11px">({len(csp)} directives)</span></div>
-  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
-</div>""")
-
-    # Sitemap URLs discovered
-    sitemap_urls = getattr(intel, "sitemap_urls", [])
-    if sitemap_urls:
-        rows = "".join(
-            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px"><code>{_e(u)}</code></td></tr>'
-            for u in sitemap_urls[:200]
-        )
-        more = f'<tr><td style="padding:5px 14px;color:var(--text3);font-size:11px">… and {len(sitemap_urls)-200} more</td></tr>' if len(sitemap_urls) > 200 else ""
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">Sitemap URLs <span style="color:var(--text3);font-weight:400;font-size:11px">({len(sitemap_urls)} discovered)</span></div>
-  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}{more}</table></div>
-</div>""")
-
-    # OpenID / OIDC config
-    oidc = getattr(intel, "openid_config", None)
-    if oidc and isinstance(oidc, dict):
-        rows = "".join(
-            f'<tr><td class="meta-key">{_e(str(k))}</td><td class="meta-val"><code style="word-break:break-all">{_e(str(v))}</code></td></tr>'
-            for k, v in list(oidc.items())[:20]
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">OpenID Configuration</div>
-  <div class="card-body" style="padding:0"><table class="meta-table">{rows}</table></div>
-</div>""")
-
-    # API schema found
-    api_schema = getattr(intel, "api_schema", None)
-    if api_schema:
-        schema_url  = api_schema.get("url", "")
-        schema_type = api_schema.get("type", "unknown")
-        schema_data = api_schema.get("schema", {})
-        paths_count = len(schema_data.get("paths", {})) if isinstance(schema_data, dict) else 0
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">API Schema Discovered</div>
-  <div class="card-body" style="padding:0"><table class="meta-table">
-    <tr><td class="meta-key">Type</td><td class="meta-val">{_e(schema_type.upper())}</td></tr>
-    <tr><td class="meta-key">URL</td><td class="meta-val"><code>{_e(schema_url)}</code></td></tr>
-    {f'<tr><td class="meta-key">Paths</td><td class="meta-val">{paths_count} endpoint paths defined</td></tr>' if paths_count else ''}
-  </table></div>
-</div>""")
-
-    # Security.txt
-    sec_txt = getattr(intel, "security_txt", None)
-    if sec_txt:
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">security.txt</div>
-  <div class="card-body"><pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-word">{_e(sec_txt[:2000])}</pre></div>
-</div>""")
-
-    # API endpoints from JSON responses
-    api_endpoints = getattr(intel, "api_endpoints", [])
-    if api_endpoints:
-        rows = "".join(
-            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px"><code>{_e(ep)}</code></td></tr>'
-            for ep in api_endpoints[:100]
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header">API Endpoints from JSON Responses <span style="color:var(--text3);font-weight:400;font-size:11px">({len(api_endpoints)} found)</span></div>
-  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
-</div>""")
-
-    # Collection errors
-    errors = getattr(intel, "errors", [])
-    if errors:
-        rows = "".join(
-            f'<tr><td style="padding:5px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text3)">{_e(e)}</td></tr>'
-            for e in errors[:20]
-        )
-        out.append(f"""<div class="card" style="margin-bottom:14px">
-  <div class="card-header" style="color:var(--text3)">Collection Errors ({len(errors)})</div>
-  <div class="card-body" style="padding:0"><table style="width:100%;border-collapse:collapse">{rows}</table></div>
-</div>""")
-
-    if not out:
-        return '<div class="empty-state"><span class="empty-icon">○</span><p>No passive intelligence gathered from this target</p></div>'
-
-    return "\n".join(out)
-
-
 # ── Main generator ────────────────────────────────────────────────────────────
 
 def generate(
@@ -615,13 +551,12 @@ def generate(
     lib_findings    = extras.get("lib_findings",      [])
     headless_stats  = extras.get("headless_stats",    {})
     auth_result     = extras.get("auth_result",       None)
+    login_result    = extras.get("login_result",      None)
     coverage        = extras.get("coverage",          None)
     sm_details      = extras.get("source_map_details",{})
     passive_stats   = extras.get("passive_stats",     {})
     chunk_stats     = extras.get("chunk_stats",       {})
     attack_surface  = extras.get("attack_surface",    {})
-    intelligence    = extras.get("intelligence",      None)
-    cache_stats     = extras.get("cache_stats",       {})
 
     gen_time   = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     scan_start = result.started_at.strftime("%Y-%m-%d %H:%M UTC") if result.started_at else "—"
@@ -649,24 +584,21 @@ def generate(
     # Headless was used?
     _headless_used = bool(headless_stats)
     _auth_used     = bool(auth_result)
+    _login_used    = bool(login_result)
     _sm_used       = bool(sm_details and sm_details.get("discovered"))
     _gql_used      = bool(graphql_schemas)
     _val_used      = bool(validation_results)
     _subs_used     = bool(subdomains)
     _passive_used  = bool(passive_stats)
-    _intel_used    = bool(intelligence)
 
     _so, _sc = "'", "'"  # quote helpers for onclick JS strings
     _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ')"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
     _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ')"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else '')
+    _nav_login    = ('<button class="nav-item" onclick="show(' + _so + 'login' + _sc + ')"><span class="nav-icon">⚿</span>Auto-Login</button>' if _login_used else '')
     _nav_srcmaps  = '<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ')"><span class="nav-icon">⎔</span>Source Maps</button>'
     _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
     _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
     _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
-    _intel_techs  = len(getattr(intelligence, "technologies", {})) if intelligence else 0
-    _intel_flags  = len(getattr(intelligence, "interesting_headers", [])) if intelligence else 0
-    _intel_badge  = f'<span class="nav-badge orange">{_intel_flags}</span>' if _intel_flags else (f'<span class="nav-badge">{_intel_techs}</span>' if _intel_techs else '')
-    _nav_intel    = ('<button class="nav-item" onclick="show(' + _so + 'intelligence' + _sc + ')"><span class="nav-icon">◐</span>Recon' + _intel_badge + '</button>' if _intel_used else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -940,7 +872,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Discovery</div>
-      {_nav_intel}
+      {_nav_login}
       {_nav_headless}
       {_nav_auth}
       {_nav_srcmaps}
@@ -997,8 +929,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
             <tr><td class="meta-key">Infrastructure</td><td class="meta-val">{len(result.infrastructure)} indicator(s)</td></tr>
             {f'<tr><td class="meta-key">Auth state</td><td class="meta-val" style="color:{("#34d399" if auth_result.get("authenticated") else "#f87171")}">{("Verified" if auth_result.get("authenticated") else "Not verified")}</td></tr>' if auth_result else ''}
             {f'<tr><td class="meta-key">Graph</td><td class="meta-val">{result.graph.stats()["nodes"]} nodes · {result.graph.stats()["edges"]} relationships</td></tr>' if result.graph else ''}
-            {f'<tr><td class="meta-key">Recon</td><td class="meta-val">{_intel_techs} tech detected · {len(getattr(intelligence,"sitemap_urls",[]))} sitemap URLs · {_intel_flags} header flags</td></tr>' if intelligence else ''}
-            {f'<tr><td class="meta-key">HTTP cache</td><td class="meta-val">{cache_stats["hits"]} hits · {cache_stats["revalidated"]} revalidated · {cache_stats["misses"]} misses · <span style="color:var(--green)">{cache_stats["saved_bytes"]/1_048_576:.1f} MB saved</span></td></tr>' if cache_stats.get("hits",0)+cache_stats.get("revalidated",0) > 0 else ''}
             {f'<tr><td class="meta-key">Scan errors</td><td class="meta-val" style="color:var(--red)">{len(result.errors)}</td></tr>' if result.errors else ''}
           </table>
         </div>
@@ -1079,6 +1009,12 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="card"><div class="card-body">{_headless_html(headless_stats)}</div></div>
     </div>
 
+    <!-- AUTO-LOGIN -->
+    <div id="section-login" class="section">
+      <div class="section-title">Auto-Login</div>
+      <div class="card"><div class="card-body">{_login_html(login_result)}</div></div>
+    </div>
+
     <!-- AUTHENTICATION -->
     <div id="section-auth" class="section">
       <div class="section-title">Authentication Verification</div>
@@ -1107,14 +1043,6 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <div id="section-subdomains" class="section">
       <div class="section-title">Subdomains <span class="count">{len(subdomains)} harvested</span></div>
       <div class="card"><div class="card-body" style="padding:0">{_subdomains_html(subdomains)}</div></div>
-    </div>
-
-    <!-- PASSIVE INTELLIGENCE / RECON -->
-    <div id="section-intelligence" class="section">
-      <div class="section-title">Passive Recon
-        <span class="count">{_intel_techs} tech · {len(getattr(intelligence,"sitemap_urls",[]))} sitemap URLs · {_intel_flags} header flags</span>
-      </div>
-      {_intelligence_html(intelligence)}
     </div>
 
     <!-- COVERAGE -->
