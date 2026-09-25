@@ -162,7 +162,12 @@ def _write_reports(
     paths   = {}
 
     if "json" in formats:
-        out = generate_json(result)
+        _ext = extras or {}
+        out = generate_json(
+            result,
+            coverage_ledger = _ext.get("coverage_ledger"),
+            passive_report  = _ext.get("passive_report"),
+        )
         d   = output_dir or "./bundlespy-reports"
         os.makedirs(d, exist_ok=True)
         p   = Path(d) / f"{stem}.json"
@@ -1204,6 +1209,42 @@ def run_scan(args) -> int:
     )
     extras["coverage"] = coverage
 
+    # ── Stage 5: Passive Validation + Coverage Ledger ─────────────────────────
+    passive_report  = None
+    coverage_ledger = None
+
+    try:
+        from .analysis.passive_validator import run_passive_validation
+        from .analysis.coverage import build_coverage_ledger
+
+        # Run passive probes on HIGH/CRITICAL findings when network available
+        # and passive-validate not explicitly disabled
+        if not getattr(args, "no_passive_validate", False):
+            phase("Stage 5 — passive validation of HIGH/CRITICAL findings")
+            passive_report = run_passive_validation(
+                findings  = all_findings,
+                scope     = scope,
+                stealth   = args.stealth,
+                rate      = min(args.rate, 3),
+                max_probes = 50,
+            )
+            if passive_report.probed:
+                phase_done(
+                    "Passive validation",
+                    f"{passive_report.confirmed} confirmed  "
+                    f"{passive_report.unreachable} unreachable  "
+                    f"{passive_report.probed} probed",
+                )
+
+        # Build coverage ledger (provenance counts across all findings + endpoints)
+        coverage_ledger = build_coverage_ledger(all_findings, all_endpoints)
+    except Exception as _s5e:
+        import logging as _s5l
+        _s5l.getLogger("bundlespy.cli").debug("Stage 5 error: %s", _s5e)
+
+    extras["passive_report"]  = passive_report
+    extras["coverage_ledger"] = coverage_ledger
+
     # ── Reports ───────────────────────────────────────────────────────────────
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
@@ -1223,6 +1264,8 @@ def run_scan(args) -> int:
             graphql_schemas     = graphql_schemas,
             subdomains          = subdomains,
             report_paths        = file_paths,
+            passive_report      = passive_report,
+            coverage_ledger     = coverage_ledger,
         )
     elif getattr(args, "silent", False):
         # Silent mode — print only findings, one per line
