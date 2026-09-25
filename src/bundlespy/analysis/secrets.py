@@ -9,7 +9,8 @@ import math
 import hashlib
 import logging
 import os
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -25,7 +26,7 @@ FP_INDICATORS = [
     "api_key_here", "xxxx", "1234567890", "abcdefgh", "changeme",
     "replace_me", "todo", "fixme", "dummy", "fake", "test_key",
     "sample", "demo", "enter_your", "<your", "your-api", "xxxxxxxx",
-    "aaaaaaaaa", "0000000000",
+    "aaaaaaaaa", "0000000000", "your_secret",
 ]
 
 
@@ -40,6 +41,7 @@ class SecretRule:
     description: str
     remediation: str
     fp_notes: str
+    min_length: int = 0
 
 
 def _shannon_entropy(value: str) -> float:
@@ -114,7 +116,6 @@ _LIBRARY_PATH_PATTERNS = [
     "/vendors~",
     "/node_modules/",
     "/lib/",
-    "/dist/",
     "/static/js/chunk-",
     "/static/js/vendors-",
     ".min.js",
@@ -218,6 +219,7 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
                 description = raw["description"],
                 remediation = raw["remediation"],
                 fp_notes    = raw.get("fp_notes", ""),
+                min_length  = int(raw.get("min_length", 0)),
             ))
         except re.error as e:
             logger.warning("Invalid regex in rule %s: %s", raw.get("id"), e)
@@ -226,18 +228,52 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
     return rules
 
 
+# Pattern to detect process.env.SECRET_NAME references
+_RE_ENV_NAME = re.compile(
+    r'process\.env\.([A-Z][A-Z0-9_]{2,})',
+)
+
+# ENV_NAME finding rule_id constant
+_ENV_NAME_RULE_ID = "ENV_NAME"
+
+
+def _decode_b64_chunks(content: str) -> List[Tuple[str, int]]:
+    """
+    Extract and decode base64 chunks from JS content.
+    Returns list of (decoded_text, original_position) tuples.
+    Only attempts chunks that are likely encoded secrets (length >= 32, valid b64).
+    """
+    results = []
+    # Match quoted base64-looking strings of sufficient length
+    b64_pattern = re.compile(r'["\x27`]([A-Za-z0-9+/]{32,}={0,2})["\x27`]')
+    for m in b64_pattern.finditer(content):
+        raw = m.group(1)
+        # Must be valid base64 length
+        if len(raw) % 4 not in (0, 2, 3):
+            continue
+        try:
+            decoded = base64.b64decode(raw + "==").decode("utf-8", errors="strict")
+            if decoded and len(decoded) >= 20:
+                results.append((decoded, m.start()))
+        except Exception:
+            pass
+    return results
+
+
 class SecretScanner:
     def __init__(self, rules_path: Optional[str] = None):
         self.rules = load_rules(rules_path)
 
-    def scan(self, content: str, file_url: str, source_page: str = "") -> List[Finding]:
-        """
-        Scan JavaScript content for secrets.
-        Returns a list of Finding objects, deduplicated by value+rule.
-        """
-        findings: List[Finding] = []
-        seen: Dict[str, Finding] = {}  # sha256 -> Finding
-
+    def _scan_content(
+        self,
+        content: str,
+        file_url: str,
+        source_page: str,
+        findings: List[Finding],
+        seen: Dict[str, Finding],
+        pos_offset: int = 0,
+    ) -> None:
+        """Inner scan loop: run all rules against content."""
         for rule in self.rules:
             for match in rule.pattern.finditer(content):
                 raw_value = match.group(0)
@@ -249,6 +285,10 @@ class SecretScanner:
                             raw_value = cap
                     except IndexError:
                         pass
+
+                # Apply min_length filter
+                if rule.min_length and len(raw_value) < rule.min_length:
+                    continue
 
                 # Check for false positives
                 is_fp, fp_reason = _is_likely_fp(raw_value)
@@ -264,6 +304,7 @@ class SecretScanner:
 
                 redacted = Finding.redact(raw_value)
                 sha256   = hashlib.sha256(f"{rule.id}:{raw_value}".encode()).hexdigest()
+                actual_pos = match.start() + pos_offset
                 context  = _get_context(content, match.start())
                 line_no  = _get_line_number(content, match.start())
 
@@ -299,5 +340,54 @@ class SecretScanner:
 
                 seen[sha256] = finding
                 findings.append(finding)
+
+    def scan(self, content: str, file_url: str, source_page: str = "") -> List[Finding]:
+        """
+        Scan JavaScript content for secrets.
+        Returns a list of Finding objects, deduplicated by value+rule.
+        """
+        findings: List[Finding] = []
+        seen: Dict[str, Finding] = {}  # sha256 -> Finding
+
+        # Primary scan on raw content
+        self._scan_content(content, file_url, source_page, findings, seen)
+
+        # Base64 decode layer: try to decode embedded b64 blobs and re-scan
+        for decoded_text, orig_pos in _decode_b64_chunks(content):
+            self._scan_content(decoded_text, file_url, source_page, findings, seen, pos_offset=orig_pos)
+
+        # ENV_NAME detection: flag process.env.SECRET_NAME references
+        for match in _RE_ENV_NAME.finditer(content):
+            env_name = match.group(1)
+            sha256 = hashlib.sha256(f"{_ENV_NAME_RULE_ID}:{env_name}".encode()).hexdigest()
+            if sha256 in seen:
+                continue
+            line_no = _get_line_number(content, match.start())
+            context = _get_context(content, match.start())
+            finding_id = Finding.make_id(_ENV_NAME_RULE_ID, env_name, file_url)
+            finding = Finding(
+                id                  = finding_id,
+                rule_id             = _ENV_NAME_RULE_ID,
+                title               = "Environment Variable Reference",
+                category            = "ENV",
+                severity            = "INFO",
+                confidence          = 0.7,
+                file_url            = file_url,
+                source_page         = source_page,
+                line_number         = line_no,
+                column              = match.start() - content.rfind("\n", 0, match.start()),
+                matched_value       = env_name,
+                redacted_value      = env_name,
+                sha256              = sha256,
+                context             = context,
+                description         = f"Secret loaded from environment variable: {env_name}",
+                impact              = "",
+                remediation         = "Verify this environment variable is not accidentally exposed at runtime.",
+                false_positive_notes = "process.env references are common and often intentional.",
+                status              = "candidate",
+                occurrences         = [f"{file_url}:{line_no}"],
+            )
+            seen[sha256] = finding
+            findings.append(finding)
 
         return findings
