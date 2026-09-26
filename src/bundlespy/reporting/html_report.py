@@ -1,5 +1,5 @@
 """
-BundleSpy HTML Report — complete professional intelligence report.
+BundleSpy HTML Report - complete professional intelligence report.
 Single self-contained file, no external dependencies except D3 (cdnjs).
 Covers every data source BundleSpy produces.
 """
@@ -24,7 +24,7 @@ def _duration(result: ScanResult) -> str:
         if s < 60:   return f"{s:.0f}s"
         if s < 3600: return f"{s//60:.0f}m {s%60:.0f}s"
         return f"{s//3600:.0f}h {(s%3600)//60:.0f}m"
-    return "—"
+    return "N/A"
 
 SEV_COLOR  = {"CRITICAL":"#f87171","HIGH":"#fb923c","MEDIUM":"#fbbf24","LOW":"#60a5fa","INFO":"#94a3b8"}
 CAT_COLOR  = {"AUTH":"#a78bfa","ADMIN":"#f87171","API":"#34d399","GRAPHQL":"#c084fc",
@@ -56,7 +56,7 @@ def _findings_html(findings, extras):
         ctx_block = ""
         if f.context:
             ctx_block = f'<div class="evidence-block"><div class="evidence-label">Context</div><code class="context-val">{_e(f.context[:300])}</code></div>'
-        pub_note = '<div class="pub-id-note">Public identifier — not a secret credential</div>' if pub else ""
+        pub_note = '<div class="pub-id-note">Public identifier - not a secret credential</div>' if pub else ""
         rows.append(f"""
 <div class="finding-card" data-severity="{_e(f.severity)}">
   <div class="finding-top">
@@ -95,6 +95,43 @@ def _findings_html(findings, extras):
     return "\n".join(rows)
 
 
+ACCESS_STATE_COLOR = {
+    "PUBLIC":        "#3fb950",   # green
+    "AUTHENTICATED": "#fbbf24",   # yellow
+    "PRIVILEGED":    "#fb923c",   # orange
+    "UNKNOWN":       "#6e7681",   # grey
+}
+ROUTE_STATE_COLOR = {
+    "VISITED":      "#3fb950",
+    "OBSERVED":     "#60a5fa",
+    "AUTH_REQUIRED":"#fbbf24",
+    "FORBIDDEN":    "#f87171",
+    "REDIRECTED":   "#a78bfa",
+    "UNREACHABLE":  "#f87171",
+    "DISCOVERED":   "#6e7681",
+}
+
+
+def _access_badge(access_state: str) -> str:
+    color = ACCESS_STATE_COLOR.get(access_state, "#6e7681")
+    return f'<span class="state-badge" style="background:{color}22;color:{color};border:1px solid {color}44">{_e(access_state)}</span>'
+
+
+def _route_badge(route_state: str) -> str:
+    color = ROUTE_STATE_COLOR.get(route_state, "#6e7681")
+    return f'<span class="state-badge" style="background:{color}22;color:{color};border:1px solid {color}44">{_e(route_state.replace("_"," "))}</span>'
+
+
+def _status_color(status: int) -> str:
+    if 200 <= status <= 299: return "#3fb950"
+    if status in (301, 302, 307, 308): return "#a78bfa"
+    if status == 401: return "#fbbf24"
+    if status == 403: return "#f87171"
+    if status >= 500: return "#ef4444"
+    if status >= 400: return "#f87171"
+    return "#6e7681"
+
+
 def _endpoints_html(endpoints):
     if not endpoints:
         return '<div class="empty-state"><span class="empty-icon">○</span><p>No endpoints discovered</p></div>'
@@ -102,6 +139,14 @@ def _endpoints_html(endpoints):
     by_cat = {}
     for ep in endpoints:
         by_cat.setdefault(ep.category, []).append(ep)
+
+    # Check if any endpoint has state data
+    has_state = any(
+        getattr(ep, "access_state", "UNKNOWN") != "UNKNOWN" or
+        getattr(ep, "route_state", "DISCOVERED") != "DISCOVERED" or
+        getattr(ep, "http_status", 0) != 0
+        for ep in endpoints
+    )
 
     parts = []
     for cat in sorted(by_cat, key=lambda c: cat_order.index(c) if c in cat_order else 99):
@@ -122,20 +167,34 @@ def _endpoints_html(endpoints):
             auth = f'<span class="auth-tag">{_e(ep.auth_context)}</span>' if ep.auth_context else ""
             st = getattr(ep, "source_type", "static")
             st_cls = {"static":"src-static","runtime":"src-runtime","correlated":"src-correlated","browser":"src-browser"}.get(st,"src-static")
+
+            # Stage 6: state columns
+            access_state = getattr(ep, "access_state", "UNKNOWN")
+            route_state  = getattr(ep, "route_state",  "DISCOVERED")
+            http_status  = getattr(ep, "http_status",  0)
+            state_cols = ""
+            if has_state:
+                sc = _status_color(http_status)
+                status_cell = f'<span style="color:{sc};font-weight:600;font-family:monospace">{http_status if http_status else "-"}</span>'
+                state_cols = f'<td>{_access_badge(access_state)}</td><td>{_route_badge(route_state)}</td><td class="conf-cell">{status_cell}</td>'
+
             rows += f"""<tr class="ep-row">
   <td><span class="method-badge method-{mc}">{_e(ep.method)}</span></td>
   <td><code class="ep-url">{_e(ep.url)}</code>{params}{auth}</td>
   <td><span class="src-badge {st_cls}">{st}</span></td>
   <td class="conf-cell">{ep.confidence:.0%}</td>
   <td class="src-file"><code>{_e((ep.source_file or "").split("/")[-1])}</code></td>
+  {state_cols}
 </tr>"""
+
+        state_headers = '<th>Access</th><th>Route</th><th>HTTP</th>' if has_state else ''
         parts.append(f"""<div class="ep-group">
   <div class="ep-group-header" style="border-left:3px solid {cc}">
     <span class="ep-cat" style="color:{cc}">{_e(cat)}</span>
     <span class="ep-count">{len(by_cat[cat])}</span>
   </div>
   <table class="ep-table">
-    <thead><tr><th>Method</th><th>Path / URL</th><th>Source</th><th>Conf.</th><th>File</th></tr></thead>
+    <thead><tr><th>Method</th><th>Path / URL</th><th>Source</th><th>Conf.</th><th>File</th>{state_headers}</tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>""")
@@ -164,7 +223,7 @@ def _js_html(result, extras):
                 label = f"script {n} @ {p.netloc}{p.path or '/'}"
             except Exception:
                 label = js.url
-        size = f"{js.size_bytes/1024:.1f} KB" if js.size_bytes >= 1024 else f"{js.size_bytes} B"
+        size = f"{js.size_bytes/1024:.1f} KB" if (js.size_bytes or 0) >= 1024 else (f"{js.size_bytes} B" if js.size_bytes else "N/A")
         stats = per_file.get(js.url, {})
         sec_n  = stats.get("secrets", 0)
         ep_n   = stats.get("endpoints", 0)
@@ -177,7 +236,7 @@ def _js_html(result, extras):
   <td {sec_c}>{sec_n}</td>
   <td>{ep_n}</td>
   <td>{inf_n}</td>
-  <td><code class="hash">{js.sha256[:12] if js.sha256 else "—"}</code></td>
+  <td><code class="hash">{js.sha256[:12] if js.sha256 else "N/A"}</code></td>
 </tr>""")
 
     # HTML attribute findings rows
@@ -189,9 +248,9 @@ def _js_html(result, extras):
             rows.append(f"""<tr style="background:rgba(248,81,73,.04)">
   <td><span class="src-badge" style="background:#f8717122;color:#f87171;border:1px solid #f8717144">html</span></td>
   <td><code class="js-url">{_e(label)}</code> <span class="tech-tag" style="background:rgba(248,81,73,.1);color:#f87171">HTML attributes</span></td>
-  <td class="size-cell">—</td>
+  <td class="size-cell">N/A</td>
   <td style="color:#f87171;font-weight:600">{sec_n}</td>
-  <td>—</td><td>—</td><td>—</td>
+  <td>N/A</td><td>N/A</td><td>N/A</td>
 </tr>""")
 
     return f"""<table class="data-table">
@@ -279,6 +338,9 @@ def _coverage_html(coverage):
     js     = getattr(coverage, "js",     None)
     routes = getattr(coverage, "routes", None)
     spots  = getattr(coverage, "blind_spots", [])
+
+    if not pages and not js and not routes and not spots:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>Coverage data not available</p></div>'
 
     cov_html = '<div class="cov-grid">'
     if pages:
@@ -412,7 +474,7 @@ def _login_html(login_result):
 
 def _auth_html(auth_result):
     if not auth_result:
-        return '<div class="empty-state"><span class="empty-icon">○</span><p>No credentials supplied — unauthenticated scan</p></div>'
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No credentials supplied - unauthenticated scan</p></div>'
     verified = auth_result.get("authenticated", False)
     vc = "#34d399" if verified else "#f87171"
     vt = "VERIFIED" if verified else "NOT VERIFIED"
@@ -425,9 +487,9 @@ def _auth_html(auth_result):
     rows = [
         ("Credentials supplied", "YES" if auth_result.get("credentials_supplied") else "NO"),
         ("Cookies injected",     auth_result.get("cookies_injected", 0)),
-        ("Initial URL",          auth_result.get("initial_url", "—")),
+        ("Initial URL",          auth_result.get("initial_url", "N/A")),
         ("HTTP status",          f'<span style="color:{sc};font-weight:600">{status}</span>'),
-        ("Final URL",            auth_result.get("final_url", "—")),
+        ("Final URL",            auth_result.get("final_url", "N/A")),
         ("Redirected",           "YES" if redirected else "NO"),
     ]
     if cookies_present:
@@ -488,7 +550,7 @@ def _validation_html(validation_results):
   <td><span style="color:{stat_c};font-weight:600">{status}</span></td>
   <td>{_e(getattr(r,"content_type",""))}</td>
   <td>{getattr(r,"response_size",0):,}</td>
-  <td><span style="color:{sc}">{"✓ Interesting" if getattr(r,"interesting",False) else "—"}</span></td>
+  <td><span style="color:{sc}">{"✓ Interesting" if getattr(r,"interesting",False) else "-"}</span></td>
 </tr>"""
     return f"""<div class="val-summary">
   {len(validation_results)} endpoints probed · <span style="color:#34d399">{len(interesting)} interesting</span>
@@ -517,6 +579,121 @@ def _sourcemap_html(sm_details):
 </table>"""
 
 
+def _state_intelligence_html(page_states, state_report=None):
+    """Render the Application State Intelligence section."""
+    if not page_states and state_report is None:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No page state data available - run without --passive to enable HTTP probing</p></div>'
+
+    # Build report on-the-fly if not provided
+    if state_report is None:
+        try:
+            from ..analysis.state_intelligence import build_state_intelligence_report
+            class _FakeResult:
+                pass
+            r = _FakeResult()
+            r.page_states = page_states
+            r.endpoints = []
+            state_report = build_state_intelligence_report(r)
+        except Exception:
+            pass
+
+    # Access state breakdown
+    access_items = []
+    if state_report:
+        for label, count, color in [
+            ("Public",        getattr(state_report, "public",        0), "#3fb950"),
+            ("Authenticated", getattr(state_report, "authenticated", 0), "#fbbf24"),
+            ("Privileged",    getattr(state_report, "privileged",    0), "#fb923c"),
+            ("Unknown",       getattr(state_report, "unknown",       0), "#6e7681"),
+        ]:
+            if count > 0:
+                access_items.append(
+                    f'<div class="si-stat"><div class="si-count" style="color:{color}">{count}</div>'
+                    f'<div class="si-label">{label}</div></div>'
+                )
+
+    route_items = []
+    if state_report:
+        for label, count, color in [
+            ("Visited",       getattr(state_report, "visited",       0), "#3fb950"),
+            ("Observed",      getattr(state_report, "observed",      0), "#60a5fa"),
+            ("Auth Required", getattr(state_report, "auth_required", 0), "#fbbf24"),
+            ("Forbidden",     getattr(state_report, "forbidden",     0), "#f87171"),
+            ("Redirected",    getattr(state_report, "redirected",    0), "#a78bfa"),
+            ("Unreachable",   getattr(state_report, "unreachable",   0), "#f87171"),
+            ("Discovered",    getattr(state_report, "discovered",    0), "#6e7681"),
+        ]:
+            if count > 0:
+                route_items.append(
+                    f'<div class="si-stat"><div class="si-count" style="color:{color}">{count}</div>'
+                    f'<div class="si-label">{label}</div></div>'
+                )
+
+    total = len(page_states) if page_states else (getattr(state_report, "total_urls", 0) if state_report else 0)
+
+    access_html = "".join(access_items) or '<span style="color:var(--text3);font-size:12px">No data</span>'
+    route_html  = "".join(route_items)  or '<span style="color:var(--text3);font-size:12px">No data</span>'
+
+    # Notable URL lists
+    notable_html = ""
+    if state_report:
+        auth_gated  = getattr(state_report, "auth_gated_urls",  [])
+        forbidden   = getattr(state_report, "forbidden_urls",   [])
+        redirected  = getattr(state_report, "redirected_urls",  [])
+
+        def _url_list(urls, color, label):
+            if not urls:
+                return ""
+            items = "".join(f'<div class="si-url-item"><code>{_e(u)}</code></div>' for u in urls[:20])
+            more  = f'<div class="si-url-more">and {len(urls)-20} more</div>' if len(urls) > 20 else ""
+            return f'<div class="si-url-group"><div class="si-url-label" style="color:{color}">{label} ({len(urls)})</div>{items}{more}</div>'
+
+        notable_html = (
+            _url_list(auth_gated, "#fbbf24", "Auth-Gated URLs") +
+            _url_list(forbidden,  "#f87171", "Forbidden URLs") +
+            _url_list(redirected, "#a78bfa", "Redirected URLs")
+        )
+
+    # Per-URL state table (from page_states)
+    table_rows = ""
+    if page_states:
+        for url, rec in list(page_states.items())[:100]:
+            rs   = getattr(rec, "route_state",  "DISCOVERED")
+            acs  = getattr(rec, "access_state", "UNKNOWN")
+            http = getattr(rec, "http_status",  0)
+            sc   = _status_color(http)
+            table_rows += f"""<tr>
+  <td><code style="font-size:10px;word-break:break-all">{_e(url)}</code></td>
+  <td>{_access_badge(acs)}</td>
+  <td>{_route_badge(rs)}</td>
+  <td><span style="color:{sc};font-weight:600;font-family:monospace">{http if http else "-"}</span></td>
+</tr>"""
+        more_note = f'<div style="padding:8px 12px;font-size:11px;color:var(--text3)">Showing first 100 of {len(page_states)} URLs</div>' if len(page_states) > 100 else ""
+        table_html = f"""<div class="subsection-title" style="margin-top:20px">URL State Map</div>
+<table class="data-table">
+<thead><tr><th>URL</th><th>Access</th><th>Route</th><th>HTTP</th></tr></thead>
+<tbody>{table_rows}</tbody>
+</table>{more_note}"""
+    else:
+        table_html = ""
+
+    return f"""<div class="si-overview">
+  <div style="font-size:12px;color:var(--text3);margin-bottom:14px">{total} URL{'' if total==1 else 's'} probed during scan</div>
+  <div class="two-col" style="margin-bottom:18px">
+    <div>
+      <div class="subsection-title">Access State</div>
+      <div class="si-stats">{access_html}</div>
+    </div>
+    <div>
+      <div class="subsection-title">Route State</div>
+      <div class="si-stats">{route_html}</div>
+    </div>
+  </div>
+  {f'<div class="si-notable">{notable_html}</div>' if notable_html else ''}
+</div>
+{table_html}"""
+
+
 def _graph_data(result):
     if not result.graph:
         return "null"
@@ -533,6 +710,8 @@ def generate(
     graphql_schemas: list = None,
     subdomains: list = None,
     report_paths: dict = None,
+    coverage_ledger=None,   # CoverageLedger | None  (Stage 5)
+    state_report=None,      # StateIntelligenceReport | None  (Stage 6)
 ) -> str:
     extras = extras or {}
     validation_results = validation_results or []
@@ -558,19 +737,29 @@ def generate(
     chunk_stats     = extras.get("chunk_stats",       {})
     attack_surface  = extras.get("attack_surface",    {})
 
+    # Stage 6: build state report on-the-fly if not supplied
+    page_states = getattr(result, "page_states", None) or {}
+    if state_report is None and page_states:
+        try:
+            from ..analysis.state_intelligence import build_state_intelligence_report
+            state_report = build_state_intelligence_report(result)
+        except Exception:
+            pass
+    _state_used = bool(page_states or state_report)
+
     gen_time   = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    scan_start = result.started_at.strftime("%Y-%m-%d %H:%M UTC") if result.started_at else "—"
+    scan_start = result.started_at.strftime("%Y-%m-%d %H:%M UTC") if result.started_at else "N/A"
     dur        = _duration(result)
     graph_json = _graph_data(result)
     g_stats    = result.graph.stats().get("by_type", {}) if result.graph else {}
 
     # Pre-compute filter buttons (Python 3.10: no backslash in f-string expressions)
-    _q = "'"  # single quote helper — backslash not allowed in f-string on Python 3.10
-    _btn_crit   = (f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterFindings({_q}CRITICAL{_q},this)">Critical ({len(critical)})</button>' if critical else "")
-    _btn_high   = (f'<button class="filter-btn" data-sev="HIGH" onclick="filterFindings({_q}HIGH{_q},this)">High ({len(high)})</button>' if high else "")
-    _btn_med    = (f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterFindings({_q}MEDIUM{_q},this)">Medium ({len(medium)})</button>' if medium else "")
-    _btn_low    = (f'<button class="filter-btn" data-sev="LOW" onclick="filterFindings({_q}LOW{_q},this)">Low ({len(low)})</button>' if low else "")
-    _btn_info   = (f'<button class="filter-btn" data-sev="INFO" onclick="filterFindings({_q}INFO{_q},this)">Info ({len(info_f)})</button>' if info_f else "")
+    _q = "'"  # single quote helper - backslash not allowed in f-string on Python 3.10
+    _btn_crit   = (f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterF({_q}CRITICAL{_q},this)">Critical ({len(critical)})</button>' if critical else "")
+    _btn_high   = (f'<button class="filter-btn" data-sev="HIGH" onclick="filterF({_q}HIGH{_q},this)">High ({len(high)})</button>' if high else "")
+    _btn_med    = (f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterF({_q}MEDIUM{_q},this)">Medium ({len(medium)})</button>' if medium else "")
+    _btn_low    = (f'<button class="filter-btn" data-sev="LOW" onclick="filterF({_q}LOW{_q},this)">Low ({len(low)})</button>' if low else "")
+    _btn_info   = (f'<button class="filter-btn" data-sev="INFO" onclick="filterF({_q}INFO{_q},this)">Info ({len(info_f)})</button>' if info_f else "")
     _sev_badge  = (
         '<span class="scan-badge critical-badge">CRITICAL FINDINGS</span>' if critical else
         '<span class="scan-badge high-badge">HIGH FINDINGS</span>' if high else
@@ -592,20 +781,21 @@ def generate(
     _passive_used  = bool(passive_stats)
 
     _so, _sc = "'", "'"  # quote helpers for onclick JS strings
-    _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ')"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
-    _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ')"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else '')
-    _nav_login    = ('<button class="nav-item" onclick="show(' + _so + 'login' + _sc + ')"><span class="nav-icon">⚿</span>Auto-Login</button>' if _login_used else '')
-    _nav_srcmaps  = '<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ')"><span class="nav-icon">⎔</span>Source Maps</button>'
-    _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ')"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
-    _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ')"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
-    _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ')"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
+    _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ',this)"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
+    _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ',this)"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else '')
+    _nav_login    = ('<button class="nav-item" onclick="show(' + _so + 'login' + _sc + ',this)"><span class="nav-icon">⚿</span>Auto-Login</button>' if _login_used else '')
+    _nav_srcmaps  = ('<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ',this)"><span class="nav-icon">⎔</span>Source Maps</button>' if _sm_used else '')
+    _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ',this)"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
+    _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ',this)"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
+    _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ',this)"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
+    _nav_state    = ('<button class="nav-item" onclick="show(' + _so + 'stateint' + _sc + ',this)"><span class="nav-icon">⊚</span>State Intelligence<span class="nav-badge">' + str(len(page_states)) + '</span></button>' if _state_used else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BundleSpy Report — {_e(result.target_url)}</title>
+<title>BundleSpy Report - {_e(result.target_url)}</title>
 <style>
 :root{{
   --bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#21262d;--border2:#30363d;
@@ -711,6 +901,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif
 .conf-label{{font-size:10px;color:var(--text3);width:28px;text-align:right}}
 .finding-body{{padding:12px 14px;border-top:1px solid var(--border)}}
 .finding-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-bottom:10px}}
+.fg-item{{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px}}
 .fg-key{{font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:500;margin-bottom:2px}}
 .fg-val{{font-size:11px}}
 code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;background:var(--border);padding:2px 5px;border-radius:3px;word-break:break-all}}
@@ -772,7 +963,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .cve-fix{{color:var(--text3);font-size:11px}}
 /* ── Infrastructure ── */
 .cls-badge{{font-size:11px;font-weight:600}}
-.action-report_only{{color:var(--yellow)}}.action-report only{{color:var(--yellow)}}
+.action-report_only{{color:var(--yellow)}}
 .action-investigate{{color:var(--red);font-weight:600}}
 /* ── Coverage ── */
 .cov-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-bottom:16px}}
@@ -838,6 +1029,16 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .neighbor-list{{display:flex;flex-direction:column;gap:3px}}
 .neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .neighbor-item:hover{{color:var(--accent)}}
+/* ── State Intelligence ── */
+.si-stats{{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}}
+.si-stat{{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;min-width:80px;text-align:center}}
+.si-count{{font-size:24px;font-weight:700;line-height:1;margin-bottom:3px}}
+.si-label{{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;font-weight:500}}
+.si-url-group{{margin-bottom:12px}}
+.si-url-label{{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px}}
+.si-url-item{{padding:4px 8px;background:var(--surface2);border-radius:3px;margin-bottom:3px;font-size:11px}}
+.si-url-more{{font-size:11px;color:var(--text3);padding:3px 8px}}
+.state-badge{{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;white-space:nowrap;letter-spacing:0.2px}}
 /* ── Notice ── */
 .notice{{background:rgba(63,185,80,.05);border:1px solid rgba(63,185,80,.15);border-radius:var(--radius);padding:10px 14px;font-size:12px;color:var(--text2);margin-top:14px;line-height:1.7}}
 /* ── Empty ── */
@@ -859,16 +1060,17 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
   <nav>
     <div class="nav-group">
       <div class="nav-label">Report</div>
-      <button class="nav-item active" onclick="show('overview')"><span class="nav-icon">◈</span>Overview</button>
-      <button class="nav-item" onclick="show('graph')"><span class="nav-icon">⬡</span>Attack Surface</button>
+      <button class="nav-item active" onclick="show('overview',this)"><span class="nav-icon">◈</span>Overview</button>
+      <button class="nav-item" onclick="show('graph',this)"><span class="nav-icon">⬡</span>Attack Surface</button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Intelligence</div>
-      <button class="nav-item" onclick="show('findings')"><span class="nav-icon">⚑</span>Findings<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
-      <button class="nav-item" onclick="show('endpoints')"><span class="nav-icon">⇄</span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
-      <button class="nav-item" onclick="show('assets')"><span class="nav-icon">◻</span>JS Assets<span class="nav-badge">{len(result.js_files)}</span></button>
-      <button class="nav-item" onclick="show('vulnlibs')"><span class="nav-icon">⚠</span>Vuln Libraries<span class="nav-badge {_lib_badge_cls}">{len(lib_findings)}</span></button>
-      <button class="nav-item" onclick="show('infra')"><span class="nav-icon">⌖</span>Infrastructure<span class="nav-badge">{len(result.infrastructure)}</span></button>
+      <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon">⚑</span>Findings<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
+      <button class="nav-item" onclick="show('endpoints',this)"><span class="nav-icon">⇄</span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
+      {_nav_state}
+      <button class="nav-item" onclick="show('assets',this)"><span class="nav-icon">◻</span>JS Assets<span class="nav-badge">{len(result.js_files)}</span></button>
+      <button class="nav-item" onclick="show('vulnlibs',this)"><span class="nav-icon">⚠</span>Vuln Libraries<span class="nav-badge {_lib_badge_cls}">{len(lib_findings)}</span></button>
+      <button class="nav-item" onclick="show('infra',this)"><span class="nav-icon">⌖</span>Infrastructure<span class="nav-badge">{len(result.infrastructure)}</span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Discovery</div>
@@ -882,7 +1084,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Quality</div>
-      <button class="nav-item" onclick="show('coverage')"><span class="nav-icon">▤</span>Coverage</button>
+      <button class="nav-item" onclick="show('coverage',this)"><span class="nav-icon">▤</span>Coverage</button>
     </div>
   </nav>
   <div class="sidebar-footer">BundleSpy v1.0.0</div>
@@ -985,6 +1187,12 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       {_endpoints_html(result.endpoints)}
     </div>
 
+    <!-- STATE INTELLIGENCE -->
+    <div id="section-stateint" class="section">
+      <div class="section-title">Application State Intelligence <span class="count">{len(page_states)} URLs probed</span></div>
+      <div class="card"><div class="card-body">{_state_intelligence_html(page_states, state_report)}</div></div>
+    </div>
+
     <!-- JS ASSETS -->
     <div id="section-assets" class="section">
       <div class="section-title">JavaScript Assets <span class="count">{len(result.js_files)} analyzed</span></div>
@@ -1061,11 +1269,11 @@ const GRAPH_DATA = {graph_json};
 const NC = {_j(NODE_COLOR)};
 
 // ── Navigation ────────────────────────────────────────────────────────────────
-function show(id) {{
+function show(id, btn) {{
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   document.getElementById('section-' + id).classList.add('active');
-  event.currentTarget.classList.add('active');
+  if (btn) btn.classList.add('active');
   if (id === 'graph') initGraph();
 }}
 
@@ -1208,7 +1416,7 @@ function showDetail(ev,d) {{
     .filter(Boolean);
   document.getElementById('dp-body').innerHTML = `
     <div class="detail-sec-title">Properties</div>
-    ${{rHtml||'<span style="color:var(--text3);font-size:11px">—</span>'}}
+    ${{rHtml||'<span style="color:var(--text3);font-size:11px">No data</span>'}}
     ${{nItems.length?`<div class="detail-sec-title">Connected (${{out.length+inn.length}})</div><div class="neighbor-list">${{nItems.join('')}}</div>`:''}}`;
   panel.classList.add('open');
 }}
