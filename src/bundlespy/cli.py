@@ -1414,6 +1414,33 @@ def run_scan(args) -> int:
     extras["passive_report"]  = passive_report
     extras["coverage_ledger"] = coverage_ledger
 
+    # ── Attack Testing Engine ─────────────────────────────────────────────────
+    attack_report = None
+    if not args.passive:
+        try:
+            from .testing.engine import AttackTestingEngine
+            from .testing.reporter import print_attack_report
+            if not args.quiet and not getattr(args, "silent", False):
+                phase("Running attack surface tests")
+            _engine = AttackTestingEngine(
+                fetcher         = fetcher,
+                scope           = scope,
+                rate_per_second = max(1.0, args.rate / 2),
+                allow_post      = False,
+                verbose         = getattr(args, "verbose", False),
+            )
+            attack_report = _engine.run(result)
+            extras["attack_report"] = attack_report
+            if not args.quiet and not getattr(args, "silent", False):
+                _confirmed = attack_report.total_confirmed
+                _validated = attack_report.total_validated
+                _tested    = attack_report.total_tested
+                _label = f"{_tested} tested  {_validated} validated  {_confirmed} confirmed"
+                phase_done("Attack tests", _label)
+        except Exception as _ae:
+            import logging as _ael
+            _ael.getLogger("bundlespy.cli").warning("Attack engine error: %s", _ae)
+
     # ── Reports ───────────────────────────────────────────────────────────────
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
@@ -1436,6 +1463,13 @@ def run_scan(args) -> int:
             passive_report      = passive_report,
             coverage_ledger     = coverage_ledger,
         )
+        if attack_report is not None:
+            try:
+                from .testing.reporter import print_attack_report
+                print_attack_report(attack_report)
+            except Exception as _are:
+                import logging as _arl
+                _arl.getLogger("bundlespy.cli").warning("Attack report print error: %s", _are)
     elif getattr(args, "silent", False):
         # Silent mode — print only findings, one per line
         real = [f for f in all_findings if f.status != "likely_false_positive"]
