@@ -1,96 +1,81 @@
-"""Open redirect tester."""
+"""
+OpenRedirectMapper - open redirect attack surface identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
+"""
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint
 
-_REDIRECT_PARAMS = {
-    "redirect", "return", "next", "url", "continue",
-    "destination", "callback", "goto", "target", "redir",
-    "redirect_uri", "redirect_url", "return_url", "return_to",
-    "success_url", "cancel_url", "after_login", "ref",
+_HIGH_REDIRECT_PARAMS = {
+    "redirect", "redirect_uri", "redirect_url", "next", "return_url",
+    "returnUrl", "returnTo",
 }
 
-_SAFE_EXTERNAL = "https://www.example.com/"
-_SAFE_PROTO    = "//www.example.com/"
+_MEDIUM_REDIRECT_PARAMS = {
+    "return", "destination", "dest", "to", "goto", "continue",
+    "successUrl", "cancelUrl", "back",
+}
 
-class OpenRedirectTester(BaseTester):
+_LOW_REDIRECT_PARAMS = {
+    "url", "ref", "referrer",
+}
+
+_ALL_REDIRECT_PARAMS = _HIGH_REDIRECT_PARAMS | _MEDIUM_REDIRECT_PARAMS | _LOW_REDIRECT_PARAMS
+
+# Path fragments that increase confidence for open redirect
+_AUTH_PATH_SIGNALS = {
+    "/login", "/logout", "/auth", "/oauth", "/callback",
+    "/signin", "/signout", "/sso",
+}
+
+_BURP_NOTES = (
+    "Test with https://evil.com as value. "
+    "Check if Location header follows. "
+    "Test URL encoding bypass."
+)
+
+
+def _redirect_confidence(name: str, path: str) -> str:
+    name  = name.lower()
+    path  = path.lower()
+    is_auth_path = any(sig in path for sig in _AUTH_PATH_SIGNALS)
+
+    if name in _HIGH_REDIRECT_PARAMS and is_auth_path:
+        return ConfidenceLevel.HIGH
+    if name in _HIGH_REDIRECT_PARAMS:
+        return ConfidenceLevel.MEDIUM
+    if name in _MEDIUM_REDIRECT_PARAMS:
+        return ConfidenceLevel.MEDIUM
+    return ConfidenceLevel.LOW
+
+
+class OpenRedirectMapper(BaseSurfaceMapper):
     category = AttackCategory.OPEN_REDIRECT
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         for ep in result.endpoints:
+            path = ep.path or ep.url or ""
+
             for qp in (ep.query_params or []):
-                pname = (qp.get("name") or "").lower()
-                if pname not in _REDIRECT_PARAMS:
+                name = (qp.get("name") or "").lower()
+                if name not in _ALL_REDIRECT_PARAMS:
                     continue
 
-                allowed, reason = self._policy.check(
-                    ep.url, ep.method, pname, "OPEN_REDIRECT", ep.auth_context or "",
+                confidence = _redirect_confidence(name, path)
+                evidence   = [f"Redirect-signal param '{name}' on {ep.url}"]
+
+                is_auth = any(sig in path.lower() for sig in _AUTH_PATH_SIGNALS)
+                if is_auth:
+                    evidence.append(f"Auth/OAuth endpoint increases SSRF/redirect risk")
+
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Open Redirect",
+                    parameters   = [f"query:{name}"],
+                    confidence   = confidence,
+                    evidence     = evidence,
+                    burp_notes   = _BURP_NOTES,
                 )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="Open Redirect",
-                               target_url=ep.url, parameter=pname)
-                    continue
-
-                baseline = capture_baseline(self._fetcher, ep.url)
-                sep = "&" if "?" in ep.url else "?"
-
-                for probe in (_SAFE_EXTERNAL, _SAFE_PROTO):
-                    test_url = f"{ep.url}{sep}{pname}={probe}"
-                    allowed2, _ = self._policy.check(
-                        test_url, ep.method, pname, "OPEN_REDIRECT_PROBE", ep.auth_context or "",
-                    )
-                    if not allowed2:
-                        continue
-
-                    obs = capture_observation(self._fetcher, test_url)
-                    if obs is None:
-                        continue
-
-                    evidence = []
-                    status   = TestStatus.CANDIDATE
-                    confidence = 0.25
-
-                    if obs.status_code in (301, 302, 303, 307, 308):
-                        loc = obs.headers.get("location", obs.headers.get("Location", ""))
-                        if "example.com" in loc:
-                            evidence.append(f"Location header redirects to injected domain: {loc}")
-                            status = TestStatus.VALIDATED
-                            confidence = 0.9
-                        else:
-                            evidence.append(f"Redirect observed (HTTP {obs.status_code}) but destination is internal")
-                            status = TestStatus.OBSERVED
-                            confidence = 0.4
-                    elif obs.status_code == 200 and "example.com" in (obs.body_excerpt or ""):
-                        evidence.append("Injected domain appears in 200 response - JS redirect possible")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.45
-
-                    if not evidence:
-                        continue
-
-                    r = AttackTestResult(
-                        category=self.category,
-                        attack_class="Open Redirect",
-                        target_url=ep.url,
-                        parameter=pname,
-                        method=ep.method,
-                        route=ep.path,
-                        authentication_context=ep.auth_context or "",
-                        payload=probe,
-                        baseline=baseline,
-                        observation=obs,
-                        status=status,
-                        confidence=confidence,
-                        evidence=evidence,
-                        why_tested=f"Parameter '{pname}' is a known redirect parameter name",
-                        what_changed=f"Injected external URL '{probe}' into '{pname}'",
-                        what_observed=f"HTTP {obs.status_code}",
-                        what_remains_unverified="JS-based redirect and meta-refresh not tested",
-                        requests_made=2,
-                    )
-                    self._results.append(r)
-                    break  # one probe per param is enough
 
         return self._results
