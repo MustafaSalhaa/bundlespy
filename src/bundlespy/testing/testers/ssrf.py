@@ -1,94 +1,83 @@
 """
-SSRF tester.
-Identifies parameters that may influence server-side URL retrieval.
-Uses safe probes only - never internal network access.
+SsrfMapper - SSRF attack surface identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 """
-import re
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation, differential
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint
 
-_SSRF_PARAM_SIGNALS = {
-    "url", "uri", "callback", "redirect", "webhook",
-    "image", "fetch", "proxy", "target", "destination",
-    "resource", "endpoint", "host", "domain", "link",
-    "src", "source", "href", "location",
+# Param names with high SSRF signal
+_HIGH_SSRF_PARAMS = {
+    "url", "uri", "callback", "webhook", "endpoint",
 }
 
-# Safe test values - public DNS resolvable, no internal network
-_SSRF_SAFE_PROBE = "https://www.example.com/"
-_SSRF_INVALID    = "https://ssrf-test-invalid-domain-xyzabc.example.invalid/"
+# Param names with medium SSRF signal
+_MEDIUM_SSRF_PARAMS = {
+    "redirect", "target", "src", "source", "dest", "destination",
+    "remote", "proxy", "forward",
+}
 
-class SsrfTester(BaseTester):
+# Param names with lower but non-zero SSRF signal
+_LOW_SSRF_PARAMS = {
+    "link", "fetch", "load", "pull", "path", "file", "host", "domain",
+}
+
+_ALL_SSRF_PARAMS = _HIGH_SSRF_PARAMS | _MEDIUM_SSRF_PARAMS | _LOW_SSRF_PARAMS
+
+_BURP_NOTES = (
+    "Test with Burp Collaborator. "
+    "Try http://169.254.169.254/latest/meta-data/ for cloud SSRF. "
+    "Try internal hostnames."
+)
+
+
+def _ssrf_confidence(name: str) -> str:
+    name = name.lower()
+    if name in _HIGH_SSRF_PARAMS:
+        return ConfidenceLevel.HIGH
+    if name in _MEDIUM_SSRF_PARAMS:
+        return ConfidenceLevel.MEDIUM
+    return ConfidenceLevel.LOW
+
+
+class SsrfMapper(BaseSurfaceMapper):
     category = AttackCategory.SSRF
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         for ep in result.endpoints:
-            all_params = list(ep.query_params or []) + list(ep.body_fields or [])
-            for qp in all_params:
-                pname = (qp.get("name") or "").lower()
-                if pname not in _SSRF_PARAM_SIGNALS:
+            method = (ep.method or "GET").upper()
+
+            # Check query params
+            for qp in (ep.query_params or []):
+                name = (qp.get("name") or "").lower()
+                if name not in _ALL_SSRF_PARAMS:
                     continue
-
-                allowed, reason = self._policy.check(
-                    ep.url, ep.method, pname, "SSRF", ep.auth_context or "",
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "SSRF",
+                    parameters   = [f"query:{name}"],
+                    confidence   = _ssrf_confidence(name),
+                    evidence     = [
+                        f"SSRF-signal query param '{name}' on {ep.url}",
+                    ],
+                    burp_notes   = _BURP_NOTES,
                 )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="SSRF",
-                               target_url=ep.url, parameter=pname)
+
+            # Check body fields
+            for bf in (ep.body_fields or []):
+                name = (bf.get("name") or "").lower()
+                if name not in _ALL_SSRF_PARAMS:
                     continue
-
-                # Capture baseline with empty/original param
-                baseline = capture_baseline(self._fetcher, ep.url)
-
-                sep = "&" if "?" in ep.url else "?"
-                test_url = f"{ep.url}{sep}{pname}={_SSRF_SAFE_PROBE}"
-
-                allowed2, _ = self._policy.check(
-                    test_url, ep.method, pname, "SSRF_PROBE", ep.auth_context or "",
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "SSRF",
+                    parameters   = [f"body:{name}"],
+                    confidence   = _ssrf_confidence(name),
+                    evidence     = [
+                        f"SSRF-signal body field '{name}' on {method} {ep.url}",
+                    ],
+                    burp_notes   = _BURP_NOTES,
                 )
-                if not allowed2:
-                    continue
-
-                obs = capture_observation(self._fetcher, test_url)
-
-                evidence = [f"Parameter '{pname}' accepts URL-like input - SSRF candidate"]
-                status   = TestStatus.CANDIDATE
-                confidence = 0.3
-
-                if obs and baseline:
-                    diff = differential(baseline, obs)
-                    if obs.status_code in (200, 302) and diff.get("body_changed"):
-                        evidence.append("Response body changed when URL parameter was modified")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.5
-                    if "example.com" in (obs.body_excerpt or "").lower():
-                        evidence.append("Response contains content from injected URL - strong SSRF indicator")
-                        status = TestStatus.VALIDATED
-                        confidence = 0.85
-
-                r = AttackTestResult(
-                    category=self.category,
-                    attack_class="SSRF",
-                    target_url=ep.url,
-                    parameter=pname,
-                    method=ep.method,
-                    route=ep.path,
-                    authentication_context=ep.auth_context or "",
-                    payload=_SSRF_SAFE_PROBE,
-                    baseline=baseline,
-                    observation=obs,
-                    status=status,
-                    confidence=confidence,
-                    evidence=evidence,
-                    why_tested=f"Parameter name '{pname}' strongly suggests server-side URL fetching",
-                    what_changed=f"Injected safe external URL into '{pname}'",
-                    what_observed=f"HTTP {obs.status_code if obs else 'N/A'}",
-                    what_remains_unverified="Out-of-band callback not configured - blind SSRF not tested",
-                    requests_made=2,
-                )
-                self._results.append(r)
 
         return self._results
