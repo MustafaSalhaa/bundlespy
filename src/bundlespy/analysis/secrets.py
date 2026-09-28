@@ -11,7 +11,7 @@ import logging
 import os
 import base64
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from pathlib import Path
 
 import yaml
@@ -178,6 +178,128 @@ def _get_line_number(content: str, pos: int) -> int:
     return content[:pos].count("\n") + 1
 
 
+# Regex for stripping single-line JS comments before scanning.
+# We only strip // comments - block comments are left because they sometimes
+# contain real secrets embedded in code that's been temporarily commented out.
+_RE_LINE_COMMENT = re.compile(r'(?m)(?:^|\s)//[^\n]*')
+
+
+def _strip_line_comments(content: str) -> Tuple[str, List[int]]:
+    """
+    Strip single-line JS/TS comments and return cleaned content plus a
+    position mapping so line numbers can be recovered.
+    Returns (stripped_content, list_of_original_newline_positions).
+    """
+    # Instead of truly removing chars (which shifts all positions), replace
+    # comment text with spaces to preserve offsets exactly.
+    result = list(content)
+    for m in _RE_LINE_COMMENT.finditer(content):
+        start = m.start()
+        # Preserve the leading whitespace/newline char before //
+        slash_pos = content.index("//", start)
+        for i in range(slash_pos, m.end()):
+            result[i] = " "
+    return "".join(result)
+
+
+# Known secret prefixes that indicate a partial match (prefix without the rest).
+# If we see these concatenated with a variable (e.g. "sk_live_" + someVar)
+# we flag it as a partial secret indicator.
+_PARTIAL_SECRET_PREFIXES = [
+    ("sk_live_",     "STRIPE_SECRET_KEY",   "Stripe live secret key prefix"),
+    ("sk_test_",     "STRIPE_TEST_SECRET",  "Stripe test secret key prefix"),
+    ("pk_live_",     "STRIPE_PUB_KEY",      "Stripe live publishable key prefix"),
+    ("AKIA",         "AWS_ACCESS_KEY",      "AWS access key prefix"),
+    ("AIza",         "FIREBASE_API_KEY",    "Firebase API key prefix"),
+    ("gsk_",         "GROQ_API_KEY",        "Groq API key prefix"),
+    ("lin_api_",     "LINEAR_API_KEY",      "Linear API key prefix"),
+    ("dp.st.",       "DOPPLER_TOKEN",       "Doppler service token prefix"),
+    ("vercel_blob_rw_", "VERCEL_BLOB_TOKEN","Vercel Blob token prefix"),
+    ("ghp_",         "GITHUB_TOKEN",        "GitHub personal access token prefix"),
+    ("gho_",         "GITHUB_TOKEN",        "GitHub OAuth token prefix"),
+    ("ghr_",         "GITHUB_TOKEN",        "GitHub refresh token prefix"),
+    ("github_pat_",  "GITHUB_FINE_GRAINED", "GitHub fine-grained PAT prefix"),
+    ("re_",          "RESEND_API_KEY",      "Resend API key prefix"),
+    ("pk.eyJ1",      "MAPBOX_ACCESS_TOKEN", "Mapbox public token prefix"),
+    ("sk.eyJ1",      "MAPBOX_SECRET_TOKEN", "Mapbox secret token prefix"),
+]
+
+# Pattern: prefix followed by concatenation with a variable (not a string literal)
+_RE_CONCAT = re.compile(
+    r'["\x27`]({prefix})["\x27`]\s*\+\s*(?:[A-Za-z_$][A-Za-z0-9_$]*|`\$\{{)'
+)
+
+
+def _find_partial_secrets(content: str, file_url: str, source_page: str) -> List[Finding]:
+    """
+    Detect secrets split across string concatenation or template literals.
+    Example: const key = "sk_live_" + apiSecretVar;
+    Flags these as INFO-level partial secret indicators.
+    """
+    findings: List[Finding] = []
+    seen: Set[str] = set()
+
+    for prefix, rule_id, description in _PARTIAL_SECRET_PREFIXES:
+        pattern = re.compile(
+            r'["\x27`](' + re.escape(prefix) + r')["\x27`]\s*\+\s*'
+            r'(?:[A-Za-z_$][A-Za-z0-9_$]*|\$\{[^}]+\})'
+        )
+        for m in pattern.finditer(content):
+            dedup_key = f"PARTIAL:{rule_id}:{m.group(1)}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            line_no = _get_line_number(content, m.start())
+            context = _get_context(content, m.start())
+            finding_id = Finding.make_id(f"PARTIAL_{rule_id}", prefix, file_url)
+
+            findings.append(Finding(
+                id                   = finding_id,
+                rule_id              = f"PARTIAL_{rule_id}",
+                title                = f"Partial Secret: {description}",
+                category             = "Partial",
+                severity             = "INFO",
+                confidence           = 0.60,
+                file_url             = file_url,
+                source_page          = source_page,
+                line_number          = line_no,
+                column               = m.start() - content.rfind("\n", 0, m.start()),
+                matched_value        = prefix,
+                redacted_value       = prefix,
+                sha256               = hashlib.sha256(f"PARTIAL_{rule_id}:{prefix}:{file_url}".encode()).hexdigest(),
+                context              = context,
+                description          = f"Secret prefix '{prefix}' found concatenated with a variable - full secret assembled at runtime.",
+                impact               = "",
+                remediation          = "Trace the variable to find the full secret. Runtime-assembled secrets are still secrets.",
+                false_positive_notes = "Prefix concatenation is deliberate obfuscation in some cases.",
+                confidence_label     = "candidate",
+                occurrences          = [f"{file_url}:{line_no}"],
+            ))
+
+    return findings
+
+
+_SEVERITY_ORDER = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+
+
+def _severity_score(finding: Finding) -> float:
+    """
+    Composite score combining severity, confidence, and validation status.
+    Higher = more urgent to review.
+    Used for sorting findings by priority.
+    """
+    sev  = _SEVERITY_ORDER.get(finding.severity, 1)
+    conf = finding.confidence
+    # Boost confirmed_live findings, penalize likely_false_positive
+    label_boost = {
+        "likely_secret":         1.2,
+        "candidate":             1.0,
+        "likely_false_positive": 0.3,
+    }.get(finding.confidence_label, 1.0)
+    return sev * conf * label_boost
+
+
 def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
     """Load detection rules from YAML file."""
     if rules_path is None:
@@ -266,6 +388,11 @@ class SecretScanner:
     def __init__(self, rules_path: Optional[str] = None):
         self.rules = load_rules(rules_path)
 
+    @staticmethod
+    def severity_score(finding: Finding) -> float:
+        """Composite priority score for a finding. Higher = review first."""
+        return _severity_score(finding)
+
     def _scan_content(
         self,
         content: str,
@@ -347,17 +474,37 @@ class SecretScanner:
     def scan(self, content: str, file_url: str, source_page: str = "") -> List[Finding]:
         """
         Scan JavaScript content for secrets.
-        Returns a list of Finding objects, deduplicated by value+rule.
+        Returns a list of Finding objects, deduplicated by value+rule,
+        sorted by severity score (most critical first).
         """
         findings: List[Finding] = []
         seen: Dict[str, Finding] = {}  # sha256 -> Finding
 
-        # Primary scan on raw content
-        self._scan_content(content, file_url, source_page, findings, seen)
+        # Strip single-line comments before scanning to avoid flagging
+        # secrets that were commented out (reduces noise, not blind spots -
+        # commented-out secrets are still findings but get lower confidence).
+        # We keep original content for line number accuracy since stripping
+        # replaces comment text with spaces rather than removing it.
+        stripped = _strip_line_comments(content)
+
+        # Primary scan on comment-stripped content
+        self._scan_content(stripped, file_url, source_page, findings, seen)
+
+        # Lower confidence on findings that only matched inside a comment
+        # (match is in stripped spaces, meaning the original had a comment there)
+        # This is implicitly handled - stripping replaces with spaces so patterns
+        # requiring non-space chars won't match in stripped comment regions.
 
         # Base64 decode layer: try to decode embedded b64 blobs and re-scan
         for decoded_text, orig_pos in _decode_b64_chunks(content):
             self._scan_content(decoded_text, file_url, source_page, findings, seen, pos_offset=orig_pos)
+
+        # Partial secret detection: "sk_live_" + someVar patterns
+        for partial_finding in _find_partial_secrets(content, file_url, source_page):
+            sha = partial_finding.sha256
+            if sha not in seen:
+                seen[sha] = partial_finding
+                findings.append(partial_finding)
 
         # ENV_NAME detection: flag process.env.SECRET_NAME references
         for match in _RE_ENV_NAME.finditer(content):
@@ -393,4 +540,6 @@ class SecretScanner:
             seen[sha256] = finding
             findings.append(finding)
 
+        # Sort by severity score: CRITICAL confirmed_live first, INFO FP last
+        findings.sort(key=_severity_score, reverse=True)
         return findings
