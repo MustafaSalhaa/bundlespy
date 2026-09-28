@@ -5,10 +5,11 @@ Validates detected secrets against provider APIs - read-only probes only.
 Never logs or stores the raw secret value.
 Clearly marks findings as 'detected' vs 'confirmed_live' vs 'invalid'.
 
-Supported providers (15):
+Supported providers (25):
   AWS, Google API, OpenAI, Anthropic, GitHub (classic + fine-grained),
   GitLab, Stripe (secret + restricted), Slack, SendGrid, Twilio,
-  Telegram, Discord, npm, HuggingFace, Mailgun
+  Telegram, Discord, npm, HuggingFace, Mailgun, Supabase, Groq,
+  Datadog, Mapbox, Sentry, Firebase, Algolia, Pusher
 """
 
 import logging
@@ -741,6 +742,260 @@ def validate_groq_key(key: str) -> ValidationResult:
     return ValidationResult("GROQ_API_KEY", False, "Groq", f"HTTP {resp.status_code}", http_status=resp.status_code)
 
 
+# ── Datadog ────────────────────────────────────────────────────────────────────
+
+def validate_datadog_api_key(key: str) -> ValidationResult:
+    """Validate Datadog API key via validate endpoint."""
+    resp = _req("GET",
+        "https://api.datadoghq.com/api/v1/validate",
+        headers={
+            "DD-API-KEY": key,
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("DATADOG_API_KEY", False, "Datadog", "Request failed")
+
+    if resp.status_code == 200:
+        return ValidationResult(
+            "DATADOG_API_KEY", True, "Datadog",
+            "CONFIRMED LIVE - API key valid",
+            http_status=200,
+        )
+    if resp.status_code == 403:
+        return ValidationResult("DATADOG_API_KEY", False, "Datadog", "Invalid or revoked API key")
+
+    return ValidationResult("DATADOG_API_KEY", False, "Datadog", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
+# ── Mapbox ─────────────────────────────────────────────────────────────────────
+
+def validate_mapbox_token(token: str) -> ValidationResult:
+    """Validate Mapbox token via tokens API (read-only probe)."""
+    resp = _req("GET",
+        "https://api.mapbox.com/tokens/v2",
+        params={"access_token": token},
+        headers={"User-Agent": _UA},
+    )
+    if not resp:
+        return ValidationResult("MAPBOX_ACCESS_TOKEN", False, "Mapbox", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data  = resp.json()
+            code  = data.get("code", "")
+            token_type = "public" if token.startswith("pk.") else "secret"
+            if code == "TokenValid":
+                scopes = data.get("token", {}).get("scopes", [])
+                return ValidationResult(
+                    "MAPBOX_ACCESS_TOKEN", True, "Mapbox",
+                    f"CONFIRMED LIVE - {token_type} token | Scopes: {', '.join(scopes[:5]) or 'none listed'}",
+                    http_status=200,
+                    context={"token_type": token_type, "scopes": ", ".join(scopes)},
+                )
+            if code in ("TokenMalformed", "TokenExpired", "TokenRevoked"):
+                return ValidationResult("MAPBOX_ACCESS_TOKEN", False, "Mapbox", f"Token {code}")
+        except Exception:
+            pass
+
+    if resp.status_code == 401:
+        return ValidationResult("MAPBOX_ACCESS_TOKEN", False, "Mapbox", "Invalid token")
+
+    return ValidationResult("MAPBOX_ACCESS_TOKEN", False, "Mapbox", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
+# ── Sentry ─────────────────────────────────────────────────────────────────────
+
+def validate_sentry_auth_token(token: str) -> ValidationResult:
+    """Validate Sentry auth token via user endpoint."""
+    resp = _req("GET",
+        "https://sentry.io/api/0/",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("SENTRY_AUTH_TOKEN", False, "Sentry", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data  = resp.json()
+            version = data.get("version", "?")
+            return ValidationResult(
+                "SENTRY_AUTH_TOKEN", True, "Sentry",
+                f"CONFIRMED LIVE - Sentry API v{version} accessible",
+                http_status=200,
+            )
+        except Exception:
+            return ValidationResult("SENTRY_AUTH_TOKEN", True, "Sentry", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 401:
+        return ValidationResult("SENTRY_AUTH_TOKEN", False, "Sentry", "Invalid or expired auth token")
+    if resp.status_code == 403:
+        return ValidationResult(
+            "SENTRY_AUTH_TOKEN", True, "Sentry",
+            "CONFIRMED LIVE - Authenticated (403 forbidden on base endpoint - token has limited scope)",
+            http_status=403,
+        )
+
+    return ValidationResult("SENTRY_AUTH_TOKEN", False, "Sentry", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
+# ── Firebase ───────────────────────────────────────────────────────────────────
+
+def validate_firebase_api_key(key: str) -> ValidationResult:
+    """
+    Validate Firebase/Google API key.
+    Uses the Identity Toolkit signUp endpoint with an invalid payload - the error type
+    reveals whether the key is valid (MISSING_EMAIL) vs invalid (API_KEY_INVALID).
+    Read-only probe: no account is created.
+    """
+    resp = _req("POST",
+        f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={key}",
+        json={},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("FIREBASE_API_KEY", False, "Firebase", "Request failed")
+
+    try:
+        data  = resp.json()
+        error = data.get("error", {})
+        msg   = error.get("message", "")
+
+        # Key is valid - Firebase accepted it and returned a domain-specific error
+        if msg in ("MISSING_EMAIL", "MISSING_PASSWORD", "EMAIL_EXISTS", "WEAK_PASSWORD : Password should be at least 6 characters"):
+            return ValidationResult(
+                "FIREBASE_API_KEY", True, "Firebase",
+                "CONFIRMED LIVE - Firebase API key valid (Identity Toolkit accepted key)",
+                http_status=resp.status_code,
+            )
+
+        # Key is explicitly rejected
+        if "API_KEY_INVALID" in msg or "API key not valid" in msg:
+            return ValidationResult("FIREBASE_API_KEY", False, "Firebase", "API key invalid")
+
+        # Key valid but this project doesn't have Identity Toolkit enabled
+        if "CONFIGURATION_NOT_FOUND" in msg or "PROJECT_NOT_FOUND" in msg:
+            return ValidationResult(
+                "FIREBASE_API_KEY", True, "Firebase",
+                "CONFIRMED LIVE - Key valid but Identity Toolkit not enabled for this project",
+                http_status=resp.status_code,
+            )
+    except Exception:
+        pass
+
+    return ValidationResult("FIREBASE_API_KEY", False, "Firebase", f"HTTP {resp.status_code} - inconclusive", http_status=resp.status_code)
+
+
+# ── Algolia ────────────────────────────────────────────────────────────────────
+
+def validate_algolia_key(key: str, app_id: Optional[str] = None) -> ValidationResult:
+    """
+    Validate Algolia API key.
+    Without an app_id we can't make a meaningful probe - Algolia requires both.
+    If app_id is available (co-located finding), probe the indices endpoint.
+    """
+    if not app_id:
+        return ValidationResult(
+            "ALGOLIA_API_KEY", False, "Algolia",
+            "App ID required for live validation - found key without co-located ALGOLIA_APP_ID",
+        )
+
+    resp = _req("GET",
+        f"https://{app_id}-dsn.algolia.net/1/indexes",
+        headers={
+            "X-Algolia-Application-Id": app_id,
+            "X-Algolia-API-Key": key,
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("ALGOLIA_API_KEY", False, "Algolia", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data  = resp.json()
+            count = len(data.get("items", []))
+            return ValidationResult(
+                "ALGOLIA_API_KEY", True, "Algolia",
+                f"CONFIRMED LIVE - {count} index(es) accessible",
+                http_status=200,
+                context={"app_id": app_id, "index_count": str(count)},
+            )
+        except Exception:
+            return ValidationResult("ALGOLIA_API_KEY", True, "Algolia", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 403:
+        return ValidationResult(
+            "ALGOLIA_API_KEY", True, "Algolia",
+            "CONFIRMED LIVE - Key authenticated (403 on /indexes - search-only or scoped key)",
+            http_status=403,
+        )
+    if resp.status_code == 401:
+        return ValidationResult("ALGOLIA_API_KEY", False, "Algolia", "Invalid API key")
+
+    return ValidationResult("ALGOLIA_API_KEY", False, "Algolia", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
+# ── Pusher ─────────────────────────────────────────────────────────────────────
+
+def validate_pusher_key(app_key: str, app_id: Optional[str] = None, app_secret: Optional[str] = None) -> ValidationResult:
+    """
+    Pusher validation requires app_id + app_key + app_secret to make a signed request.
+    Without all three we can only note the finding.
+    """
+    if not app_id or not app_secret:
+        return ValidationResult(
+            "PUSHER_APP_KEY", False, "Pusher",
+            "App ID and secret required for live validation",
+        )
+
+    import hmac as _hmac, hashlib as _hl, time as _time, urllib.parse as _up
+
+    timestamp = str(int(_time.time()))
+    path      = f"/apps/{app_id}/channels"
+    string_to_sign = f"GET\n{path}\nauth_key={app_key}&auth_timestamp={timestamp}&auth_version=1.0"
+    sig  = _hmac.new(app_secret.encode(), string_to_sign.encode(), _hl.sha256).hexdigest()
+
+    resp = _req("GET",
+        f"https://api.pusherapp.com{path}",
+        params={
+            "auth_key": app_key,
+            "auth_timestamp": timestamp,
+            "auth_version": "1.0",
+            "auth_signature": sig,
+        },
+        headers={"User-Agent": _UA},
+    )
+    if not resp:
+        return ValidationResult("PUSHER_APP_KEY", False, "Pusher", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data     = resp.json()
+            channels = list(data.get("channels", {}).keys())[:5]
+            return ValidationResult(
+                "PUSHER_APP_KEY", True, "Pusher",
+                f"CONFIRMED LIVE - {len(data.get('channels', {}))} channel(s): {', '.join(channels) or 'none'}",
+                http_status=200,
+                context={"app_id": app_id},
+            )
+        except Exception:
+            return ValidationResult("PUSHER_APP_KEY", True, "Pusher", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 401:
+        return ValidationResult("PUSHER_APP_KEY", False, "Pusher", "Invalid credentials")
+    if resp.status_code == 403:
+        return ValidationResult("PUSHER_APP_KEY", False, "Pusher", "App not found or access denied")
+
+    return ValidationResult("PUSHER_APP_KEY", False, "Pusher", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
 # ── Rule ID -> Validator map ───────────────────────────────────────────────────
 
 VALIDATORS: Dict[str, Callable] = {
@@ -783,6 +1038,24 @@ VALIDATORS: Dict[str, Callable] = {
     "MAILGUN_API_KEY":       validate_mailgun_key,
     # Groq
     "GROQ_API_KEY":          validate_groq_key,
+    # Supabase
+    "SUPABASE_ANON_KEY":     validate_supabase_key,
+    "SUPABASE_SERVICE_KEY":  validate_supabase_key,
+    # Datadog
+    "DATADOG_API_KEY":       validate_datadog_api_key,
+    "DATADOG_APP_KEY":       validate_datadog_api_key,
+    # Mapbox
+    "MAPBOX_ACCESS_TOKEN":   validate_mapbox_token,
+    "MAPBOX_SECRET_TOKEN":   validate_mapbox_token,
+    # Sentry
+    "SENTRY_AUTH_TOKEN":     validate_sentry_auth_token,
+    # Firebase
+    "FIREBASE_API_KEY":      validate_firebase_api_key,
+    # Algolia
+    "ALGOLIA_API_KEY":       validate_algolia_key,
+    # Pusher
+    "PUSHER_APP_KEY":        validate_pusher_key,
+    "PUSHER_APP_SECRET":     validate_pusher_key,
 }
 
 
