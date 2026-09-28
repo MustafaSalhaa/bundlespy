@@ -16,7 +16,8 @@ _UUID_RE        = re.compile(
     r'/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=/|$)',
     re.I,
 )
-# Short hash IDs - alphanumeric, 6-32 chars, e.g. /share/abc123f or /post/7Hk3pQ
+# Short hash IDs - must contain BOTH letters and digits (not pure words or pure numbers)
+# e.g. /share/abc123f, /post/7Hk3pQ, /invite/xK9mP2q  - NOT /functions/stock, /api/users
 _HASH_ID_RE = re.compile(r'/([a-z0-9]{6,32})(?=/|$|\?)', re.I)
 
 # Request headers that carry user/account identity - IDOR via header manipulation
@@ -72,7 +73,21 @@ _HASH_EXCLUSION_RE = re.compile(
     r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|min)$', re.I
 )
 
-_ASSET_PATH_RE = re.compile(r'/(assets|static|dist|build|vendor|public)/', re.I)
+_ASSET_PATH_RE = re.compile(r'/(assets|static|dist|build|vendor|public|functions|api)/', re.I)
+
+# Common API/route words that look alphanumeric but are NOT object IDs
+_KNOWN_ROUTE_WORDS = {
+    "admin", "login", "logout", "signup", "register", "profile", "account",
+    "settings", "config", "dashboard", "search", "index", "health", "status",
+    "metrics", "robots", "sitemap", "favicon", "manifest", "stock", "products",
+    "orders", "users", "items", "posts", "comments", "reviews", "categories",
+    "upload", "download", "export", "import", "report", "reports", "billing",
+    "payment", "checkout", "cart", "wishlist", "notifications", "messages",
+    "invite", "token", "verify", "confirm", "reset", "forgot", "password",
+    "callback", "webhook", "events", "stream", "feed", "rss", "preview",
+    "assets", "static", "public", "private", "secure", "internal",
+    "v1", "v2", "v3", "v4", "graphql", "rest", "soap",
+}
 
 
 def _path_pattern(path: str) -> str:
@@ -87,13 +102,30 @@ def _path_pattern(path: str) -> str:
 
 
 def _is_likely_hash_id(path: str, match_value: str) -> bool:
-    """Heuristic: is this short hash token likely an object ID vs a static asset hash?"""
+    """Heuristic: is this short hash token an object ID or just a route/function name?
+
+    Real hash IDs: abc123f, 7Hk3pQ, xK9mP2q  (mixed letters + digits)
+    Route words:   stock, users, products, functions  (pure alpha, in a known set)
+    """
     if _HASH_EXCLUSION_RE.search(path):
         return False
     if _ASSET_PATH_RE.search(path):
         return False
-    # Vite/webpack asset hashes are typically 8-12 chars and appear in /assets/ paths
-    # A real object ID is more likely to appear after /user/, /post/, /share/, etc.
+
+    val = match_value.lower()
+
+    # Must contain at least one digit - pure-alpha segments are almost always route names
+    if not any(c.isdigit() for c in val):
+        return False
+
+    # Must contain at least one letter - pure numbers already caught by _NUMERIC_ID_RE
+    if not any(c.isalpha() for c in val):
+        return False
+
+    # Skip known route words even if they happen to have a digit (v2, h5, etc.)
+    if val in _KNOWN_ROUTE_WORDS:
+        return False
+
     return True
 
 
