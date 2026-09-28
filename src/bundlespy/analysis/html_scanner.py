@@ -266,7 +266,7 @@ def scan_html(html: str, page_url: str) -> List[Finding]:
                 impact               = "",
                 remediation          = rule["remediation"],
                 false_positive_notes = "",
-                status               = "likely_secret" if rule["confidence"] >= 0.85 else "candidate",
+                confidence_label     = "likely_secret" if rule["confidence"] >= 0.85 else "candidate",
                 classification       = rule.get("classification", ""),
                 occurrences          = [f"html:{page_url}:{line_no}"],
             )
