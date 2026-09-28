@@ -24,7 +24,7 @@ CONFIG_PATHS = [
     "/api-docs", "/api/docs", "/v1/api-docs", "/v2/api-docs", "/v3/api-docs",
     "/graphql", "/graphiql", "/playground",
     "/phpinfo.php", "/info.php", "/server-info",
-    "/admin", "/admin/", "/administrator",
+    "/admin", "/administrator",
     "/wp-admin", "/wp-login.php", "/wp-json/wp/v2/users",
     "/config.json", "/config.yaml", "/settings.json",
     "/backup", "/backup.zip", "/backup.sql", "/dump.sql",
@@ -126,7 +126,14 @@ class ConfigurationMapper(BaseSurfaceMapper):
         if not self._fetcher or not self._policy:
             return self._results
 
+        seen_paths: set = set()
         for path in CONFIG_PATHS:
+            # Normalize trailing slash so /admin and /admin/ don't both fire
+            norm_path = path.rstrip("/") or "/"
+            if norm_path in seen_paths:
+                continue
+            seen_paths.add(norm_path)
+
             probe_url = base + path
 
             allowed, reason = self._policy.allow_get(probe_url)
