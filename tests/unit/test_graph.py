@@ -71,7 +71,7 @@ def _finding(rule_id: str, value: str,
         matched_value=value, redacted_value=value[:4] + "****",
         sha256=sha, context="test context",
         description="", impact="", remediation="",
-        false_positive_notes="", status=status,
+        false_positive_notes="", confidence_label=status,
     )
 
 
