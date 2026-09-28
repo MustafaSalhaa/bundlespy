@@ -1,24 +1,16 @@
 """
-Deterministic tests for the attack testing engine.
+Tests for the attack surface mapping engine (updated for passive mapper API).
 Uses mock fetcher and fixture endpoints - no real network.
 """
 import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
 
-from bundlespy.testing.models import TestStatus, AttackCategory
-from bundlespy.testing.safety import SafetyPolicy
-from bundlespy.testing.prioritizer import score_endpoint, score_param_for_attack, prioritize
-from bundlespy.testing.baseline import differential, _body_hash
-from bundlespy.testing.models import Baseline, TestObservation
-from bundlespy.testing.testers.access_control import AccessControlTester, _extract_id_candidates
-from bundlespy.testing.testers.xss import XssTester, _find_dom_sinks, _find_sources
-from bundlespy.testing.testers.injection import InjectionTester, _has_db_error
-from bundlespy.testing.testers.ssrf import SsrfTester
-from bundlespy.testing.testers.open_redirect import OpenRedirectTester
-from bundlespy.testing.testers.csrf import CsrfTester, _has_csrf_protection
-from bundlespy.testing.testers.path_traversal import PathTraversalTester
-from bundlespy.testing.testers.configuration import ConfigurationTester
+from bundlespy.testing.models import SurfaceStatus, AttackCategory, ConfidenceLevel
+from bundlespy.testing.safety import SurfaceSafetyPolicy
+from bundlespy.testing.prioritizer import score_endpoint, prioritize_surfaces
+from bundlespy.testing.testers.xss import _find_js_sinks
+from bundlespy.testing.testers.csrf import _has_csrf_signal
 from bundlespy.storage.models import Endpoint, JSFile, ScanResult, Finding
 
 
@@ -66,12 +58,11 @@ def _make_fetcher(content="hello world", status=200):
     fetcher.get.return_value = (content, status, "text/html", "abc123")
     return fetcher
 
-def _make_policy(scope=None, allow_post=True):
-    return SafetyPolicy(
+def _make_policy(scope=None):
+    return SurfaceSafetyPolicy(
         scope=scope or _make_scope(True),
         rate_per_second=100,
         max_requests=1000,
-        allow_post=allow_post,
     )
 
 
@@ -80,49 +71,37 @@ def _make_policy(scope=None, allow_post=True):
 class TestSafetyPolicy:
     def test_blocks_out_of_scope(self):
         policy = _make_policy(scope=_make_scope(False))
-        ok, reason = policy.check("https://other.com/path")
+        ok, reason = policy.allow_get("https://other.com/path")
         assert not ok
         assert "out_of_scope" in reason
 
-    def test_blocks_delete_method(self):
+    def test_allows_in_scope_url(self):
         policy = _make_policy()
-        ok, reason = policy.check("https://example.com/api", method="DELETE")
-        assert not ok
-        assert "blocked_method" in reason
-
-    def test_blocks_destructive_path(self):
-        policy = _make_policy()
-        ok, reason = policy.check("https://example.com/delete/user")
-        assert not ok
-        assert "destructive_path" in reason
-
-    def test_blocks_protected_param(self):
-        policy = _make_policy()
-        ok, reason = policy.check("https://example.com/api", param="password")
-        assert not ok
-        assert "protected_param" in reason
+        ok, reason = policy.allow_get("https://example.com/api/users")
+        assert ok
+        assert reason == ""
 
     def test_deduplication(self):
         policy = _make_policy()
-        ok1, _ = policy.check("https://example.com/api", param="id", test_type="IDOR")
-        ok2, reason2 = policy.check("https://example.com/api", param="id", test_type="IDOR")
+        ok1, _ = policy.allow_get("https://example.com/api")
+        ok2, reason2 = policy.allow_get("https://example.com/api")
         assert ok1
         assert not ok2
         assert "duplicate" in reason2
 
-    def test_allows_valid_request(self):
-        policy = _make_policy()
-        ok, reason = policy.check("https://example.com/api/users", method="GET", param="id", test_type="T1")
-        assert ok
-        assert reason == ""
-
     def test_max_requests_enforced(self):
-        policy = SafetyPolicy(scope=_make_scope(True), rate_per_second=1000, max_requests=2)
-        policy.check("https://example.com/a", param="p1", test_type="T1")
-        policy.check("https://example.com/b", param="p2", test_type="T2")
-        ok, reason = policy.check("https://example.com/c", param="p3", test_type="T3")
+        policy = SurfaceSafetyPolicy(scope=_make_scope(True), rate_per_second=1000, max_requests=2)
+        policy.allow_get("https://example.com/a")
+        policy.allow_get("https://example.com/b")
+        ok, reason = policy.allow_get("https://example.com/c")
         assert not ok
         assert "max_requests" in reason
+
+    def test_request_counter_increments(self):
+        policy = _make_policy()
+        assert policy.requests_made == 0
+        policy.allow_get("https://example.com/a")
+        assert policy.requests_made == 1
 
 
 # ─── Prioritizer tests ────────────────────────────────────────────────────────
@@ -142,170 +121,106 @@ class TestPrioritizer:
         ep2 = _make_endpoint(source_type="runtime")
         assert score_endpoint(ep2) > score_endpoint(ep1)
 
-    def test_ssrf_param_score(self):
-        assert score_param_for_attack("url", "SSRF") > 0.8
-        assert score_param_for_attack("name", "SSRF") < 0.3
-
-    def test_prioritize_returns_sorted(self):
-        eps = [
-            _make_endpoint(url="https://example.com/about", path="/about", category="ROUTE",
-                           method="GET", path_params=[], query_params=[], auth_context=""),
-            _make_endpoint(url="https://example.com/admin", path="/admin", category="ADMIN"),
-        ]
-        sorted_eps = prioritize(eps)
-        assert sorted_eps[0][0] > sorted_eps[1][0]  # admin first
-
-
-# ─── Differential analysis tests ─────────────────────────────────────────────
-
-class TestDifferential:
-    def _make_baseline(self, status=200, length=100, body_hash="abc"):
-        return Baseline(status_code=status, content_type="text/html",
-                        content_length=length, body_hash=body_hash)
-
-    def _make_obs(self, status=200, length=100, body_hash="abc"):
-        return TestObservation(status_code=status, content_type="text/html",
-                               content_length=length, body_hash=body_hash, body_excerpt="")
-
-    def test_no_diff_when_same(self):
-        b = self._make_baseline()
-        o = self._make_obs()
-        assert differential(b, o) == {}
-
-    def test_detects_status_change(self):
-        b = self._make_baseline(status=200)
-        o = self._make_obs(status=403)
-        diff = differential(b, o)
-        assert "status_code" in diff
-
-    def test_detects_size_change(self):
-        b = self._make_baseline(length=100)
-        o = self._make_obs(length=500)
-        diff = differential(b, o)
-        assert "content_length" in diff
-
-    def test_ignores_tiny_size_diff(self):
-        b = self._make_baseline(length=100)
-        o = self._make_obs(length=110)
-        diff = differential(b, o)
-        assert "content_length" not in diff
-
-
-# ─── ID candidate extraction ──────────────────────────────────────────────────
-
-class TestIdCandidates:
-    def test_extracts_numeric_path_param(self):
-        ep = _make_endpoint(path_params=[{"name": "id", "example": "42"}])
-        candidates = _extract_id_candidates(ep)
-        assert any("id" in name for name, _ in candidates)
-
-    def test_extracts_uuid_from_path(self):
-        ep = _make_endpoint(
-            url="https://example.com/docs/550e8400-e29b-41d4-a716-446655440000",
-            path="/docs/550e8400-e29b-41d4-a716-446655440000",
-            path_params=[],
+    def test_prioritize_surfaces_returns_sorted(self):
+        from bundlespy.testing.models import SurfaceResult
+        r1 = SurfaceResult(
+            endpoint_url="https://example.com/about",
+            method="GET",
+            category=AttackCategory.CONFIGURATION,
+            surface_type="Config",
+            parameters=[],
+            auth_context="",
+            confidence=ConfidenceLevel.LOW,
+            evidence=[],
+            provenance_source="test",
+            burp_notes="",
         )
-        candidates = _extract_id_candidates(ep)
-        assert len(candidates) > 0
-
-    def test_no_candidates_on_plain_path(self):
-        ep = _make_endpoint(
-            url="https://example.com/about",
-            path="/about",
-            path_params=[],
-            query_params=[],
+        r2 = SurfaceResult(
+            endpoint_url="https://example.com/api/users/1",
+            method="GET",
+            category=AttackCategory.ACCESS_CONTROL,
+            surface_type="IDOR/BOLA",
+            parameters=["path:numeric_id"],
+            auth_context="Bearer",
+            confidence=ConfidenceLevel.HIGH,
+            evidence=[],
+            provenance_source="test",
+            burp_notes="",
         )
-        assert _extract_id_candidates(ep) == []
+        sorted_results = prioritize_surfaces([r1, r2])
+        # HIGH confidence access control should come first
+        assert sorted_results[0].confidence == ConfidenceLevel.HIGH
+        assert sorted_results[0].category == AttackCategory.ACCESS_CONTROL
 
 
 # ─── XSS static analysis tests ───────────────────────────────────────────────
 
 class TestXssStaticAnalysis:
-    def test_finds_dom_sinks(self):
+    def test_finds_dom_sink_innerhtml(self):
         js = "element.innerHTML = userInput;"
-        sinks = _find_dom_sinks(js)
+        sinks = _find_js_sinks(js)
         assert "innerHTML" in sinks
 
-    def test_finds_sources(self):
-        js = "var q = location.search;"
-        sources = _find_sources(js)
-        assert "location.search" in sources
+    def test_finds_dom_sink_eval(self):
+        js = "eval(userInput);"
+        sinks = _find_js_sinks(js)
+        assert "eval(" in sinks
+
+    def test_finds_dom_sink_document_write(self):
+        js = "document.write(userInput);"
+        sinks = _find_js_sinks(js)
+        assert "document.write" in sinks
 
     def test_no_false_positive_on_clean_js(self):
         js = "function add(a, b) { return a + b; }"
-        assert _find_dom_sinks(js) == []
-        assert _find_sources(js) == []
+        assert _find_js_sinks(js) == []
 
 
-# ─── Injection error detection ────────────────────────────────────────────────
-
-class TestInjectionErrors:
-    def test_detects_mysql_error(self):
-        body = "You have an error in your SQL syntax near 'WHERE id='"
-        found, text = _has_db_error(body)
-        assert found
-        assert "sql syntax" in text.lower()
-
-    def test_detects_pdo_exception(self):
-        body = "PDOException: SQLSTATE[42000]"
-        found, _ = _has_db_error(body)
-        assert found
-
-    def test_no_false_positive_on_normal_response(self):
-        body = "Welcome to the dashboard. Here are your orders."
-        found, _ = _has_db_error(body)
-        assert not found
-
-
-# ─── CSRF protection detection ────────────────────────────────────────────────
+# ─── CSRF signal detection ────────────────────────────────────────────────────
 
 class TestCsrfDetection:
     def test_detects_csrf_token_in_body_fields(self):
         ep = _make_endpoint(
             method="POST",
-            body_fields=[{"name": "_csrf_token"}],
+            body_fields=[{"name": "csrf_token"}],
         )
-        assert _has_csrf_protection(ep)
+        assert _has_csrf_signal(ep, [])
 
     def test_detects_csrf_header(self):
         ep = _make_endpoint(
             method="POST",
             request_headers={"X-CSRF-Token": "abc123"},
         )
-        assert _has_csrf_protection(ep)
+        assert _has_csrf_signal(ep, [])
 
-    def test_no_protection_detected_when_absent(self):
+    def test_no_signal_when_absent(self):
         ep = _make_endpoint(method="POST", body_fields=[], request_headers={})
-        assert not _has_csrf_protection(ep)
+        assert not _has_csrf_signal(ep, [])
+
+    def test_detects_csrf_in_js_content(self):
+        ep = _make_endpoint(method="POST", body_fields=[], request_headers={})
+        js_with_csrf = ["fetch('/api', { headers: { 'X-CSRF-Token': token } })"]
+        assert _has_csrf_signal(ep, js_with_csrf)
 
 
-# ─── Integration: AccessControlTester ────────────────────────────────────────
+# ─── Integration: AccessControlMapper ────────────────────────────────────────
 
-class TestAccessControlTesterIntegration:
-    def test_produces_candidate_for_id_endpoint(self):
+class TestAccessControlMapperIntegration:
+    def test_produces_candidate_for_numeric_id_endpoint(self):
+        from bundlespy.testing.testers.access_control import AccessControlMapper
         ep = _make_endpoint(
             url="https://example.com/api/users/1",
             path="/api/users/1",
             path_params=[{"name": "id", "example": "1"}],
         )
         result = _make_scan_result(endpoints=[ep])
-        fetcher = _make_fetcher(content='{"user":"alice"}', status=200)
-        policy  = _make_policy()
-        tester  = AccessControlTester(fetcher=fetcher, policy=policy)
-        results = tester.run(result)
+        mapper = AccessControlMapper(policy=_make_policy())
+        results = mapper.map(result)
         assert len(results) > 0
         assert all(r.category == AttackCategory.ACCESS_CONTROL for r in results)
 
-    def test_skips_out_of_scope_endpoint(self):
-        ep = _make_endpoint(url="https://other.com/api/users/1")
-        result = _make_scan_result(endpoints=[ep])
-        fetcher = _make_fetcher()
-        policy  = _make_policy(scope=_make_scope(False))
-        tester  = AccessControlTester(fetcher=fetcher, policy=policy)
-        results = tester.run(result)
-        assert all(r.status == TestStatus.SKIPPED for r in results)
-
-    def test_no_false_findings_on_no_id_endpoint(self):
+    def test_skips_endpoint_with_no_id(self):
+        from bundlespy.testing.testers.access_control import AccessControlMapper
         ep = _make_endpoint(
             url="https://example.com/about",
             path="/about",
@@ -313,43 +228,34 @@ class TestAccessControlTesterIntegration:
             query_params=[],
         )
         result = _make_scan_result(endpoints=[ep])
-        tester = AccessControlTester(fetcher=_make_fetcher(), policy=_make_policy())
-        results = tester.run(result)
+        mapper = AccessControlMapper(policy=_make_policy())
+        results = mapper.map(result)
         assert results == []
 
+    def test_deduplicates_same_pattern(self):
+        from bundlespy.testing.testers.access_control import AccessControlMapper
+        ep1 = _make_endpoint(url="https://example.com/api/users/1", path="/api/users/1")
+        ep2 = _make_endpoint(url="https://example.com/api/users/2", path="/api/users/2")
+        result = _make_scan_result(endpoints=[ep1, ep2])
+        mapper = AccessControlMapper(policy=_make_policy())
+        results = mapper.map(result)
+        # Same structural pattern - should produce only 1 candidate
+        assert len(results) == 1
 
-# ─── Integration: XssTester ──────────────────────────────────────────────────
+    def test_zero_http_requests_made(self):
+        from bundlespy.testing.testers.access_control import AccessControlMapper
+        ep = _make_endpoint(path="/api/users/1")
+        result = _make_scan_result(endpoints=[ep])
+        mapper = AccessControlMapper(policy=_make_policy())
+        results = mapper.map(result)
+        assert all(r.requests_made == 0 for r in results)
 
-class TestXssTesterIntegration:
-    def test_detects_reflection(self):
-        ep = _make_endpoint(
-            url="https://example.com/search",
-            path="/search",
-            query_params=[{"name": "q"}],
-            path_params=[],
-        )
-        # Fetcher returns canary in response
-        fetcher = _make_fetcher(content="Results for: bspy7x3k", status=200)
-        result  = _make_scan_result(endpoints=[ep])
-        tester  = XssTester(fetcher=fetcher, policy=_make_policy())
-        results = tester.run(result)
-        assert any(r.status in (TestStatus.OBSERVED, TestStatus.VALIDATED) for r in results)
 
-    def test_no_reflection_no_finding(self):
-        ep = _make_endpoint(
-            url="https://example.com/search",
-            path="/search",
-            query_params=[{"name": "q"}],
-            path_params=[],
-        )
-        fetcher = _make_fetcher(content="No results found", status=200)
-        result  = _make_scan_result(endpoints=[ep])
-        tester  = XssTester(fetcher=fetcher, policy=_make_policy())
-        # Only DOM XSS results from JS files - no reflection results
-        xss_results = [r for r in tester.run(result) if r.attack_class == "Reflected XSS"]
-        assert len(xss_results) == 0
+# ─── Integration: XssMapper ──────────────────────────────────────────────────
 
+class TestXssMapperIntegration:
     def test_dom_sink_detection_from_js(self):
+        from bundlespy.testing.testers.xss import XssMapper
         js = JSFile(
             url="https://example.com/app.js",
             source_page="https://example.com/",
@@ -360,58 +266,96 @@ class TestXssTesterIntegration:
             content="element.innerHTML = location.search;",
         )
         result = _make_scan_result(js_files=[js])
-        tester = XssTester(fetcher=_make_fetcher(), policy=_make_policy())
-        results = tester.run(result)
-        dom_results = [r for r in results if "DOM" in r.attack_class]
-        assert len(dom_results) == 1
-        assert dom_results[0].status == TestStatus.CANDIDATE
+        mapper = XssMapper(policy=_make_policy())
+        results = mapper.map(result)
+        dom_results = [r for r in results if "DOM" in r.surface_type]
+        assert len(dom_results) >= 1
+        assert all(r.status == SurfaceStatus.CANDIDATE for r in dom_results)
 
-
-# ─── Integration: ConfigurationTester ────────────────────────────────────────
-
-class TestConfigurationTesterIntegration:
-    def test_detects_env_file(self):
-        fetcher = _make_fetcher(
-            content="APP_KEY=base64:abc\nDB_PASSWORD=secret123",
-            status=200,
+    def test_no_results_on_clean_js(self):
+        from bundlespy.testing.testers.xss import XssMapper
+        js = JSFile(
+            url="https://example.com/app.js",
+            source_page="https://example.com/",
+            status_code=200,
+            content_type="application/javascript",
+            size_bytes=100,
+            sha256="def",
+            content="function add(a, b) { return a + b; }",
         )
+        result = _make_scan_result(js_files=[js])
+        mapper = XssMapper(policy=_make_policy())
+        results = mapper.map(result)
+        assert results == []
+
+    def test_search_param_produces_candidate(self):
+        from bundlespy.testing.testers.xss import XssMapper
+        ep = _make_endpoint(
+            url="https://example.com/search",
+            path="/search",
+            query_params=[{"name": "q"}],
+            path_params=[],
+        )
+        result = _make_scan_result(endpoints=[ep])
+        mapper = XssMapper(policy=_make_policy())
+        results = mapper.map(result)
+        assert len(results) > 0
+        assert all(r.requests_made == 0 for r in results)
+
+
+# ─── Integration: ConfigurationMapper ────────────────────────────────────────
+
+class TestConfigurationMapperIntegration:
+    def test_detects_env_file_200(self):
+        from bundlespy.testing.testers.configuration import ConfigurationMapper
+        fetcher = _make_fetcher(content="APP_KEY=base64:abc\nDB_PASSWORD=secret123", status=200)
         result = _make_scan_result()
-        tester = ConfigurationTester(fetcher=fetcher, policy=_make_policy())
-        results = tester.run(result)
-        env_results = [r for r in results if ".env" in r.target_url]
+        mapper = ConfigurationMapper(fetcher=fetcher, policy=_make_policy())
+        results = mapper.map(result)
+        env_results = [r for r in results if ".env" in r.endpoint_url]
         assert len(env_results) > 0
-        assert env_results[0].status == TestStatus.CONFIRMED
+        assert env_results[0].confidence == ConfidenceLevel.HIGH
 
     def test_ignores_404_paths(self):
+        from bundlespy.testing.testers.configuration import ConfigurationMapper
         fetcher = _make_fetcher(content="Not found", status=404)
-        result  = _make_scan_result()
-        tester  = ConfigurationTester(fetcher=fetcher, policy=_make_policy())
-        results = tester.run(result)
-        assert all(r.status != TestStatus.CONFIRMED for r in results)
+        result = _make_scan_result()
+        mapper = ConfigurationMapper(fetcher=fetcher, policy=_make_policy())
+        results = mapper.map(result)
+        assert len(results) == 0
+
+    def test_403_produces_medium_confidence(self):
+        from bundlespy.testing.testers.configuration import ConfigurationMapper
+        fetcher = _make_fetcher(content="Forbidden", status=403)
+        result = _make_scan_result()
+        mapper = ConfigurationMapper(fetcher=fetcher, policy=_make_policy())
+        results = mapper.map(result)
+        assert all(r.confidence == ConfidenceLevel.MEDIUM for r in results)
 
 
-# ─── Summary / report tests ───────────────────────────────────────────────────
+# ─── SurfaceStatus checks ─────────────────────────────────────────────────────
 
-class TestSummary:
-    def test_summary_counts_correctly(self):
-        from bundlespy.testing.testers.base import BaseTester
-        from bundlespy.testing.models import AttackTestResult
+class TestSurfaceStatus:
+    def test_candidate_is_default(self):
+        from bundlespy.testing.models import SurfaceResult
+        r = SurfaceResult(
+            endpoint_url="https://example.com/api/users/1",
+            method="GET",
+            category=AttackCategory.ACCESS_CONTROL,
+            surface_type="IDOR/BOLA",
+            parameters=[],
+            auth_context="Bearer",
+            confidence=ConfidenceLevel.HIGH,
+            evidence=[],
+            provenance_source="test",
+            burp_notes="",
+        )
+        assert r.status == SurfaceStatus.CANDIDATE
 
-        class _MockTester(BaseTester):
-            category = "Test"
-            def run(self, result):
-                self._results.append(AttackTestResult(status=TestStatus.VALIDATED))
-                self._results.append(AttackTestResult(status=TestStatus.SKIPPED))
-                self._results.append(AttackTestResult(status=TestStatus.CANDIDATE))
-                return self._results
+    def test_confidence_ordering(self):
+        assert ConfidenceLevel.order(ConfidenceLevel.HIGH) < ConfidenceLevel.order(ConfidenceLevel.MEDIUM)
+        assert ConfidenceLevel.order(ConfidenceLevel.MEDIUM) < ConfidenceLevel.order(ConfidenceLevel.LOW)
 
-        t = _MockTester(fetcher=_make_fetcher(), policy=_make_policy())
-        t.run(_make_scan_result())
-        s = t.summary()
-        assert s.skipped == 1
-        assert s.validated == 1
-
-    def test_zero_confirmed_without_evidence(self):
-        from bundlespy.testing.models import AttackTestResult
-        r = AttackTestResult(status=TestStatus.CANDIDATE, confidence=0.1)
-        assert r.status != TestStatus.CONFIRMED
+    def test_category_priority(self):
+        assert AttackCategory.priority(AttackCategory.ACCESS_CONTROL) < AttackCategory.priority(AttackCategory.CONFIGURATION)
+        assert AttackCategory.priority(AttackCategory.INJECTION) < AttackCategory.priority(AttackCategory.XSS)
