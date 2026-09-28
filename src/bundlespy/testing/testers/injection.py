@@ -1,153 +1,94 @@
 """
-Injection tester (SQL, NoSQL, LDAP, template).
-Uses differential, non-destructive probes only.
+InjectionMapper - SQL/NoSQL/GraphQL injection surface identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 """
-import re
-import time
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation, differential
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint
 
-# Safe boolean-differential probes (no destructive SQL)
-_BOOLEAN_TRUE  = "1' AND '1'='1"
-_BOOLEAN_FALSE = "1' AND '1'='2"
-_TIMING_PROBE  = "1; SELECT SLEEP(0)--"  # harmless 0-second sleep
+# Param names with high injection relevance
+_HIGH_SIGNAL_PARAMS = {
+    "id", "user", "user_id", "name", "email", "search", "username",
+}
 
-# DB error signatures (evidence, not proof)
-_DB_ERROR_PATTERNS = [
-    re.compile(r'(sql syntax|mysql_fetch|pg_query|ora-\d{5}|sqlite.*error|'
-               r'unclosed quotation|unterminated string|odbc.*error|'
-               r'jdbc.*exception|syntax error.*near|column.*does not exist)',
-               re.I),
-    re.compile(r'(PDOException|SQLException|OracleException|MySQLi?Exception)', re.I),
-]
+_MEDIUM_SIGNAL_PARAMS = {
+    "filter", "category", "sort", "order", "page", "limit",
+    "where", "query", "select", "table", "column", "field",
+    "key", "value", "type", "status",
+}
 
-_NOSQL_ERROR_PATTERNS = [
-    re.compile(r'(mongodb.*error|MongoServerError|BSON|CastError:.*path)', re.I),
-]
+_ALL_INJECTION_PARAMS = _HIGH_SIGNAL_PARAMS | _MEDIUM_SIGNAL_PARAMS
 
-_SSTI_CANARIES = [
-    ("{{7*7}}", "49"),        # Jinja2/Twig
-    ("${7*7}",  "49"),        # FreeMarker/Spring EL
-    ("#{7*7}",  "49"),        # Ruby ERB / Thymeleaf
-]
+_GRAPHQL_PATH_SIGNALS = {"/graphql", "/graphiql", "/playground", "/gql"}
 
-_INJECTION_PARAM_SIGNALS = [
-    "id", "q", "query", "search", "filter", "sort", "order",
-    "category", "type", "name", "user", "username", "email",
-    "keyword", "term", "value", "field", "where", "condition",
-]
+_BURP_NOTES = (
+    "Test SQLi with sqlmap or manual boolean/time-based. "
+    "For GraphQL: use graphql-cop. "
+    "For NoSQL: test with {$gt:''} operators."
+)
 
-def _has_db_error(body: str) -> tuple:
-    for pat in _DB_ERROR_PATTERNS:
-        m = pat.search(body)
-        if m:
-            return True, m.group(0)
-    return False, ""
 
-def _has_nosql_error(body: str) -> tuple:
-    for pat in _NOSQL_ERROR_PATTERNS:
-        m = pat.search(body)
-        if m:
-            return True, m.group(0)
-    return False, ""
-
-class InjectionTester(BaseTester):
+class InjectionMapper(BaseSurfaceMapper):
     category = AttackCategory.INJECTION
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         for ep in result.endpoints:
-            params = list(ep.query_params or []) + list(ep.path_params or [])
-            for qp in params:
-                pname = (qp.get("name") or "").lower()
-                if not any(s in pname for s in _INJECTION_PARAM_SIGNALS):
-                    continue  # skip low-signal params
+            method = (ep.method or "GET").upper()
+            path   = (ep.path or ep.url or "").lower()
 
-                allowed, reason = self._policy.check(
-                    ep.url, ep.method, pname, "SQLI", ep.auth_context or "",
+            # GraphQL endpoints - flag for introspection and injection
+            if ep.category == "GRAPHQL" or any(sig in path for sig in _GRAPHQL_PATH_SIGNALS):
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "GraphQL Injection",
+                    parameters   = ["graphql:query"],
+                    confidence   = ConfidenceLevel.HIGH,
+                    evidence     = [f"GraphQL endpoint: {ep.url}"],
+                    burp_notes   = (
+                        "Run GraphQL introspection. Test for injection via graphql-cop. "
+                        "Check for batching attacks, IDOR via query, and sensitive schema exposure."
+                    ),
                 )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="SQL Injection",
-                               target_url=ep.url, parameter=pname)
+                continue
+
+            # Query params
+            for qp in (ep.query_params or []):
+                name = (qp.get("name") or "").lower()
+                if name not in _ALL_INJECTION_PARAMS:
                     continue
 
-                baseline = capture_baseline(self._fetcher, ep.url)
-                if baseline is None:
-                    self._skip("baseline_unreachable", category=self.category,
-                               attack_class="SQL Injection", target_url=ep.url, parameter=pname)
-                    continue
+                confidence = ConfidenceLevel.HIGH if name in _HIGH_SIGNAL_PARAMS and method in ("POST", "PUT") else \
+                             ConfidenceLevel.HIGH if name in _HIGH_SIGNAL_PARAMS else \
+                             ConfidenceLevel.MEDIUM
 
-                sep = "&" if "?" in ep.url else "?"
-
-                # Boolean true probe
-                true_url  = f"{ep.url}{sep}{pname}={_BOOLEAN_TRUE}"
-                false_url = f"{ep.url}{sep}{pname}={_BOOLEAN_FALSE}"
-
-                for url2 in (true_url, false_url):
-                    self._policy.check(url2, ep.method, pname, "SQLI_BOOL", ep.auth_context or "")
-
-                true_obs  = capture_observation(self._fetcher, true_url)
-                false_obs = capture_observation(self._fetcher, false_url)
-
-                if true_obs is None or false_obs is None:
-                    continue
-
-                evidence  = []
-                status    = TestStatus.CANDIDATE
-                confidence = 0.2
-                attack_class = "SQL Injection"
-
-                # Check for DB errors
-                has_err, err_text = _has_db_error(true_obs.body_excerpt + false_obs.body_excerpt)
-                if has_err:
-                    evidence.append(f"Database error signature: '{err_text[:80]}'")
-                    status = TestStatus.OBSERVED
-                    confidence = 0.5
-                    attack_class = "SQL Injection"
-
-                # Boolean differential
-                diff = differential(baseline, true_obs)
-                diff2 = differential(true_obs, false_obs)
-                if diff2.get("content_length") or diff2.get("body_changed"):
-                    bl, ol = diff2.get("content_length", (0, 0))
-                    evidence.append(f"Boolean differential: TRUE/FALSE responses differ ({bl} vs {ol} bytes)")
-                    if not has_err:
-                        status = TestStatus.OBSERVED
-                        confidence = 0.45
-
-                # NoSQL check
-                has_nosql, nosql_text = _has_nosql_error(true_obs.body_excerpt)
-                if has_nosql:
-                    evidence.append(f"NoSQL error signature: '{nosql_text[:80]}'")
-                    status = TestStatus.OBSERVED
-                    confidence = 0.5
-                    attack_class = "NoSQL Injection"
-
-                if not evidence:
-                    continue  # no signal, don't report
-
-                r = AttackTestResult(
-                    category=self.category,
-                    attack_class=attack_class,
-                    target_url=ep.url,
-                    parameter=pname,
-                    method=ep.method,
-                    route=ep.path,
-                    authentication_context=ep.auth_context or "",
-                    payload=_BOOLEAN_TRUE,
-                    baseline=baseline,
-                    observation=true_obs,
-                    status=status,
-                    confidence=confidence,
-                    evidence=evidence,
-                    why_tested=f"Parameter '{pname}' exhibits database-like naming/behavior",
-                    what_changed=f"Injected boolean SQL probe into '{pname}'",
-                    what_observed=f"HTTP {true_obs.status_code}" + (f" - error: {err_text[:40]}" if has_err else ""),
-                    what_remains_unverified="Boolean differential observed but not confirmed as injection - encoding/WAF not tested",
-                    requests_made=3,
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "SQL/NoSQL Injection",
+                    parameters   = [f"query:{name}"],
+                    confidence   = confidence,
+                    evidence     = [
+                        f"Injection-relevant query param '{name}' on {method} {ep.url}",
+                    ],
+                    burp_notes   = _BURP_NOTES,
                 )
-                self._results.append(r)
+
+            # Body fields on state-changing methods
+            if method in ("POST", "PUT", "PATCH"):
+                for bf in (ep.body_fields or []):
+                    name = (bf.get("name") or "").lower()
+                    if name not in _ALL_INJECTION_PARAMS:
+                        continue
+                    confidence = ConfidenceLevel.HIGH if name in _HIGH_SIGNAL_PARAMS else ConfidenceLevel.MEDIUM
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SQL/NoSQL Injection",
+                        parameters   = [f"body:{name}"],
+                        confidence   = confidence,
+                        evidence     = [
+                            f"Injection-relevant body field '{name}' on {method} {ep.url}",
+                        ],
+                        burp_notes   = _BURP_NOTES,
+                    )
 
         return self._results
