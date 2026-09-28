@@ -1,5 +1,5 @@
 """
-AccessControlMapper - IDOR/BOLA surface candidate identification.
+AccessControlMapper - IDOR/BOLA and Privilege Escalation surface candidate identification.
 Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 """
 import re
@@ -47,6 +47,15 @@ _IDOR_BODY_REFS = {
     "referenced_id", "linked_id",
 }
 
+# Param/field names that suggest privilege or role manipulation
+_PRIVESC_PARAMS = {
+    "role", "is_admin", "admin", "privilege", "privileges",
+    "permission", "permissions", "group", "access_level",
+    "user_type", "account_type", "plan", "tier", "scope",
+    "authority", "can_admin", "superuser", "is_superuser",
+    "is_staff", "is_moderator", "elevation",
+}
+
 _BURP_NOTES = (
     "Test adjacent IDs (id-1, id+1, id+100). "
     "Try unauthenticated. "
@@ -66,6 +75,13 @@ _BURP_NOTES_HASH = (
     "Test with other known hash IDs from the application. "
     "Check if IDs are guessable (low entropy) or sequential. "
     "Try IDOR with IDs from other user sessions."
+)
+
+_BURP_NOTES_PRIVESC = (
+    "Privilege escalation signal. "
+    "Test by submitting role=admin, is_admin=true, privilege=superuser alongside the normal request. "
+    "On PUT/PATCH, include this field with an elevated value and check if accepted. "
+    "Try both integer (1, 0) and string (admin, true, superuser) values."
 )
 
 # Paths where a short hash is unlikely to be a real ID (static assets, etc.)
@@ -147,13 +163,19 @@ class AccessControlMapper(BaseSurfaceMapper):
             # 1. Numeric IDs in path
             if _NUMERIC_ID_RE.search(path):
                 params_found.append("path:numeric_id")
-                evidence.append(f"Numeric ID in path: {path}")
+                evidence.append(
+                    f"Numeric ID in path: {path} - "
+                    "Type: Horizontal privilege escalation (accessing another user's resource)"
+                )
                 confidence = ConfidenceLevel.HIGH if ep.auth_context and ep.auth_context.lower() not in ("", "none") else ConfidenceLevel.MEDIUM
 
             # 2. UUID in path
             if _UUID_RE.search(path):
                 params_found.append("path:uuid")
-                evidence.append(f"UUID in path: {path}")
+                evidence.append(
+                    f"UUID in path: {path} - "
+                    "Type: Horizontal privilege escalation (accessing another user's resource)"
+                )
                 confidence = ConfidenceLevel.HIGH if ep.auth_context and ep.auth_context.lower() not in ("", "none") else ConfidenceLevel.MEDIUM
 
             # 3. Short hash ID in path (e.g. /share/abc123f, /post/7Hk3pQ)
@@ -162,7 +184,10 @@ class AccessControlMapper(BaseSurfaceMapper):
                 hash_val = hash_match.group(1)
                 if _is_likely_hash_id(path, hash_val):
                     params_found.append("path:hash_id")
-                    evidence.append(f"Short hash/token ID in path: {path}")
+                    evidence.append(
+                        f"Short hash/token ID in path: {path} - "
+                        "Type: Horizontal privilege escalation (accessing another user's resource)"
+                    )
                     # Hash IDs suggest opaque references - lower initial confidence
                     if confidence == ConfidenceLevel.LOW:
                         confidence = ConfidenceLevel.LOW  # keep LOW unless auth context boosts
@@ -172,7 +197,10 @@ class AccessControlMapper(BaseSurfaceMapper):
                 name = (pp.get("name") or "").lower()
                 if name in _IDOR_PARAM_NAMES:
                     params_found.append(f"path_param:{name}")
-                    evidence.append(f"Path parameter '{name}' matches object ID naming")
+                    evidence.append(
+                        f"Path parameter '{name}' matches object ID naming - "
+                        "Type: Horizontal privilege escalation (accessing another user's resource)"
+                    )
                     if ep.auth_context and ep.auth_context.lower() not in ("", "none"):
                         confidence = ConfidenceLevel.HIGH
 
@@ -181,7 +209,10 @@ class AccessControlMapper(BaseSurfaceMapper):
                 name = (qp.get("name") or "").lower()
                 if name in _IDOR_PARAM_NAMES:
                     params_found.append(f"query:{name}")
-                    evidence.append(f"Query parameter '{name}' matches object ID naming")
+                    evidence.append(
+                        f"Query parameter '{name}' matches object ID naming - "
+                        "Type: Horizontal privilege escalation (accessing another user's resource)"
+                    )
                     if confidence != ConfidenceLevel.HIGH:
                         confidence = ConfidenceLevel.MEDIUM
 
@@ -191,7 +222,10 @@ class AccessControlMapper(BaseSurfaceMapper):
                     name = (bf.get("name") or "").lower()
                     if name in _IDOR_BODY_REFS:
                         params_found.append(f"body:{name}")
-                        evidence.append(f"Body field '{name}' on {method} - may allow reassigning object ownership")
+                        evidence.append(
+                            f"Body field '{name}' on {method} - may allow reassigning object ownership - "
+                            "Type: Horizontal privilege escalation (accessing another user's resource)"
+                        )
                         if confidence != ConfidenceLevel.HIGH:
                             confidence = ConfidenceLevel.MEDIUM
 
@@ -204,7 +238,8 @@ class AccessControlMapper(BaseSurfaceMapper):
             if header_hits:
                 # Headers are standalone - emit a separate candidate
                 header_evidence = [
-                    f"Identity headers in request: {', '.join(header_hits)}",
+                    f"Identity headers in request: {', '.join(header_hits)} - "
+                    "Type: Horizontal via identity header manipulation",
                     "These headers may control which user/resource the request targets",
                 ]
                 auth_ctx = ep.auth_context or ""
@@ -229,33 +264,85 @@ class AccessControlMapper(BaseSurfaceMapper):
                     )
 
             if not params_found:
-                continue
-
-            # Dedup by structural path pattern
-            pat = _path_pattern(path)
-            dedup_key = f"{method}:{pat}:{','.join(sorted(params_found))}"
-            if dedup_key in seen_patterns:
-                continue
-            seen_patterns.add(dedup_key)
-
-            auth_ctx = ep.auth_context or ""
-            if auth_ctx and auth_ctx.lower() not in ("", "none"):
-                evidence.append(f"Auth context: {auth_ctx} (auth-gated resource)")
-
-            # Determine burp notes based on what we found
-            if "path:hash_id" in params_found and len(params_found) == 1:
-                burp = _BURP_NOTES_HASH
+                # Skip to privilege escalation check even if no IDOR params found
+                pass
             else:
-                burp = _BURP_NOTES
+                # Dedup by structural path pattern
+                pat = _path_pattern(path)
+                dedup_key = f"{method}:{pat}:{','.join(sorted(params_found))}"
+                if dedup_key not in seen_patterns:
+                    seen_patterns.add(dedup_key)
 
-            self._candidate(
-                endpoint     = ep,
-                surface_type = "IDOR/BOLA",
-                parameters   = params_found,
-                confidence   = confidence,
-                evidence     = evidence,
-                burp_notes   = burp,
-                auth_context = auth_ctx,
-            )
+                    auth_ctx = ep.auth_context or ""
+                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                        evidence.append(f"Auth context: {auth_ctx} (auth-gated resource)")
+
+                    # Determine burp notes based on what we found
+                    if "path:hash_id" in params_found and len(params_found) == 1:
+                        burp = _BURP_NOTES_HASH
+                    else:
+                        burp = _BURP_NOTES
+
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "IDOR/BOLA",
+                        parameters   = params_found,
+                        confidence   = confidence,
+                        evidence     = evidence,
+                        burp_notes   = burp,
+                        auth_context = auth_ctx,
+                    )
+
+            # 8. Privilege escalation - check query params, body fields on ALL methods
+            privesc_hits = []
+            privesc_evidence = []
+
+            # Query params matching privilege escalation param names
+            for qp in (ep.query_params or []):
+                name = (qp.get("name") or "").lower()
+                if name in _PRIVESC_PARAMS:
+                    privesc_hits.append(f"query:{name}")
+                    privesc_evidence.append(
+                        f"Query parameter '{name}' is a privilege escalation signal - "
+                        "Type: Vertical privilege escalation (elevating own permissions)"
+                    )
+
+            # Body fields matching privilege escalation param names - ALL methods
+            for bf in (ep.body_fields or []):
+                name = (bf.get("name") or "").lower()
+                if name in _PRIVESC_PARAMS:
+                    privesc_hits.append(f"body:{name}")
+                    privesc_evidence.append(
+                        f"Body field '{name}' on {method} is a privilege escalation signal - "
+                        "Type: Vertical privilege escalation (elevating own permissions)"
+                    )
+
+            if privesc_hits:
+                # Confidence: HIGH for write methods (actively setting a value), MEDIUM for GET
+                if method in ("PUT", "PATCH", "POST"):
+                    privesc_conf = ConfidenceLevel.HIGH
+                else:
+                    privesc_conf = ConfidenceLevel.MEDIUM
+
+                auth_ctx = ep.auth_context or ""
+                if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                    privesc_evidence.append(f"Auth context: {auth_ctx} (auth-gated resource)")
+
+                pat = _path_pattern(path)
+                for hit in privesc_hits:
+                    # param_name is the last part after the colon (query:role -> role)
+                    param_name = hit.split(":", 1)[-1]
+                    privesc_dedup = f"privesc:{method}:{pat}:{param_name}"
+                    if privesc_dedup not in seen_patterns:
+                        seen_patterns.add(privesc_dedup)
+                        self._candidate(
+                            endpoint     = ep,
+                            surface_type = "Privilege Escalation",
+                            parameters   = [hit],
+                            confidence   = privesc_conf,
+                            evidence     = [e for e in privesc_evidence if param_name in e],
+                            burp_notes   = _BURP_NOTES_PRIVESC,
+                            auth_context = auth_ctx,
+                        )
 
         return self._results
