@@ -1038,17 +1038,44 @@ def run_scan(args) -> int:
 
     # Merge headless-intercepted endpoints (real network calls, high confidence)
     if args.headless and "all_endpoints_extra" in dir():
-        from .analysis.endpoints import _categorize_path as _cat_path
+        from urllib.parse import urlparse as _upep
         seen_ep_keys = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
         for ep in all_endpoints_extra:
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_ep_keys:
+                # Bug fix: filter out-of-scope external URLs (portfolio links, 3rd-party)
+                if not scope.in_scope(ep.url):
+                    ep.category = "EXTERNAL"
+                    # Still track them but don't mix into main attack surface
+                    # Only append EXTERNAL endpoints if they were explicitly discovered
+                    # as API calls (not plain page navigations)
+                    if ep.kind not in ("route", "page", ""):
+                        all_endpoints.append(ep)
+                    continue
                 seen_ep_keys.add(key)
-                # Re-categorize UNKNOWN endpoints using full classifier
+                # Bug fix: re-categorize UNKNOWN endpoints with same logic as crawler
+                # _categorize_path() never returns ROUTE - we must handle that here
                 if ep.category in ("UNKNOWN", ""):
-                    from urllib.parse import urlparse as _upep
                     _ep_path = _upep(ep.url).path or ep.url
-                    ep.category = _cat_path(_ep_path)
+                    _ep_lower = _ep_path.lower()
+                    if any(k in _ep_lower for k in ["/login", "/logout", "/auth", "/register", "/signin", "/signup"]):
+                        ep.category = "AUTH"
+                    elif any(k in _ep_lower for k in ["/admin", "/administration", "/manage", "/dashboard"]):
+                        ep.category = "ADMIN"
+                    elif "/graphql" in _ep_lower:
+                        ep.category = "GRAPHQL"
+                    elif any(k in _ep_lower for k in ["/api/", "/rest/", "/v1/", "/v2/", "/v3/"]):
+                        ep.category = "API"
+                    elif "/ws" in _ep_lower or _ep_path.startswith("ws"):
+                        ep.category = "WEBSOCKET"
+                    elif any(k in _ep_lower for k in ["/upload", "/uploads", "/import"]):
+                        ep.category = "UPLOAD"
+                    elif any(k in _ep_lower for k in ["/download", "/exports", "/export"]):
+                        ep.category = "DOWNLOAD"
+                    elif ep.kind in ("route", "page") or ep.source_file in ("headless://route", "headless://page"):
+                        ep.category = "ROUTE"
+                    else:
+                        ep.category = "ROUTE"  # headless-discovered pages are frontend routes
                 all_endpoints.append(ep)
     if not args.quiet:
         phase_done("Analysis complete",
