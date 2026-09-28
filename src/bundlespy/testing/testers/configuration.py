@@ -11,6 +11,9 @@ from ..models import SurfaceResult, SurfaceStatus, AttackCategory, ConfidenceLev
 from ..safety import SurfaceSafetyPolicy
 from ...storage.models import ScanResult, Endpoint
 
+# Paths that are public by design - accessible = expected, not a finding
+_INFORMATIONAL_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
+
 # Comprehensive list of common config/debug paths to probe
 CONFIG_PATHS = [
     "/.env", "/.env.local", "/.env.production", "/.env.backup",
@@ -153,27 +156,40 @@ class ConfigurationMapper(BaseSurfaceMapper):
             surface_type = "Config/Debug Path"
 
             if status_code == 200:
-                evidence.append(f"HTTP 200 at {path} - path is accessible")
-                confidence = ConfidenceLevel.HIGH
-                surface_type = "EXPOSED"
-
-                # Content-based boosters
                 body = content or ""
-                if path in ("/.env", "/.env.local", "/.env.production", "/.env.backup"):
-                    if any(k in body for k in ["DB_PASSWORD", "APP_KEY", "SECRET", "API_KEY", "DATABASE_URL", "PASSWORD", "TOKEN"]):
-                        evidence.append("Environment file contains credential key names")
-                    else:
-                        evidence.append("Environment file accessible")
-                elif "/.git/" in path:
-                    if "[core]" in body or "[remote" in body:
-                        evidence.append("Git config content confirmed - repo likely fully exposed")
-                elif "/actuator" in path:
-                    evidence.append("Spring Boot actuator endpoint responding")
-                elif path in ("/swagger.json", "/swagger.yaml", "/openapi.json", "/openapi.yaml"):
-                    if any(k in body for k in ['"paths"', '"swagger"', '"openapi"', "paths:"]):
-                        evidence.append("API specification content confirmed")
-                elif "/graphql" in path or "/graphiql" in path or "/playground" in path:
-                    evidence.append("GraphQL endpoint responding")
+
+                # Public-by-design paths - informational only, not a security issue
+                if path in _INFORMATIONAL_PATHS:
+                    evidence.append(f"HTTP 200 at {path} - public path, accessible as expected")
+                    confidence   = ConfidenceLevel.LOW
+                    surface_type = "INFORMATIONAL"
+                    # Still useful for recon (robots.txt discloses paths, sitemap lists routes)
+                    if path == "/robots.txt" and "Disallow:" in body:
+                        evidence.append("robots.txt contains Disallow entries - review for hidden paths")
+                    elif path == "/sitemap.xml" and "<url>" in body:
+                        evidence.append("sitemap.xml lists site URLs - useful for endpoint discovery")
+
+                else:
+                    evidence.append(f"HTTP 200 at {path} - path is accessible")
+                    confidence = ConfidenceLevel.HIGH
+                    surface_type = "EXPOSED"
+
+                    # Content-based boosters
+                    if path in ("/.env", "/.env.local", "/.env.production", "/.env.backup"):
+                        if any(k in body for k in ["DB_PASSWORD", "APP_KEY", "SECRET", "API_KEY", "DATABASE_URL", "PASSWORD", "TOKEN"]):
+                            evidence.append("Environment file contains credential key names")
+                        else:
+                            evidence.append("Environment file accessible")
+                    elif "/.git/" in path:
+                        if "[core]" in body or "[remote" in body:
+                            evidence.append("Git config content confirmed - repo likely fully exposed")
+                    elif "/actuator" in path:
+                        evidence.append("Spring Boot actuator endpoint responding")
+                    elif path in ("/swagger.json", "/swagger.yaml", "/openapi.json", "/openapi.yaml"):
+                        if any(k in body for k in ['"paths"', '"swagger"', '"openapi"', "paths:"]):
+                            evidence.append("API specification content confirmed")
+                    elif "/graphql" in path or "/graphiql" in path or "/playground" in path:
+                        evidence.append("GraphQL endpoint responding")
 
             elif status_code == 403:
                 evidence.append(f"HTTP 403 at {path} - path exists but is restricted (may be bypassable)")
