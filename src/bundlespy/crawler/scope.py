@@ -57,6 +57,8 @@ class ScopeChecker:
         """Check if a URL points to a JavaScript file."""
         try:
             path = urlparse(url).path.lower()
-            return path.endswith(".js") or path.endswith(".mjs")
+            return any(path.endswith(ext) for ext in (
+                ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"
+            ))
         except Exception:
             return False
