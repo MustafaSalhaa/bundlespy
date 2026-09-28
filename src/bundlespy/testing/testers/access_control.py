@@ -1,138 +1,114 @@
 """
-Access control tester.
-Identifies endpoints with object identifiers and tests authorization boundaries.
+AccessControlMapper - IDOR/BOLA surface candidate identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 """
 import re
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation, differential
+from urllib.parse import urlparse
+
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ...storage.models import ScanResult, Endpoint
 
-# Patterns that suggest an object ID in the path
-_ID_PATTERNS = [
-    re.compile(r'/(\d{1,12})(?:/|$|\?)'),          # /123 or /123/
-    re.compile(r'/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)', re.I),  # UUID
-    re.compile(r'/([a-z0-9]{20,})(?:/|$)', re.I),  # long opaque ID
-]
+# Regex patterns that indicate an object identifier in the path
+_NUMERIC_ID_RE  = re.compile(r'/(\d{1,12})(?=/|$|\?)')
+_UUID_RE        = re.compile(
+    r'/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=/|$)',
+    re.I,
+)
 
+# Query/body param names that suggest object identifiers
 _IDOR_PARAM_NAMES = {
     "id", "user_id", "account_id", "order_id", "item_id",
     "product_id", "report_id", "doc_id", "document_id",
     "file_id", "message_id", "record_id", "object_id",
+    "uid", "user", "account", "record",
 }
 
-def _extract_id_candidates(ep: Endpoint):
-    """Returns list of (param_name, current_value_or_pattern) for IDOR testing."""
-    candidates = []
-    # Path parameters
-    for pp in (ep.path_params or []):
-        name = (pp.get("name") or "").lower()
-        if name in _IDOR_PARAM_NAMES or name == "id":
-            candidates.append(("path:" + name, pp.get("example", "1")))
-    # Query parameters
-    for qp in (ep.query_params or []):
-        name = (qp.get("name") or "").lower()
-        if name in _IDOR_PARAM_NAMES:
-            candidates.append(("query:" + name, qp.get("example", "1")))
-    # Regex scan on path
-    for pattern in _ID_PATTERNS:
-        m = pattern.search(ep.path or ep.url or "")
-        if m:
-            candidates.append(("path:id", m.group(1)))
-    return candidates
+_BURP_NOTES = (
+    "Test adjacent IDs (±1, ±10). Try unauthenticated. "
+    "Try other user session. Check if response differs."
+)
 
-class AccessControlTester(BaseTester):
+
+def _path_pattern(path: str) -> str:
+    """Normalize a path to its structural pattern, stripping actual ID values."""
+    # Use lookahead so the trailing / is not consumed
+    p = re.sub(r'/(\d{1,12})(?=/|$|\?)', r'/{numeric_id}', path)
+    p = re.sub(
+        r'/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=/|$)',
+        r'/{uuid}', p, flags=re.I,
+    )
+    return p
+
+
+class AccessControlMapper(BaseSurfaceMapper):
     category = AttackCategory.ACCESS_CONTROL
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
+        # Dedup by path pattern so /user/1 and /user/2 produce one candidate
+        seen_patterns: set = set()
+
         for ep in result.endpoints:
-            if ep.category not in ("API", "AUTH", "ADMIN", "ROUTE"):
+            path = ep.path or urlparse(ep.url).path or ""
+            method = (ep.method or "GET").upper()
+
+            params_found = []
+            confidence   = ConfidenceLevel.LOW
+            evidence     = []
+
+            # 1. Numeric IDs in path
+            if _NUMERIC_ID_RE.search(path):
+                params_found.append("path:numeric_id")
+                evidence.append(f"Numeric ID in path: {path}")
+                confidence = ConfidenceLevel.HIGH if ep.auth_context and ep.auth_context.lower() not in ("", "none") else ConfidenceLevel.MEDIUM
+
+            # 2. UUID in path
+            if _UUID_RE.search(path):
+                params_found.append("path:uuid")
+                evidence.append(f"UUID in path: {path}")
+                confidence = ConfidenceLevel.HIGH if ep.auth_context and ep.auth_context.lower() not in ("", "none") else ConfidenceLevel.MEDIUM
+
+            # 3. Path params named like IDs
+            for pp in (ep.path_params or []):
+                name = (pp.get("name") or "").lower()
+                if name in _IDOR_PARAM_NAMES:
+                    params_found.append(f"path_param:{name}")
+                    evidence.append(f"Path parameter '{name}' matches object ID naming")
+                    if ep.auth_context and ep.auth_context.lower() not in ("", "none"):
+                        confidence = ConfidenceLevel.HIGH
+
+            # 4. Query params named like IDs
+            for qp in (ep.query_params or []):
+                name = (qp.get("name") or "").lower()
+                if name in _IDOR_PARAM_NAMES:
+                    params_found.append(f"query:{name}")
+                    evidence.append(f"Query parameter '{name}' matches object ID naming")
+                    if confidence != ConfidenceLevel.HIGH:
+                        confidence = ConfidenceLevel.MEDIUM
+
+            if not params_found:
                 continue
-            candidates = _extract_id_candidates(ep)
-            if not candidates:
+
+            # Dedup by structural path pattern
+            pat = _path_pattern(path)
+            dedup_key = f"{method}:{pat}:{','.join(sorted(params_found))}"
+            if dedup_key in seen_patterns:
                 continue
+            seen_patterns.add(dedup_key)
 
-            for param_name, current_value in candidates:
-                # Safety check
-                allowed, reason = self._policy.check(
-                    url=ep.url, method=ep.method,
-                    param=param_name, test_type="IDOR",
-                    auth_state=ep.auth_context or "",
-                )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="IDOR",
-                               target_url=ep.url, parameter=param_name, method=ep.method,
-                               why_tested="Object identifier present in endpoint")
-                    continue
+            auth_ctx = ep.auth_context or ""
+            if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                evidence.append(f"Auth context: {auth_ctx} (auth-gated resource)")
 
-                # Capture baseline
-                baseline = capture_baseline(self._fetcher, ep.url)
-                if baseline is None:
-                    self._skip("baseline_unreachable", category=self.category,
-                               attack_class="IDOR", target_url=ep.url, parameter=param_name)
-                    continue
-
-                # Test with adjacent ID (baseline+1 and baseline-1)
-                test_results = []
-                for delta in (1, -1):
-                    try:
-                        val = int(current_value)
-                        test_val = str(max(1, val + delta))
-                        test_url = ep.url.replace(f"/{current_value}", f"/{test_val}", 1)
-                        if test_url == ep.url:
-                            continue
-                        obs_allowed, obs_reason = self._policy.check(
-                            test_url, ep.method, param_name, "IDOR_DELTA",
-                            ep.auth_context or "",
-                        )
-                        if not obs_allowed:
-                            continue
-                        obs = capture_observation(self._fetcher, test_url)
-                        if obs:
-                            test_results.append((test_url, test_val, obs))
-                    except (ValueError, TypeError):
-                        break
-
-                # Differential analysis
-                for test_url, test_val, obs in test_results:
-                    diff = differential(baseline, obs)
-                    evidence = []
-                    status = TestStatus.CANDIDATE
-
-                    if obs.status_code in (200, 201) and baseline.status_code in (200, 201):
-                        if diff.get("body_changed") and not diff.get("content_length"):
-                            evidence.append(f"Body changed with ID={test_val} but same size - structural similarity")
-                            status = TestStatus.OBSERVED
-                        elif diff.get("content_length"):
-                            bl, ol = diff["content_length"]
-                            if ol > bl * 1.5:
-                                evidence.append(f"Response larger with ID={test_val} ({bl} -> {ol} bytes)")
-                                status = TestStatus.OBSERVED
-                    elif obs.status_code == 200 and baseline.status_code == 403:
-                        evidence.append(f"403 baseline but 200 with ID={test_val} - possible authorization bypass")
-                        status = TestStatus.VALIDATED
-
-                    r = AttackTestResult(
-                        category=self.category,
-                        attack_class="IDOR",
-                        target_url=ep.url,
-                        parameter=param_name,
-                        method=ep.method,
-                        route=ep.path,
-                        authentication_context=ep.auth_context or "",
-                        payload=test_val,
-                        baseline=baseline,
-                        observation=obs,
-                        status=status,
-                        confidence=0.6 if status == TestStatus.OBSERVED else (0.8 if status == TestStatus.VALIDATED else 0.3),
-                        evidence=evidence,
-                        why_tested=f"Numeric/UUID identifier in endpoint path or parameter ({param_name})",
-                        what_changed=f"Requested resource ID {current_value} -> {test_val}",
-                        what_observed=f"HTTP {obs.status_code}, {obs.content_length} bytes" + (f" (diff: {diff})" if diff else ""),
-                        what_remains_unverified="Response body not parsed for ownership - manual review required",
-                        requests_made=2,
-                    )
-                    self._results.append(r)
+            self._candidate(
+                endpoint     = ep,
+                surface_type = "IDOR/BOLA",
+                parameters   = params_found,
+                confidence   = confidence,
+                evidence     = evidence,
+                burp_notes   = _BURP_NOTES,
+                auth_context = auth_ctx,
+            )
 
         return self._results
