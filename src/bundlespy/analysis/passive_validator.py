@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple
 import requests
 import urllib3
 
-from ..storage.models import Finding, Provenance
+from ..storage.models import Finding, Provenance, ValidationStatus, AccessLevel
 from ..safety.network import validate_url
 from ..utils.stealth import random_ua
 
@@ -50,7 +50,7 @@ class ProbeResult:
     source_url:    str           # The JS file URL probed (never the secret value)
     http_status:   int = 0
     pattern_found: bool = False  # Was the redacted prefix still present in the response?
-    validation_status: str = "NOT_VALIDATED"  # CONFIRMED | UNREACHABLE | ERROR | NOT_VALIDATED
+    validation_status: str = ValidationStatus.NOT_ATTEMPTED  # ValidationStatus constant
     error:         str = ""
     elapsed_ms:    int = 0
 
@@ -181,26 +181,30 @@ def probe_finding(
     source_url = finding.file_url or ""
     skip_prefixes = ("inline:", "html:", "sourcemap://", "local://", "")
     if not source_url or any(source_url.startswith(pfx) for pfx in skip_prefixes if pfx):
-        probe.validation_status = "NOT_VALIDATED"
-        probe.error = "Inline or synthetic source — cannot probe"
-        finding.provenance.validation_status = "NOT_VALIDATED"
+        probe.validation_status = ValidationStatus.NOT_ATTEMPTED
+        probe.error = "Inline or synthetic source - cannot probe"
+        finding.provenance.validation_status = ValidationStatus.NOT_ATTEMPTED
+        finding.provenance.validation_reason = probe.error
         finding.provenance.skipped_reason    = probe.error
         return probe
 
     # Scope check
     if scope and not scope.in_scope(source_url):
-        probe.validation_status = "NOT_VALIDATED"
+        probe.validation_status = ValidationStatus.SKIPPED
         probe.error = "Source URL out of scope"
-        finding.provenance.validation_status = "NOT_VALIDATED"
+        finding.provenance.validation_status = ValidationStatus.SKIPPED
+        finding.provenance.validation_reason = probe.error
         finding.provenance.skipped_reason    = probe.error
+        finding.provenance.scope_status      = "out_of_scope"
         return probe
 
     # Safety check
     safe, reason = validate_url(source_url, check_dns=False)
     if not safe:
-        probe.validation_status = "NOT_VALIDATED"
+        probe.validation_status = ValidationStatus.SKIPPED
         probe.error = f"URL blocked by safety filter: {reason}"
-        finding.provenance.validation_status = "NOT_VALIDATED"
+        finding.provenance.validation_status = ValidationStatus.SKIPPED
+        finding.provenance.validation_reason = probe.error
         finding.provenance.skipped_reason    = probe.error
         return probe
 
@@ -215,27 +219,37 @@ def probe_finding(
     probe.error       = error
 
     if error:
-        probe.validation_status = "ERROR"
+        probe.validation_status = ValidationStatus.UNREACHABLE
+        probe.error = probe.error or "network error"
     elif http_status == 0:
-        probe.validation_status = "ERROR"
+        probe.validation_status = ValidationStatus.UNREACHABLE
+        probe.error = probe.error or "no response"
     elif http_status >= 400:
-        probe.validation_status = "UNREACHABLE"
+        probe.validation_status = ValidationStatus.UNREACHABLE
         probe.error = f"HTTP {http_status}"
     else:
         probe.pattern_found = _pattern_still_present(body, finding)
-        probe.validation_status = "CONFIRMED" if probe.pattern_found else "UNREACHABLE"
+        if probe.pattern_found:
+            probe.validation_status = ValidationStatus.CONFIRMED
+        else:
+            # Got a 2xx but pattern is gone - secret was rotated
+            probe.validation_status = ValidationStatus.INVALIDATED
 
     # Update provenance in-place
-    finding.provenance.validation_status     = probe.validation_status
+    finding.provenance.validation_status      = probe.validation_status
     finding.provenance.validation_http_status = probe.http_status
-    finding.provenance.validation_error      = probe.error
+    finding.provenance.validation_error       = probe.error
+    finding.provenance.validation_reason      = (
+        "secret prefix still present in live response" if probe.pattern_found
+        else probe.error or f"HTTP {probe.http_status}"
+    )
 
     # Access level from HTTP status
     if http_status == 200:
-        finding.provenance.access_level = "PUBLIC"
+        finding.provenance.access_level = AccessLevel.PUBLIC
     elif http_status in (401, 403):
         finding.provenance.auth_required = True
-        finding.provenance.access_level  = "AUTHENTICATED"
+        finding.provenance.access_level  = AccessLevel.AUTHENTICATED
 
     logger.debug(
         "Probe %s [%s] → HTTP %d  pattern=%s  elapsed=%dms",
@@ -305,11 +319,15 @@ def run_passive_validation(
                 finding.provenance.validation_status      = _existing.validation_status
                 finding.provenance.validation_http_status = _existing.http_status
                 finding.provenance.validation_error       = _existing.error
+                finding.provenance.validation_reason      = (
+                    "inherited from same source URL" if not _existing.error
+                    else _existing.error
+                )
                 if _existing.http_status == 200:
-                    finding.provenance.access_level = "PUBLIC"
+                    finding.provenance.access_level = AccessLevel.PUBLIC
                 elif _existing.http_status in (401, 403):
                     finding.provenance.auth_required = True
-                    finding.provenance.access_level  = "AUTHENTICATED"
+                    finding.provenance.access_level  = AccessLevel.AUTHENTICATED
             report.skipped += 1
             continue
 
@@ -319,9 +337,10 @@ def run_passive_validation(
         report.probed += 1
 
         vs = probe.validation_status
-        if vs == "CONFIRMED":    report.confirmed   += 1
-        elif vs == "UNREACHABLE": report.unreachable += 1
-        elif vs == "ERROR":       report.errors      += 1
-        else:                     report.not_validated += 1
+        if vs == ValidationStatus.CONFIRMED:     report.confirmed     += 1
+        elif vs == ValidationStatus.UNREACHABLE: report.unreachable   += 1
+        elif vs == ValidationStatus.INVALIDATED: report.unreachable   += 1  # counts as unreachable for reporting
+        elif vs == ValidationStatus.SKIPPED:     report.skipped       += 1
+        else:                                    report.not_validated += 1
 
     return report
