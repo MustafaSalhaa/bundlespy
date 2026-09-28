@@ -85,7 +85,8 @@ def generate(
                 "category":     f.category,
                 "severity":     f.severity,
                 "confidence":   f.confidence,
-                "status":       f.status,
+                "confidence_label": f.confidence_label,
+                "status":       f.status,       # backwards compat alias
                 "file_url":     f.file_url,
                 "line_number":  f.line_number,
                 "value":        f.matched_value if show_sensitive else f.redacted_value,
