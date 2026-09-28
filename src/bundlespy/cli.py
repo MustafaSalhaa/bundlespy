@@ -26,6 +26,11 @@ from .analysis.route_extractor import extract_routes
 from .analysis.endpoint_intel import extract_endpoint_intelligence
 from .analysis.infrastructure import extract_infrastructure
 from .analysis.jwt import find_jwts
+from .analysis.endpoint_classifier import (
+    classify_endpoints, verify_candidates,
+    confirmed_only, verbose_output, debug_dump,
+    SCORE_DROP, SCORE_LOW_CONF,
+)
 from .storage.models import ScanResult, Finding, Endpoint, InfrastructureItem, JSFile
 from .reporting.terminal import print_report
 from .reporting.json_report import generate as generate_json
@@ -830,6 +835,44 @@ def run_scan(args) -> int:
         if _ep.category in ("UNKNOWN", ""):
             _ep_path = _uprc(_ep.url).path or _ep.url
             _ep.category = _recat(_ep_path)
+
+    # ── Intelligent endpoint classification ───────────────────────────────────
+    # Score every candidate. Drop noise (chart tokens, bare words, lib internals).
+    # LOW confidence endpoints are kept only when -v / --verbose is set.
+    # Optional HTTP verification happens here before the validation phase.
+    _candidates = classify_endpoints(all_endpoints)
+
+    # Optional lightweight HTTP verification for scored candidates
+    # (separate from --validate which does deeper probing via endpoint_validator)
+    if getattr(args, "validate", False) and fetcher is not None:
+        _candidates = verify_candidates(
+            _candidates,
+            base_url  = target,
+            fetcher   = fetcher,
+            max_verify = 100,
+        )
+
+    # Debug dump of scoring breakdown with -vv / --debug
+    if getattr(args, "debug", False):
+        import logging as _clf_log
+        _clf_logger = _clf_log.getLogger("bundlespy.analysis.endpoint_classifier")
+        _clf_logger.debug("\n--- Endpoint classifier scoring ---\n%s", debug_dump(_candidates))
+
+    # Filter based on verbosity
+    _before = len(all_endpoints)
+    if getattr(args, "verbose", False) or getattr(args, "debug", False):
+        # -v: show HIGH + LOW confidence
+        all_endpoints = verbose_output(_candidates)
+    else:
+        # normal: HIGH confidence only
+        all_endpoints = confirmed_only(_candidates)
+
+    _after = len(all_endpoints)
+    if not args.quiet and _before != _after:
+        _logger.info(
+            "Endpoint classifier: %d candidates -> %d kept, %d dropped as noise",
+            _before, _after, _before - _after,
+        )
 
     # Merge HTML attribute findings BEFORE building per-file stats
     # so html: findings are visible to the stats builder
