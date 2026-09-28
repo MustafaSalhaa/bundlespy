@@ -7,10 +7,23 @@ from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ...storage.models import ScanResult, Endpoint, JSFile
 
-# JS sinks that indicate DOM XSS risk
+# JS sinks - dangerous if fed attacker-controlled data
 _DOM_SINKS = [
     "innerHTML", "outerHTML", "document.write", "insertAdjacentHTML",
-    "eval(", "setTimeout(", "location.href =", "location.assign(",
+    "eval(", "location.href =", "location.assign(",
+]
+
+# These sinks only matter paired with a user-controlled source.
+# setTimeout(fn, 1000) is harmless. Only flag when a source flows into it.
+_WEAK_SINKS = ["setTimeout(", "setInterval("]
+
+# User-controlled DOM sources - these are actual attacker-controlled inputs
+_DOM_SOURCES = [
+    "location.search", "location.hash", "location.href",
+    "document.referrer", "document.URL", "document.documentURI",
+    "window.name", "postMessage", "URLSearchParams",
+    "location.pathname", "decodeURIComponent(location",
+    "getParameter(", "searchParams.get(",
 ]
 
 # Param names associated with search/reflection functionality
@@ -19,14 +32,28 @@ _SEARCH_PARAMS = {
     "find", "text", "input", "value", "name", "message", "comment",
 }
 
-_BURP_NOTES = (
+_BURP_NOTES_REFLECTED = (
     "Test for reflected XSS. Check if input appears in response unsanitized. "
-    "Try DOM-based vectors via browser console."
+    "Try: <script>alert(1)</script>, \"><img src=x onerror=alert(1)>."
+)
+
+_BURP_NOTES_DOM_SURFACE = (
+    "DOM source feeds a dangerous sink. Load in browser, set a breakpoint on the sink, "
+    "trace the data flow. Try: location.hash payloads first - no server round-trip needed."
+)
+
+_BURP_NOTES_DOM_SINK = (
+    "DOM sink observed. Verify manually whether any user-controlled source (location.hash, "
+    "location.search, postMessage) reaches this sink before treating as XSS."
 )
 
 
 def _find_js_sinks(content: str) -> List[str]:
     return [sink for sink in _DOM_SINKS if sink in content]
+
+
+def _find_js_sources(content: str) -> List[str]:
+    return [src for src in _DOM_SOURCES if src in content]
 
 
 class XssMapper(BaseSurfaceMapper):
@@ -88,7 +115,7 @@ class XssMapper(BaseSurfaceMapper):
                     parameters   = [f"query:{name}"],
                     confidence   = confidence,
                     evidence     = evidence,
-                    burp_notes   = _BURP_NOTES,
+                    burp_notes   = _BURP_NOTES_REFLECTED,
                 )
 
             # 2. Body fields on POST endpoints
@@ -103,18 +130,19 @@ class XssMapper(BaseSurfaceMapper):
                         parameters   = [f"body:{name}"],
                         confidence   = ConfidenceLevel.LOW,
                         evidence     = [f"POST body field '{name}' may be stored/reflected"],
-                        burp_notes   = _BURP_NOTES,
+                        burp_notes   = _BURP_NOTES_REFLECTED,
                     )
 
-        # 3. JS sink candidates from all JS files
+        # 3. JS sink/source analysis per JS file
         for js in result.js_files:
             if not js.content:
                 continue
-            sinks = _find_js_sinks(js.content)
+            sinks   = _find_js_sinks(js.content)
+            sources = _find_js_sources(js.content)
+
             if not sinks:
                 continue
 
-            # Create a synthetic endpoint pointing to the JS file
             ep_url = js.url or js.source_page or ""
             if not ep_url:
                 continue
@@ -136,16 +164,31 @@ class XssMapper(BaseSurfaceMapper):
                 source_type=getattr(js, "source_type", "static") or "static",
             )
 
-            self._candidate(
-                endpoint     = synthetic_ep,
-                surface_type = "DOM XSS",
-                parameters   = [],
-                confidence   = ConfidenceLevel.MEDIUM,
-                evidence     = [f"DOM sinks in JS: {', '.join(sinks[:4])}"],
-                burp_notes   = (
-                    "Test DOM-based XSS via browser console. "
-                    "Trace data flow from user-controlled sources to these sinks."
-                ),
-            )
+            if sources:
+                # Source + sink co-present = plausible data flow - real surface
+                evidence = [
+                    f"DOM sinks: {', '.join(sinks[:4])}",
+                    f"User-controlled sources: {', '.join(sources[:3])}",
+                    "Source-to-sink path requires manual trace to confirm",
+                ]
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "DOM XSS Surface",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.HIGH,
+                    evidence     = evidence,
+                    burp_notes   = _BURP_NOTES_DOM_SURFACE,
+                )
+            else:
+                # Sink only - no confirmed user-controlled source feeding it
+                # Could still be XSS but needs manual verification first
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "DOM Sink",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.LOW,
+                    evidence     = [f"DOM sinks observed: {', '.join(sinks[:4])} - no user-controlled source detected in same file"],
+                    burp_notes   = _BURP_NOTES_DOM_SINK,
+                )
 
         return self._results
