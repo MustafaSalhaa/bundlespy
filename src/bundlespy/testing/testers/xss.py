@@ -1,150 +1,151 @@
 """
-XSS tester.
-Detects reflection of canary values and static JS sink reachability.
-Does NOT execute JavaScript. Uses safe non-destructive canaries.
+XssMapper - XSS attack surface identification.
+Pure static analysis of endpoints and JS content. Zero HTTP requests.
 """
-import re
-import hashlib
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint, JSFile
 
-# Safe canary that proves reflection without executing code
-_CANARY = "bspy7x3k"
-
-# DOM sinks that indicate XSS risk in static JS
+# JS sinks that indicate DOM XSS risk
 _DOM_SINKS = [
-    "innerHTML", "outerHTML", "insertAdjacentHTML",
-    "document.write", "document.writeln",
-    "eval(", "setTimeout(", "setInterval(", "Function(",
-    "location.href", "location.replace", "location.assign",
-    "$.html(", "$(", ".html(",  # jQuery
+    "innerHTML", "outerHTML", "document.write", "insertAdjacentHTML",
+    "eval(", "setTimeout(", "location.href =", "location.assign(",
 ]
 
-_SOURCES = [
-    "location.search", "location.hash", "location.href",
-    "document.referrer", "window.name",
-    "URLSearchParams", "new URL(",
-    "postMessage", "localStorage.getItem", "sessionStorage.getItem",
-]
+# Param names associated with search/reflection functionality
+_SEARCH_PARAMS = {
+    "search", "query", "q", "filter", "keyword", "term", "s",
+    "find", "text", "input", "value", "name", "message", "comment",
+}
 
-def _find_dom_sinks(js_content: str) -> List[str]:
-    """Returns list of dangerous sinks found in JS content."""
-    found = []
-    for sink in _DOM_SINKS:
-        if sink in js_content:
-            found.append(sink)
-    return found
+_BURP_NOTES = (
+    "Test for reflected XSS. Check if input appears in response unsanitized. "
+    "Try DOM-based vectors via browser console."
+)
 
-def _find_sources(js_content: str) -> List[str]:
-    found = []
-    for src in _SOURCES:
-        if src in js_content:
-            found.append(src)
-    return found
 
-class XssTester(BaseTester):
+def _find_js_sinks(content: str) -> List[str]:
+    return [sink for sink in _DOM_SINKS if sink in content]
+
+
+class XssMapper(BaseSurfaceMapper):
     category = AttackCategory.XSS
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
-        # 1. Static DOM XSS analysis from JS files
-        for js_file in result.js_files:
-            if not js_file.content:
-                continue
-            sinks   = _find_dom_sinks(js_file.content)
-            sources = _find_sources(js_file.content)
-            if sinks and sources:
-                evidence = [
-                    f"Sources found: {', '.join(sources[:3])}",
-                    f"Sinks found:   {', '.join(sinks[:3])}",
-                    "Data-flow path not confirmed - manual verification required",
-                ]
-                r = AttackTestResult(
-                    category=self.category,
-                    attack_class="DOM XSS Candidate",
-                    target_url=js_file.url,
-                    status=TestStatus.CANDIDATE,
-                    confidence=0.4,
-                    evidence=evidence,
-                    why_tested="JS file contains both taint sources and dangerous sinks",
-                    what_changed="Static analysis only - no request sent",
-                    what_observed=f"{len(sinks)} sinks, {len(sources)} sources in {js_file.url.split('/')[-1]}",
-                    what_remains_unverified="Source-to-sink data flow not traced - dynamic testing required",
-                    requests_made=0,
-                )
-                self._results.append(r)
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
+        # Build a map of JS file URL -> sinks found for cross-referencing
+        js_sinks: dict = {}
+        for js in result.js_files:
+            if js.content:
+                sinks = _find_js_sinks(js.content)
+                if sinks:
+                    js_sinks[js.url] = sinks
 
-        # 2. Reflected XSS - inject canary into query parameters
         for ep in result.endpoints:
+            method = (ep.method or "GET").upper()
+
+            # 1. Search/query params - these are classic XSS reflection targets
             for qp in (ep.query_params or []):
-                param = qp.get("name", "")
-                if not param:
+                name = (qp.get("name") or "").lower()
+                if not name:
                     continue
 
-                allowed, reason = self._policy.check(
-                    ep.url, ep.method, param, "REFLECTED_XSS", ep.auth_context or "",
+                is_search_param = name in _SEARCH_PARAMS
+                evidence   = []
+                confidence = ConfidenceLevel.LOW
+
+                if is_search_param:
+                    evidence.append(f"Search-type param '{name}' - high likelihood of value reflection")
+                    confidence = ConfidenceLevel.MEDIUM
+
+                # Check if any JS sink is associated with this endpoint's source
+                source_sinks = js_sinks.get(ep.source_file or "", [])
+                if source_sinks and is_search_param:
+                    evidence.append(f"JS sinks in source file: {', '.join(source_sinks[:3])}")
+                    confidence = ConfidenceLevel.HIGH
+                elif source_sinks:
+                    evidence.append(f"JS sinks in source file: {', '.join(source_sinks[:3])}")
+                    confidence = ConfidenceLevel.MEDIUM
+
+                if not evidence:
+                    evidence.append(f"Query parameter '{name}' is a potential reflection point")
+                    confidence = ConfidenceLevel.LOW
+
+                ep_proxy = type('EP', (), {
+                    'url': ep.url,
+                    'method': method,
+                    'auth_context': ep.auth_context or '',
+                    'source_type': getattr(ep, 'source_type', 'static') or 'static',
+                    'path_params': [],
+                    'query_params': [],
+                    'body_fields': [],
+                    'request_headers': {},
+                })()
+
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Reflected XSS",
+                    parameters   = [f"query:{name}"],
+                    confidence   = confidence,
+                    evidence     = evidence,
+                    burp_notes   = _BURP_NOTES,
                 )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="Reflected XSS",
-                               target_url=ep.url, parameter=param)
-                    continue
 
-                sep = "&" if "?" in ep.url else "?"
-                test_url = f"{ep.url}{sep}{param}={_CANARY}"
-
-                baseline = capture_baseline(self._fetcher, ep.url)
-                obs      = capture_observation(self._fetcher, test_url)
-
-                if obs is None:
-                    self._skip("observation_unreachable", category=self.category,
-                               attack_class="Reflected XSS", target_url=ep.url, parameter=param)
-                    continue
-
-                status   = TestStatus.CANDIDATE
-                evidence = []
-                confidence = 0.2
-
-                if _CANARY in obs.body_excerpt:
-                    evidence.append(f"Canary '{_CANARY}' reflected in response body")
-                    # Check context
-                    excerpt = obs.body_excerpt
-                    idx = excerpt.find(_CANARY)
-                    context_window = excerpt[max(0, idx-20):idx+len(_CANARY)+20]
-                    if "<script" in context_window.lower() or "javascript:" in context_window.lower():
-                        evidence.append("Canary appears inside script context")
-                        status = TestStatus.VALIDATED
-                        confidence = 0.8
-                    elif re.search(r'<[a-z].*?' + re.escape(_CANARY), context_window, re.I):
-                        evidence.append("Canary appears inside HTML tag")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.6
-                    else:
-                        evidence.append("Canary reflected but context unclear - manual review required")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.4
-
-                    r = AttackTestResult(
-                        category=self.category,
-                        attack_class="Reflected XSS",
-                        target_url=ep.url,
-                        parameter=param,
-                        method=ep.method,
-                        route=ep.path,
-                        authentication_context=ep.auth_context or "",
-                        payload=_CANARY,
-                        baseline=baseline,
-                        observation=obs,
-                        status=status,
-                        confidence=confidence,
-                        evidence=evidence,
-                        why_tested=f"Query parameter '{param}' tested for reflection",
-                        what_changed=f"Injected canary value '{_CANARY}' into parameter '{param}'",
-                        what_observed=f"HTTP {obs.status_code}" + (" - canary reflected" if _CANARY in obs.body_excerpt else " - not reflected"),
-                        what_remains_unverified="Full XSS execution not confirmed - encoding bypass not tested",
-                        requests_made=2,
+            # 2. Body fields on POST endpoints
+            if method in ("POST", "PUT", "PATCH"):
+                for bf in (ep.body_fields or []):
+                    name = (bf.get("name") or "").lower()
+                    if not name:
+                        continue
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "Stored/Reflected XSS",
+                        parameters   = [f"body:{name}"],
+                        confidence   = ConfidenceLevel.LOW,
+                        evidence     = [f"POST body field '{name}' may be stored/reflected"],
+                        burp_notes   = _BURP_NOTES,
                     )
-                    self._results.append(r)
+
+        # 3. JS sink candidates from all JS files
+        for js in result.js_files:
+            if not js.content:
+                continue
+            sinks = _find_js_sinks(js.content)
+            if not sinks:
+                continue
+
+            # Create a synthetic endpoint pointing to the JS file
+            ep_url = js.url or js.source_page or ""
+            if not ep_url:
+                continue
+
+            from ...storage.models import Endpoint as _Endpoint
+            synthetic_ep = _Endpoint(
+                url=ep_url,
+                path=ep_url,
+                method="GET",
+                category="",
+                source_file=js.url or "",
+                line_number=0,
+                confidence=0.5,
+                query_params=[],
+                path_params=[],
+                body_fields=[],
+                request_headers={},
+                auth_context="",
+                source_type=getattr(js, "source_type", "static") or "static",
+            )
+
+            self._candidate(
+                endpoint     = synthetic_ep,
+                surface_type = "DOM XSS",
+                parameters   = [],
+                confidence   = ConfidenceLevel.MEDIUM,
+                evidence     = [f"DOM sinks in JS: {', '.join(sinks[:4])}"],
+                burp_notes   = (
+                    "Test DOM-based XSS via browser console. "
+                    "Trace data flow from user-controlled sources to these sinks."
+                ),
+            )
 
         return self._results
