@@ -49,84 +49,141 @@ def build_parser() -> argparse.ArgumentParser:
         description="BundleSpy — JavaScript Intelligence and Secret Exposure Scanner",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
-examples:
-  bundlespy scan https://example.com
-  bundlespy scan https://example.com --source-maps --chunks --validate
-  bundlespy scan https://example.com --passive --format html --output ./reports/
-  bundlespy scan https://example.com --headless --stealth
-  bundlespy scan https://example.com --graphql --harvest-subs
-  bundlespy scan https://example.com --format html,json,burp --output ./reports/
-  bundlespy local ./dist/
-  bundlespy demo
+quick start:
+  bundlespy scan https://target.com                          basic crawl + secrets + endpoints
+  bundlespy scan https://target.com --headless --stealth     full browser-based scan, evasion on
+  bundlespy scan https://target.com --validate-secrets       live-probe every found secret
+  bundlespy local ./dist/                                    scan a local build folder
+
+deep recon:
+  bundlespy scan https://target.com --source-maps --chunks   recover source files + webpack chunks
+  bundlespy scan https://target.com --graphql                introspect GraphQL schema
+  bundlespy scan https://target.com --harvest-subs           extract subdomains from JS + endpoints
+  bundlespy scan https://target.com --passive                pull historical JS from web archives
+
+authenticated scans:
+  bundlespy scan https://target.com --cookie "session=abc123"
+  bundlespy scan https://target.com --login "url=https://target.com/login,user=admin,pass=secret"
+  bundlespy scan https://target.com --headless --cookie "token=xyz" --stealth
+
+output:
+  bundlespy scan https://target.com --format html --output ./reports/
+  bundlespy scan https://target.com --format html,json,burp --output ./reports/
+  bundlespy scan https://target.com --silent                 findings only, no headers
+  bundlespy scan https://target.com --json -q                JSON to stdout, no progress
+
+other:
+  bundlespy demo                                             offline demo with fake findings
 """,
     )
 
     sub = parser.add_subparsers(dest="command")
 
     # ── scan ──────────────────────────────────────────────────────────────────
-    scan = sub.add_parser("scan", help="Scan a target URL")
+    scan = sub.add_parser(
+        "scan",
+        help="Scan a live target URL",
+        description=(
+            "Crawl a target, extract all JS files, and analyze them for secrets,\n"
+            "API endpoints, infrastructure hints, and vulnerable libraries.\n\n"
+            "crawl options control how aggressively JS is discovered.\n"
+            "feature flags layer on top: source maps, webpack chunks, headless\n"
+            "browser, GraphQL introspection, subdomain harvesting, secret validation.\n"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     scan.add_argument("target")
 
     # Crawl
-    scan.add_argument("--depth",       type=int, default=5)
-    scan.add_argument("--max-pages",   type=int, default=500)
-    scan.add_argument("--max-js",      type=int, default=1000)
-    scan.add_argument("--rate",        type=int, default=3)
-    scan.add_argument("--timeout",     type=int, default=10)
-    scan.add_argument("--common-paths",action="store_true")
-    scan.add_argument("--subdomains",  action="store_true")
-    scan.add_argument("--exclude",     nargs="+", default=[])
+    _cg = scan.add_argument_group("crawl")
+    _cg.add_argument("--depth",        type=int, default=5,    metavar="N", help="Max crawl depth from the target root (default: 5)")
+    _cg.add_argument("--max-pages",    type=int, default=500,  metavar="N", help="Max pages to visit during crawl (default: 500)")
+    _cg.add_argument("--max-js",       type=int, default=1000, metavar="N", help="Max JS files to collect (default: 1000)")
+    _cg.add_argument("--rate",         type=int, default=3,    metavar="N", help="Requests per second (default: 3)")
+    _cg.add_argument("--timeout",      type=int, default=10,   metavar="S", help="Per-request timeout in seconds (default: 10)")
+    _cg.add_argument("--common-paths", action="store_true",                  help="Probe common paths (/robots.txt, /sitemap.xml, etc.)")
+    _cg.add_argument("--subdomains",   action="store_true",                  help="Follow links to subdomains of the target")
+    _cg.add_argument("--exclude",      nargs="+", default=[],  metavar="PAT", help="URL patterns to exclude from crawl (substring match)")
 
     # Features
-    scan.add_argument("--source-maps",    action="store_true")
-    scan.add_argument("--chunks",         action="store_true")
-    scan.add_argument("--passive",        action="store_true")
-    scan.add_argument("--headless",       action="store_true")
-    scan.add_argument("--validate",       action="store_true")
-    scan.add_argument("--graphql",        action="store_true")
-    scan.add_argument("--harvest-subs",   action="store_true")
-    scan.add_argument("--validate-secrets", action="store_true")
-    scan.add_argument("--stealth",        action="store_true")
-    scan.add_argument("--interact",    dest="interact", action="store_true",  default=True,
-                      help="Interact with page elements to trigger lazy-loaded JS (default: ON)")
-    scan.add_argument("--no-interact", dest="interact", action="store_false",
-                      help="Disable page interaction (use for prod-sensitive targets or speed)")
-    scan.add_argument("--workers",        type=int, default=3, help="Concurrent headless browser workers (default: 3)")
-    scan.add_argument("--cookie",         default="",  help="Session cookie to include in all requests")
-    scan.add_argument("--header",         action="append", default=[], metavar="NAME:VALUE",
-                      help="Extra header to include in all requests (can use multiple times)")
-    scan.add_argument("--login", default="", metavar="SPEC",
-                      help=(
-                          "Auto-login before scanning. Formats:\n"
-                          "  url=https://site.com/login,user=admin,pass=secret\n"
-                          "  https://site.com/login,user=admin,pass=secret\n"
-                          "  user=admin,pass=secret  (uses target URL as login page)"
-                      ))
+    _fg = scan.add_argument_group("features")
+    _fg.add_argument("--source-maps",      action="store_true", help="Fetch and parse .map files to recover original source")
+    _fg.add_argument("--chunks",           action="store_true", help="Discover and download webpack chunk files")
+    _fg.add_argument("--passive",          action="store_true", help="Pull historical JS from Wayback Machine + CommonCrawl instead of crawling live")
+    _fg.add_argument("--headless",         action="store_true", help="Launch a real browser to trigger lazy-loaded JS and intercept network calls")
+    _fg.add_argument("--stealth",          action="store_true", help="Enable evasion: randomized delays, realistic headers, no automation flags")
+    _fg.add_argument("--validate",         action="store_true", help="HTTP-probe discovered endpoints to confirm they respond")
+    _fg.add_argument("--validate-secrets", action="store_true", help="Live-probe found secrets against their provider APIs to confirm they are active")
+    _fg.add_argument("--graphql",          action="store_true", help="Run GraphQL introspection on any GraphQL endpoints found")
+    _fg.add_argument("--harvest-subs",     action="store_true", help="Extract subdomains referenced in JS and endpoints")
+
+    # Headless options
+    _hg = scan.add_argument_group("headless options (require --headless)")
+    _hg.add_argument("--interact",    dest="interact", action="store_true", default=True,
+                     help="Click buttons and fill forms to trigger lazy-loaded JS (default: on)")
+    _hg.add_argument("--no-interact", dest="interact", action="store_false",
+                     help="Disable page interaction - safer for production-sensitive targets")
+    _hg.add_argument("--workers",     type=int, default=3, metavar="N",
+                     help="Concurrent browser workers for headless scan (default: 3)")
+
+    # Auth
+    _ag = scan.add_argument_group("authentication")
+    _ag.add_argument("--cookie", default="", metavar="STRING",
+                     help="Session cookie string to send with every request\n  e.g. --cookie \"session=abc123; csrf=xyz\"")
+    _ag.add_argument("--header", action="append", default=[], metavar="NAME:VALUE",
+                     help="Extra request header (repeat for multiple)\n  e.g. --header \"Authorization: Bearer token\"")
+    _ag.add_argument("--login", default="", metavar="SPEC",
+                     help=(
+                         "Auto-login via browser before scanning. Formats:\n"
+                         "  url=https://site.com/login,user=admin,pass=secret\n"
+                         "  user=admin,pass=secret  (uses target URL as login page)"
+                     ))
 
     # Output
-    scan.add_argument("--format", default="terminal")
-    scan.add_argument("--output", default="")
-    scan.add_argument("--report-name", default="", metavar="NAME",
-                      help="Custom filename stem for report files (e.g. client-webapp-2026)")
-    scan.add_argument("-v", "--verbose",  action="store_true")
-    scan.add_argument("-vv","--debug",    action="store_true")
-    scan.add_argument("-q", "--quiet",    action="store_true")
-    scan.add_argument("--no-color",       action="store_true")
-    scan.add_argument("--json",           action="store_true", help="JSON output only")
-    scan.add_argument("--csv",            action="store_true", help="CSV output only")
-    scan.add_argument("--show-fp",        action="store_true", help="Show likely false positives in output")
-    scan.add_argument("--silent",         action="store_true", help="Findings only - no progress, no headers")
+    _og = scan.add_argument_group("output")
+    _og.add_argument("--format",      default="terminal", metavar="FMT",
+                     help="Output format: terminal (default), html, json, csv, burp\n  combine with commas: --format html,json,burp")
+    _og.add_argument("--output",      default="",         metavar="DIR",
+                     help="Directory to write report files (default: ./bundlespy-reports/)")
+    _og.add_argument("--report-name", default="",         metavar="NAME",
+                     help="Custom filename stem for reports (e.g. client-webapp-2026)")
+    _og.add_argument("-v", "--verbose",  action="store_true", help="Show more detail including low-confidence endpoints")
+    _og.add_argument("-vv","--debug",    action="store_true", help="Full debug output including classifier scoring")
+    _og.add_argument("-q", "--quiet",    action="store_true", help="Suppress all progress output")
+    _og.add_argument("--no-color",       action="store_true", help="Disable ANSI colors")
+    _og.add_argument("--json",           action="store_true", help="JSON to stdout only (sets --quiet)")
+    _og.add_argument("--csv",            action="store_true", help="CSV to stdout only (sets --quiet)")
+    _og.add_argument("--show-fp",        action="store_true", help="Include likely false positives in output")
+    _og.add_argument("--silent",         action="store_true", help="Print only findings, one per line - no headers or progress")
 
     # ── local ─────────────────────────────────────────────────────────────────
-    local = sub.add_parser("local", help="Scan local JS files")
-    local.add_argument("path")
-    local.add_argument("--format",   default="terminal")
-    local.add_argument("--output",   default="")
-    local.add_argument("-v", "--verbose", action="store_true")
-    local.add_argument("--no-color", action="store_true")
+    local = sub.add_parser(
+        "local",
+        help="Scan a local directory or JS file",
+        description=(
+            "Analyze local JS files for secrets, endpoints, and infrastructure.\n"
+            "Pass a directory (scans all .js files recursively) or a single file.\n\n"
+            "Useful for scanning a build output folder before deploying,\n"
+            "or auditing a downloaded JS bundle offline.\n"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    local.add_argument("path", help="Path to a JS file or directory to scan")
+    local.add_argument("--format",        default="terminal", metavar="FMT",
+                       help="Output format: terminal (default), html, json, csv")
+    local.add_argument("--output",        default="",         metavar="DIR",
+                       help="Directory to write report files")
+    local.add_argument("--report-name",   default="",         metavar="NAME",
+                       help="Custom filename stem for reports")
+    local.add_argument("-v", "--verbose", action="store_true", help="Show more detail")
+    local.add_argument("--no-color",      action="store_true", help="Disable ANSI colors")
 
     # ── demo ──────────────────────────────────────────────────────────────────
-    sub.add_parser("demo", help="Run offline demo")
+    sub.add_parser(
+        "demo",
+        help="Run an offline demo with fake findings",
+        description="Print a sample scan report using fake data - no network access needed.",
+    )
 
     return parser
 
