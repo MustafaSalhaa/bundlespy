@@ -114,7 +114,7 @@ def _finding(url: str = "https://app.example.com/app.js") -> Finding:
         impact="Full AWS account takeover",
         remediation="Rotate immediately",
         false_positive_notes="",
-        status="candidate",
+        confidence_label="candidate",
     )
 
 
