@@ -110,7 +110,7 @@ def _finding() -> Finding:
         impact="Full AWS account takeover",
         remediation="Rotate immediately",
         false_positive_notes="",
-        status="candidate",
+        confidence_label="candidate",
     )
 
 
