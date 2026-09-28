@@ -286,7 +286,7 @@ class TestSecretClassification:
             line_number=1, column=0, matched_value="secret",
             redacted_value="****", sha256="abc", context="",
             description="", impact="", remediation="",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
             classification="SECRET",
         )
         assert f.classification == "SECRET"
@@ -299,7 +299,7 @@ class TestSecretClassification:
             line_number=1, column=0, matched_value="secret",
             redacted_value="****", sha256="abc", context="",
             description="", impact="", remediation="",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
         )
         assert f.classification == ""
 
@@ -311,7 +311,7 @@ class TestSecretClassification:
             line_number=1, column=0, matched_value="7b008eda-d5de-4df8-8771-4fb8a2479d5b",
             redacted_value="7b00****", sha256="abc", context="",
             description="", impact="", remediation="",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
             classification="PUBLIC_IDENTIFIER",
         )
         assert f.classification == "PUBLIC_IDENTIFIER"
