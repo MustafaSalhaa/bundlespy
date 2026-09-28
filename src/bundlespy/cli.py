@@ -915,6 +915,19 @@ def run_scan(args) -> int:
                 else:
                     _ep.category = "ROUTE"
 
+    # Fix method=UNKNOWN on visited pages - they were accessed via GET by definition.
+    # Headless-discovered routes often lack a method because they come from URL
+    # navigation, not from a captured HTTP request with an explicit verb.
+    for _ep in all_endpoints:
+        if not _ep.method or _ep.method in ("UNKNOWN", ""):
+            _ep_key = _ep.url.rstrip("/").lower().split("?")[0]
+            # Mark as GET if crawler visited it, or if headless set access_state
+            _ep_visited = _ep_key in _visited_pages_norm
+            _ep_access  = getattr(_ep, "access_state", "") in ("PUBLIC", "VISITED")
+            _ep_http    = getattr(_ep, "http_status", 0)
+            if _ep_visited or (_ep_access and _ep_http and _ep_http < 400):
+                _ep.method = "GET"
+
     # ── Intelligent endpoint classification ───────────────────────────────────
     # Score every candidate. Drop noise (chart tokens, bare words, lib internals).
     # LOW confidence endpoints are kept only when -v / --verbose is set.
