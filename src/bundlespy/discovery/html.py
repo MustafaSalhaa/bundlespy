@@ -9,25 +9,31 @@ from urllib.parse import urljoin, urlparse, urldefrag
 
 logger = logging.getLogger("bundlespy.discovery.html")
 
-# Script src patterns
-RE_SCRIPT_SRC   = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-RE_SCRIPT_NOQUOTE = re.compile(r'<script[^>]+src=([^\s>]+)', re.IGNORECASE)
+# Script src patterns - quoted and unquoted
+RE_SCRIPT_SRC      = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_SCRIPT_NOQUOTE  = re.compile(r'<script[^>]+src=([^\s>]+)', re.IGNORECASE)
 
-# Preload / modulepreload links
-RE_PRELOAD      = re.compile(
+# Preload / modulepreload links - attribute order varies
+RE_PRELOAD         = re.compile(
     r'<link[^>]+rel=["\'](?:preload|modulepreload)["\'][^>]+href=["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
-RE_PRELOAD_ALT  = re.compile(
+RE_PRELOAD_ALT     = re.compile(
     r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\'](?:preload|modulepreload)["\']',
     re.IGNORECASE,
 )
 
 # All href links for crawling
-RE_HREF         = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_HREF            = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
 
-# Inline scripts
-RE_INLINE       = re.compile(r'<script(?:[^>]*)>(.*?)</script>', re.IGNORECASE | re.DOTALL)
+# Inline scripts (including type=module)
+RE_INLINE          = re.compile(r'<script(?:[^>]*)>(.*?)</script>', re.IGNORECASE | re.DOTALL)
+
+# Additional link sources
+RE_FORM_ACTION     = re.compile(r'<form[^>]+action=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_ONCLICK_LOC     = re.compile(r'(?:location\.href|window\.location)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+RE_DATA_HREF       = re.compile(r'data-(?:href|url|link|target)=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_META_REFRESH    = re.compile(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^;]+;\s*url=([^"\']+)["\']', re.IGNORECASE)
 
 
 def extract_js_urls(html: str, base_url: str) -> List[str]:
@@ -43,13 +49,6 @@ def extract_js_urls(html: str, base_url: str) -> List[str]:
                     urls.add(absolute)
 
     return list(urls)
-
-
-# Additional link sources
-RE_FORM_ACTION = re.compile(r'<form[^>]+action=["\']([^"\']+)["\']', re.IGNORECASE)
-RE_ONCLICK_LOC = re.compile(r'(?:location\.href|window\.location)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
-RE_DATA_HREF   = re.compile(r'data-(?:href|url|link|target)=["\']([^"\']+)["\']', re.IGNORECASE)
-RE_META_REFRESH = re.compile(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^;]+;\s*url=([^"\']+)["\']', re.IGNORECASE)
 
 
 def extract_links(html: str, base_url: str) -> List[str]:
@@ -69,23 +68,14 @@ def extract_links(html: str, base_url: str) -> List[str]:
             url_no_fragment, _ = urldefrag(absolute)
             links.add(url_no_fragment)
 
-    # Standard anchor links
     for match in RE_HREF.finditer(html):
         _add(match.group(1))
-
-    # Form actions — often login/search/contact forms
     for match in RE_FORM_ACTION.finditer(html):
         _add(match.group(1))
-
-    # onclick navigation
     for match in RE_ONCLICK_LOC.finditer(html):
         _add(match.group(1))
-
-    # data-href / data-url attributes
     for match in RE_DATA_HREF.finditer(html):
         _add(match.group(1))
-
-    # meta refresh
     for match in RE_META_REFRESH.finditer(html):
         _add(match.group(1))
 
@@ -103,8 +93,19 @@ def extract_inline_scripts(html: str) -> List[str]:
 
 
 def _looks_like_js(url: str) -> bool:
+    """
+    Matches the same extensions as _is_js_url in crawler.py.
+    Must be kept in sync.
+    """
     path = urlparse(url).path.lower()
-    return path.endswith(".js") or path.endswith(".mjs")
+    return (
+        path.endswith(".js")  or
+        path.endswith(".mjs") or
+        path.endswith(".cjs") or
+        path.endswith(".jsx") or
+        path.endswith(".ts")  or
+        path.endswith(".tsx")
+    )
 
 
 def _make_absolute(url: str, base: str) -> str:
