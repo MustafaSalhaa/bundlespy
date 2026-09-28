@@ -893,6 +893,28 @@ def run_scan(args) -> int:
             _ep_path = _uprc(_ep.url).path or _ep.url
             _ep.category = _recat(_ep_path)
 
+    # Upgrade any UNKNOWN endpoint that the crawler actually visited to ROUTE.
+    # These are real pages confirmed to exist - no reason to show them as UNKNOWN.
+    _visited_pages_norm = set()
+    if not args.passive:
+        for _vp in (getattr(crawler, "visited_pages", set()) or set()):
+            _visited_pages_norm.add(_vp.rstrip("/").lower().split("?")[0])
+    for _ep in all_endpoints:
+        if _ep.category in ("UNKNOWN", "") and _visited_pages_norm:
+            _ep_key = _ep.url.rstrip("/").lower().split("?")[0]
+            if _ep_key in _visited_pages_norm:
+                _ep_lower = _uprc(_ep.url).path.lower()
+                if any(k in _ep_lower for k in ["/login", "/logout", "/auth", "/register", "/signin", "/signup"]):
+                    _ep.category = "AUTH"
+                elif any(k in _ep_lower for k in ["/admin", "/administration", "/manage"]):
+                    _ep.category = "ADMIN"
+                elif "/graphql" in _ep_lower:
+                    _ep.category = "GRAPHQL"
+                elif any(k in _ep_lower for k in ["/api/", "/rest/", "/v1/", "/v2/"]):
+                    _ep.category = "API"
+                else:
+                    _ep.category = "ROUTE"
+
     # ── Intelligent endpoint classification ───────────────────────────────────
     # Score every candidate. Drop noise (chart tokens, bare words, lib internals).
     # LOW confidence endpoints are kept only when -v / --verbose is set.
