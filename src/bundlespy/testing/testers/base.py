@@ -1,54 +1,85 @@
-"""Base class for all attack testers."""
+"""Base class for all passive surface mappers."""
 from abc import ABC, abstractmethod
-from typing import List
-from ..models import AttackTestResult, AttackTestSummary, TestStatus
-from ..safety import SafetyPolicy
+from typing import List, Optional
+from ..models import (
+    SurfaceResult, SurfaceSummary, SurfaceStatus,
+    AttackCategory, ConfidenceLevel,
+)
+from ..safety import SurfaceSafetyPolicy
 from ...storage.models import Endpoint, ScanResult
 
-class BaseTester(ABC):
+
+class BaseSurfaceMapper(ABC):
+    """
+    Abstract base for all attack surface mappers.
+
+    Rules enforced here:
+    - requests_made is always 0 (ConfigurationMapper overrides this)
+    - map() populates self.results; subclasses append to self._results
+    - No payload injection, no HTTP mutations, no exploitation
+    """
     category: str = ""
 
-    def __init__(self, fetcher, policy: SafetyPolicy, verbose: bool = False):
-        self._fetcher = fetcher
+    def __init__(self, policy: Optional[SurfaceSafetyPolicy] = None, verbose: bool = False):
         self._policy  = policy
         self._verbose = verbose
-        self._results: List[AttackTestResult] = []
+        self._results: List[SurfaceResult] = []
 
     @abstractmethod
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         """
-        Consume the ScanResult, test relevant endpoints/findings,
-        and return a list of AttackTestResult.
+        Consume the completed ScanResult and return surface candidates.
+        No HTTP requests except in ConfigurationMapper.
         """
 
     @property
-    def results(self) -> List[AttackTestResult]:
+    def results(self) -> List[SurfaceResult]:
         return self._results
 
-    def summary(self) -> AttackTestSummary:
-        s = AttackTestSummary(category=self.category)
+    def summary(self) -> SurfaceSummary:
+        s = SurfaceSummary(category=self.category)
         for r in self._results:
-            s.candidates += 1
-            if r.status == TestStatus.SKIPPED:
+            s.total_candidates += 1
+            if r.status == SurfaceStatus.MAPPED:
+                s.mapped += 1
+            elif r.status == SurfaceStatus.SKIPPED:
                 s.skipped += 1
-            elif r.status == TestStatus.OUT_OF_SCOPE:
+            elif r.status == SurfaceStatus.OUT_OF_SCOPE:
                 s.out_of_scope += 1
-            elif r.status not in (TestStatus.NOT_TESTED,):
-                s.tested += 1
-            if r.status == TestStatus.VALIDATED:
-                s.validated += 1
-            if r.status == TestStatus.CONFIRMED:
-                s.confirmed += 1
-            if r.status == TestStatus.INCONCLUSIVE:
-                s.inconclusive += 1
         return s
 
-    def _skip(self, reason: str, **kwargs) -> AttackTestResult:
-        r = AttackTestResult(status=TestStatus.SKIPPED, skipped_reason=reason, **kwargs)
-        self._results.append(r)
-        return r
-
-    def _out_of_scope(self, url: str, **kwargs) -> AttackTestResult:
-        r = AttackTestResult(status=TestStatus.OUT_OF_SCOPE, target_url=url, **kwargs)
+    def _candidate(
+        self,
+        endpoint:     Endpoint,
+        surface_type: str,
+        parameters:   List[str],
+        confidence:   str,
+        evidence:     List[str],
+        burp_notes:   str,
+        auth_context: str = "",
+    ) -> SurfaceResult:
+        """
+        Build a SurfaceResult candidate. requests_made is always 0 here.
+        ConfigurationMapper overrides to set requests_made=1.
+        """
+        r = SurfaceResult(
+            endpoint_url     = endpoint.url,
+            method           = endpoint.method or "GET",
+            category         = self.category,
+            surface_type     = surface_type,
+            parameters       = parameters,
+            auth_context     = auth_context or (endpoint.auth_context or ""),
+            confidence       = confidence,
+            evidence         = evidence,
+            provenance_source = getattr(endpoint, "source_type", "static") or "static",
+            burp_notes       = burp_notes,
+            requests_made    = 0,
+            status           = SurfaceStatus.CANDIDATE,
+        )
+        # Invariant: non-ConfigurationMapper mappers never make requests
+        assert r.requests_made == 0, (
+            f"{self.__class__.__name__} must not make HTTP requests (requests_made={r.requests_made}). "
+            "Only ConfigurationMapper may probe HTTP."
+        )
         self._results.append(r)
         return r
