@@ -56,7 +56,7 @@ def _finding(value: str = "AKIA1234SECRET") -> Finding:
         sha256=sha, context="const KEY = 'AKIA1234SECRET';",
         description="AWS key found", impact="Full account access",
         remediation="Rotate key", false_positive_notes="",
-        status="likely_secret",
+        confidence_label="likely_secret",
     )
 
 
