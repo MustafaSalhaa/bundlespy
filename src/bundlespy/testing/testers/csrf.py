@@ -1,90 +1,101 @@
-"""CSRF tester - analyzes state-changing requests for missing CSRF controls."""
-import re
+"""
+CsrfMapper - CSRF attack surface identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
+"""
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint
 
-_STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH"}
-_CSRF_TOKEN_PATTERNS = [
-    re.compile(r'csrf[-_]?token', re.I),
-    re.compile(r'x-csrf-token', re.I),
-    re.compile(r'_token', re.I),
-    re.compile(r'authenticity_token', re.I),
-    re.compile(r'__requestverificationtoken', re.I),
+# Header names that indicate CSRF protection
+_CSRF_HEADER_SIGNALS = {
+    "x-csrf-token", "x-xsrf-token", "x-requested-with",
+    "x-csrftoken",
+}
+
+# Body field names that indicate CSRF token presence
+_CSRF_BODY_SIGNALS = {
+    "csrf", "_token", "authenticity_token", "csrfmiddlewaretoken",
+    "xsrf_token", "csrf_token", "_csrf", "token",
+}
+
+# JS patterns that indicate CSRF token management
+_CSRF_JS_SIGNALS = [
+    "csrf", "xsrf", "_token", "authenticity",
+    "csrfmiddlewaretoken", "X-CSRF-Token",
 ]
 
-def _has_csrf_protection(ep) -> bool:
-    """Check if endpoint shows evidence of CSRF protection."""
-    headers = ep.request_headers or {}
-    for k in headers:
-        for pat in _CSRF_TOKEN_PATTERNS:
-            if pat.search(k):
+_BURP_NOTES = (
+    "Test by removing CSRF token from request in Burp. "
+    "Try cross-origin request from attacker domain. "
+    "Check SameSite cookie attribute."
+)
+
+
+def _has_csrf_signal(ep: Endpoint, js_contents: List[str]) -> bool:
+    """Returns True if any CSRF protection signal is found."""
+    # Check request headers
+    for k in (ep.request_headers or {}):
+        if k.lower() in _CSRF_HEADER_SIGNALS:
+            return True
+
+    # Check body fields
+    for bf in (ep.body_fields or []):
+        name = (bf.get("name") or "").lower()
+        if name in _CSRF_BODY_SIGNALS:
+            return True
+
+    # Check JS content for CSRF token patterns
+    for content in js_contents:
+        for sig in _CSRF_JS_SIGNALS:
+            if sig in content:
                 return True
-    for field in (ep.body_fields or []):
-        fname = field.get("name", "")
-        for pat in _CSRF_TOKEN_PATTERNS:
-            if pat.search(fname):
-                return True
+
     return False
 
-class CsrfTester(BaseTester):
+
+class CsrfMapper(BaseSurfaceMapper):
     category = AttackCategory.CSRF
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
+        # Collect all JS contents for CSRF signal scan
+        js_contents = [js.content for js in result.js_files if js.content]
+
         for ep in result.endpoints:
-            if (ep.method or "GET").upper() not in _STATE_CHANGING_METHODS:
-                continue
-            if ep.category == "API" and ep.auth_context and "bearer" in (ep.auth_context or "").lower():
-                # Bearer token auth = CSRF not applicable
-                continue
+            method = (ep.method or "GET").upper()
 
-            allowed, reason = self._policy.check(
-                ep.url, ep.method, "", "CSRF", ep.auth_context or "",
-            )
-            if not allowed:
-                self._skip(reason, category=self.category, attack_class="CSRF",
-                           target_url=ep.url, method=ep.method)
+            # Only flag state-changing methods
+            if method not in ("POST", "PUT", "PATCH"):
                 continue
 
-            has_protection = _has_csrf_protection(ep)
-            samesite_cookie = False  # would need cookie analysis to verify
+            has_csrf = _has_csrf_signal(ep, js_contents)
 
-            evidence = []
-            status   = TestStatus.CANDIDATE
-            confidence = 0.2
-
-            if not has_protection:
-                evidence.append(f"No CSRF token found in request headers or body fields for {ep.method} {ep.path}")
-                evidence.append("Cookie-based authentication context suggests CSRF may be possible")
-                if ep.category == "AUTH":
-                    evidence.append("Auth endpoint without CSRF protection is higher risk")
-                    confidence = 0.55
-                    status = TestStatus.OBSERVED
-                else:
-                    confidence = 0.35
-                    status = TestStatus.CANDIDATE
+            if has_csrf:
+                # CSRF protection found - lower confidence but still worth noting
+                evidence = [
+                    f"State-changing {method} endpoint: {ep.url}",
+                    "CSRF token signals found - verify token validation is enforced",
+                ]
+                confidence = ConfidenceLevel.LOW
             else:
-                continue  # has protection, skip
+                # No CSRF signals - this is the main finding
+                evidence = [
+                    f"State-changing {method} endpoint with no CSRF token signals: {ep.url}",
+                ]
+                confidence = ConfidenceLevel.HIGH
 
-            r = AttackTestResult(
-                category=self.category,
-                attack_class="CSRF",
-                target_url=ep.url,
-                parameter="",
-                method=ep.method,
-                route=ep.path,
-                authentication_context=ep.auth_context or "",
-                payload="",
-                status=status,
-                confidence=confidence,
-                evidence=evidence,
-                why_tested=f"{ep.method} request with no visible CSRF protection",
-                what_changed="Static analysis only - no request sent",
-                what_observed="No CSRF token observed in known fields",
-                what_remains_unverified="SameSite cookie attribute not verified - server-side CSRF enforcement not tested",
-                requests_made=0,
+            auth_ctx = ep.auth_context or ""
+            if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                evidence.append(f"Auth context: {auth_ctx}")
+
+            self._candidate(
+                endpoint     = ep,
+                surface_type = "CSRF",
+                parameters   = [],
+                confidence   = confidence,
+                evidence     = evidence,
+                burp_notes   = _BURP_NOTES,
+                auth_context = auth_ctx,
             )
-            self._results.append(r)
 
         return self._results
