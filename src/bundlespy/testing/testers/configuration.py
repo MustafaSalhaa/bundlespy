@@ -1,135 +1,209 @@
 """
-Security misconfiguration tester.
-Passive checks first; minimal active probing for common exposures.
+ConfigurationMapper - THE ONLY MAPPER THAT MAKES HTTP REQUESTS.
+Probes common configuration/debug paths with safe GET requests.
+All other mappers work from collected ScanResult data only.
 """
-import re
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_observation
-from ...storage.models import ScanResult
+from urllib.parse import urlparse
 
-_SECURITY_HEADERS = [
-    "Strict-Transport-Security",
-    "Content-Security-Policy",
-    "X-Content-Type-Options",
-    "X-Frame-Options",
-    "Referrer-Policy",
-    "Permissions-Policy",
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, SurfaceStatus, AttackCategory, ConfidenceLevel
+from ..safety import SurfaceSafetyPolicy
+from ...storage.models import ScanResult, Endpoint
+
+# Comprehensive list of common config/debug paths to probe
+CONFIG_PATHS = [
+    "/.env", "/.env.local", "/.env.production", "/.env.backup",
+    "/.git/config", "/.git/HEAD", "/.gitignore",
+    "/robots.txt", "/sitemap.xml",
+    "/actuator", "/actuator/env", "/actuator/health", "/actuator/info",
+    "/swagger.json", "/swagger.yaml", "/openapi.json", "/openapi.yaml",
+    "/api-docs", "/api/docs", "/v1/api-docs", "/v2/api-docs", "/v3/api-docs",
+    "/graphql", "/graphiql", "/playground",
+    "/phpinfo.php", "/info.php", "/server-info",
+    "/admin", "/admin/", "/administrator",
+    "/wp-admin", "/wp-login.php", "/wp-json/wp/v2/users",
+    "/config.json", "/config.yaml", "/settings.json",
+    "/backup", "/backup.zip", "/backup.sql", "/dump.sql",
+    "/.well-known/security.txt",
+    "/crossdomain.xml", "/clientaccesspolicy.xml",
+    "/web.config", "/appsettings.json",
+    "/server-status", "/server-info",
+    "/metrics", "/health", "/status", "/ping",
+    "/console", "/phpmyadmin", "/adminer",
 ]
 
-_DEBUG_PATHS = [
-    "/.env", "/.env.local", "/.env.production",
-    "/config.json", "/appsettings.json",
-    "/.git/config", "/web.config",
-    "/phpinfo.php", "/info.php",
-    "/actuator", "/actuator/health", "/actuator/env",
-    "/api/swagger", "/swagger.json", "/openapi.json",
-    "/_profiler", "/telescope", "/horizon",
-    "/debug", "/console", "/server-info",
-]
+# Burp notes per path category
+_BURP_NOTES_MAP = {
+    "/.env":       "/.env exposed - download immediately. Check for DB credentials, API keys, app secrets.",
+    "/.git/config": "/.git/config found - dump entire repo with git-dumper. May expose source code and secrets.",
+    "/.git/HEAD":  "/.git/HEAD found - full git repo likely exposed. Run git-dumper.",
+    "/actuator":   "Spring Boot actuator exposed. Check /actuator/env for credentials, /actuator/heapdump for memory dump.",
+    "/swagger":    "API docs exposed. Map all endpoints. Look for undocumented admin operations.",
+    "/openapi":    "OpenAPI spec exposed. Map all endpoints and parameters for testing.",
+    "/api-docs":   "API documentation exposed. Extract all endpoints for Burp testing.",
+    "/wp-admin":   "WordPress admin panel found. Test for weak credentials.",
+    "/phpinfo":    "phpinfo() exposed. Shows server config, PHP settings, environment variables.",
+    "/config":     "Config file accessible. Check for credentials and connection strings.",
+    "/backup":     "Backup file accessible. May contain source code or database dump.",
+    "/graphql":    "GraphQL endpoint accessible. Run introspection to map schema.",
+    "/graphiql":   "GraphQL playground exposed. Interactive query interface - use for schema exploration.",
+    "/console":    "Admin console potentially exposed. Test for weak authentication.",
+    "/phpmyadmin": "phpMyAdmin interface found. Test for default/weak credentials.",
+    "/adminer":    "Adminer database tool exposed. Test for authentication bypass.",
+    "/metrics":    "Metrics endpoint exposed. May leak internal service data.",
+    "/health":     "Health endpoint exposed. May reveal internal service topology.",
+}
 
-_CORS_ISSUE_PATTERNS = [
-    re.compile(r'access-control-allow-origin:\s*\*', re.I),
-]
+_DEFAULT_BURP_NOTES = "Sensitive path accessible. Review content and check for information disclosure."
 
-class ConfigurationTester(BaseTester):
+
+def _get_burp_notes(path: str) -> str:
+    for prefix, notes in _BURP_NOTES_MAP.items():
+        if path.startswith(prefix):
+            return notes
+    return _DEFAULT_BURP_NOTES
+
+
+class ConfigurationMapper(BaseSurfaceMapper):
     category = AttackCategory.CONFIGURATION
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
-        from urllib.parse import urlparse
+    def __init__(self, fetcher=None, policy: SurfaceSafetyPolicy = None, verbose: bool = False):
+        super().__init__(policy=policy, verbose=verbose)
+        self._fetcher = fetcher
+
+    def _config_candidate(
+        self,
+        url:          str,
+        path:         str,
+        surface_type: str,
+        confidence:   str,
+        evidence:     List[str],
+        status_code:  int,
+        status:       str = SurfaceStatus.CANDIDATE,
+    ) -> SurfaceResult:
+        """Build a config probe result. requests_made=1 since we probe HTTP."""
+        from ...storage.models import Endpoint as _Endpoint
+        synthetic_ep = _Endpoint(
+            url=url,
+            path=path,
+            method="GET",
+            category="",
+            source_file="config_probe",
+            line_number=0,
+            confidence=0.5,
+            query_params=[],
+            path_params=[],
+            body_fields=[],
+            request_headers={},
+            auth_context="",
+            source_type="static",
+        )
+        r = SurfaceResult(
+            endpoint_url     = url,
+            method           = "GET",
+            category         = self.category,
+            surface_type     = surface_type,
+            parameters       = [],
+            auth_context     = "",
+            confidence       = confidence,
+            evidence         = evidence,
+            provenance_source = "config_probe",
+            burp_notes       = _get_burp_notes(path),
+            requests_made    = 1,   # ConfigurationMapper is allowed to make requests
+            status           = status,
+        )
+        self._results.append(r)
+        return r
+
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         parsed = urlparse(result.target_url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
+        base   = f"{parsed.scheme}://{parsed.netloc}"
 
-        # 1. Probe common debug/config paths
-        probed = set()
-        for probe_path in _DEBUG_PATHS:
-            probe_url = base + probe_path
-            if probe_url in probed:
-                continue
-            probed.add(probe_url)
+        if not self._fetcher or not self._policy:
+            return self._results
 
-            allowed, reason = self._policy.check(
-                probe_url, "GET", "", "CONFIG_PROBE", "",
-            )
+        for path in CONFIG_PATHS:
+            probe_url = base + path
+
+            allowed, reason = self._policy.allow_get(probe_url)
             if not allowed:
                 continue
 
-            obs = capture_observation(self._fetcher, probe_url)
-            if obs is None:
+            # Safe GET request - the only HTTP call in the entire mapper layer
+            try:
+                fetch_result = self._fetcher.get(probe_url)
+            except Exception as e:
                 continue
 
-            evidence = []
-            status   = TestStatus.CANDIDATE
-            confidence = 0.2
+            if fetch_result is None:
+                continue
 
-            if obs.status_code == 200:
-                body = obs.body_excerpt or ""
-                if probe_path in ("/.env", "/.env.local", "/.env.production"):
-                    if any(k in body for k in ["DB_PASSWORD", "APP_KEY", "SECRET", "API_KEY", "DATABASE_URL"]):
-                        evidence.append(f"Environment file exposed at {probe_path} with credential keys")
-                        status = TestStatus.CONFIRMED
-                        confidence = 0.95
+            try:
+                content, status_code, content_type, _ = fetch_result
+            except (TypeError, ValueError):
+                continue
+
+            # 404/410/other 4xx with no content - skip
+            if status_code in (404, 410, 400, 405):
+                continue
+
+            evidence     = []
+            confidence   = ConfidenceLevel.LOW
+            surface_type = "Config/Debug Path"
+
+            if status_code == 200:
+                evidence.append(f"HTTP 200 at {path} - path is accessible")
+                confidence = ConfidenceLevel.HIGH
+                surface_type = "EXPOSED"
+
+                # Content-based boosters
+                body = content or ""
+                if path in ("/.env", "/.env.local", "/.env.production", "/.env.backup"):
+                    if any(k in body for k in ["DB_PASSWORD", "APP_KEY", "SECRET", "API_KEY", "DATABASE_URL", "PASSWORD", "TOKEN"]):
+                        evidence.append("Environment file contains credential key names")
                     else:
-                        evidence.append(f"Environment file accessible at {probe_path}")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.7
-                elif probe_path in ("/swagger.json", "/openapi.json", "/api/swagger"):
-                    if '"paths"' in body or '"swagger"' in body or '"openapi"' in body:
-                        evidence.append(f"API documentation exposed at {probe_path}")
-                        status = TestStatus.OBSERVED
-                        confidence = 0.8
-                elif probe_path == "/.git/config":
+                        evidence.append("Environment file accessible")
+                elif "/.git/" in path:
                     if "[core]" in body or "[remote" in body:
-                        evidence.append(f"Git configuration exposed at {probe_path}")
-                        status = TestStatus.CONFIRMED
-                        confidence = 0.95
-                elif "/actuator" in probe_path:
-                    evidence.append(f"Spring Boot actuator endpoint accessible at {probe_path}")
-                    status = TestStatus.OBSERVED
-                    confidence = 0.75
-                else:
-                    evidence.append(f"Potentially sensitive path accessible: {probe_path} (HTTP 200)")
-                    status = TestStatus.CANDIDATE
-                    confidence = 0.3
+                        evidence.append("Git config content confirmed - repo likely fully exposed")
+                elif "/actuator" in path:
+                    evidence.append("Spring Boot actuator endpoint responding")
+                elif path in ("/swagger.json", "/swagger.yaml", "/openapi.json", "/openapi.yaml"):
+                    if any(k in body for k in ['"paths"', '"swagger"', '"openapi"', "paths:"]):
+                        evidence.append("API specification content confirmed")
+                elif "/graphql" in path or "/graphiql" in path or "/playground" in path:
+                    evidence.append("GraphQL endpoint responding")
 
-                if evidence:
-                    r = AttackTestResult(
-                        category=self.category,
-                        attack_class="Security Misconfiguration",
-                        target_url=probe_url,
-                        method="GET",
-                        status=status,
-                        confidence=confidence,
-                        evidence=evidence,
-                        why_tested=f"Common sensitive path: {probe_path}",
-                        what_changed="Direct path probe",
-                        what_observed=f"HTTP {obs.status_code}, {obs.content_length} bytes",
-                        what_remains_unverified="Content analysis limited to first 500 bytes",
-                        requests_made=1,
-                    )
-                    self._results.append(r)
+            elif status_code == 403:
+                evidence.append(f"HTTP 403 at {path} - path exists but is restricted (may be bypassable)")
+                confidence   = ConfidenceLevel.MEDIUM
+                surface_type = "EXISTS_RESTRICTED"
 
-        # 2. Check existing endpoints for CORS misconfiguration
-        for ep in result.endpoints:
-            headers = ep.request_headers or {}
-            for k, v in headers.items():
-                for pat in _CORS_ISSUE_PATTERNS:
-                    if pat.search(f"{k}: {v}"):
-                        r = AttackTestResult(
-                            category=self.category,
-                            attack_class="CORS Misconfiguration",
-                            target_url=ep.url,
-                            method=ep.method,
-                            status=TestStatus.OBSERVED,
-                            confidence=0.7,
-                            evidence=[f"Access-Control-Allow-Origin: * observed on {ep.url}"],
-                            why_tested="CORS header analysis",
-                            what_changed="Static analysis - no request sent",
-                            what_observed="Wildcard CORS header",
-                            what_remains_unverified="Credentialed CORS request not tested",
-                            requests_made=0,
-                        )
-                        self._results.append(r)
+            elif status_code == 401:
+                evidence.append(f"HTTP 401 at {path} - path requires authentication")
+                confidence   = ConfidenceLevel.MEDIUM
+                surface_type = "EXISTS_AUTH_REQUIRED"
+
+            elif status_code in (301, 302, 307, 308):
+                evidence.append(f"HTTP {status_code} at {path} - redirect detected")
+                confidence   = ConfidenceLevel.LOW
+                surface_type = "REDIRECT"
+
+            else:
+                # Other status codes - low signal
+                evidence.append(f"HTTP {status_code} at {path}")
+                confidence = ConfidenceLevel.LOW
+
+            if evidence:
+                self._config_candidate(
+                    url          = probe_url,
+                    path         = path,
+                    surface_type = surface_type,
+                    confidence   = confidence,
+                    evidence     = evidence,
+                    status_code  = status_code,
+                    status       = SurfaceStatus.MAPPED,
+                )
 
         return self._results
