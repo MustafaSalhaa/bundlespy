@@ -1157,7 +1157,14 @@ def run_scan(args) -> int:
                 continue
             vr = validate_finding(finding.rule_id, finding.matched_value)
             if vr and vr.valid:
-                finding.status      = "validated"
+                finding.confidence_label = "likely_secret"
+                # Update provenance to reflect active validation
+                if finding.provenance is None:
+                    from .storage.models import Provenance
+                    finding.provenance = Provenance.from_finding(finding)
+                from .storage.models import ValidationStatus
+                finding.provenance.validation_status = ValidationStatus.CONFIRMED
+                finding.provenance.validation_reason = vr.detail
                 finding.description += f" | VALIDATED: {vr.detail}"
                 validated += 1
         if not args.quiet:
@@ -1165,6 +1172,9 @@ def run_scan(args) -> int:
 
     # ── Build result ──────────────────────────────────────────────────────────
     finished = datetime.utcnow()
+    # Stage 6: collect page access states from crawler
+    _page_access_states = getattr(crawler if not args.passive else None, "page_access_states", {}) or {}
+
     result = ScanResult(
         target_url     = target,
         started_at     = started,
@@ -1176,6 +1186,16 @@ def run_scan(args) -> int:
         infrastructure = all_infra,
         errors         = errors,
     )
+
+    # Stage 6: wire page_states using state_intelligence after result is built
+    if _page_access_states:
+        try:
+            from .analysis.state_intelligence import build_page_states, apply_states_to_endpoints
+            result.page_states = build_page_states(_page_access_states)
+            apply_states_to_endpoints(result.endpoints, result.page_states)
+        except Exception as _sie:
+            import logging as _silog
+            _silog.getLogger("bundlespy.cli").warning("State intelligence failed: %s", _sie)
 
     # ── Attack surface graph ───────────────────────────────────────────────────
     # Build the relationship graph from the completed scan result.
@@ -1357,7 +1377,7 @@ def run_demo() -> int:
             context="const awsKey = 'AKIAIOSFODNN7REALKEY'",
             description="AWS Access Key ID found in JavaScript bundle.",
             impact="", remediation="Remove from client-side code. Rotate in AWS console.",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
             occurrences=["main.8f31ab.chunk.js:18291"],
         ),
         Finding(
@@ -1371,7 +1391,7 @@ def run_demo() -> int:
             context="const token = 'eyJhbGciOi...'",
             description="JWT token hardcoded in JavaScript.",
             impact="", remediation="Remove hardcoded tokens. Use runtime authentication.",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
             occurrences=["main.8f31ab.chunk.js:1882"],
         ),
         Finding(
@@ -1385,7 +1405,7 @@ def run_demo() -> int:
             context="const config = { api_key: 'placeholder' }",
             description="Generic API key assignment.",
             impact="", remediation="Move to environment variables.",
-            false_positive_notes="contains placeholder indicator", status="likely_false_positive",
+            false_positive_notes="contains placeholder indicator", confidence_label="likely_false_positive",
             occurrences=["main.8f31ab.chunk.js:3441"],
         ),
     ]
