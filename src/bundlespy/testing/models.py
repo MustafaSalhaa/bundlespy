@@ -1,107 +1,96 @@
+"""
+Surface mapping vocabulary for BundleSpy's passive attack surface mapping engine.
+No payloads. No exploitation. Pure signal-to-surface mapping from collected intelligence.
+"""
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import List, Optional
 from datetime import datetime
-import uuid
 
-# Test lifecycle status vocabulary
-class TestStatus:
-    NOT_TESTED    = "NOT_TESTED"
-    CANDIDATE     = "CANDIDATE"
-    OBSERVED      = "OBSERVED"
-    INCONCLUSIVE  = "INCONCLUSIVE"
-    VALIDATED     = "VALIDATED"
-    CONFIRMED     = "CONFIRMED"
-    FALSE_POSITIVE = "FALSE_POSITIVE"
-    SKIPPED       = "SKIPPED"
-    OUT_OF_SCOPE  = "OUT_OF_SCOPE"
-    UNREACHABLE   = "UNREACHABLE"
+
+class SurfaceStatus:
+    NOT_MAPPED   = "NOT_MAPPED"
+    CANDIDATE    = "CANDIDATE"
+    MAPPED       = "MAPPED"
+    SKIPPED      = "SKIPPED"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+
+
+class ConfidenceLevel:
+    LOW    = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH   = "HIGH"
+
+    # Ordering for sort comparisons
+    _ORDER = {HIGH: 0, MEDIUM: 1, LOW: 2}
+
+    @classmethod
+    def order(cls, level: str) -> int:
+        return cls._ORDER.get(level, 99)
+
 
 class AttackCategory:
-    ACCESS_CONTROL    = "Access Control"
-    XSS               = "XSS"
-    INJECTION         = "Injection"
-    SQLI              = "SQL Injection"
-    SSRF              = "SSRF"
-    CSRF              = "CSRF"
-    PATH_TRAVERSAL    = "Path Traversal"
-    FILE_UPLOAD       = "File Upload"
-    OPEN_REDIRECT     = "Open Redirect"
-    PROTOTYPE_POLL    = "Prototype Pollution"
-    SSTI              = "Template Injection"
-    GRAPHQL           = "GraphQL"
-    WEBSOCKET         = "WebSocket"
-    AUTHENTICATION    = "Authentication"
-    CONFIGURATION     = "Configuration"
+    ACCESS_CONTROL  = "Access Control"
+    XSS             = "XSS"
+    INJECTION       = "Injection"
+    SSRF            = "SSRF"
+    OPEN_REDIRECT   = "Open Redirect"
+    CSRF            = "CSRF"
+    PATH_TRAVERSAL  = "Path Traversal"
+    CONFIGURATION   = "Configuration"
+
+    # Priority order for sorting (lower index = higher priority)
+    _PRIORITY = [
+        ACCESS_CONTROL,
+        INJECTION,
+        XSS,
+        SSRF,
+        OPEN_REDIRECT,
+        CSRF,
+        PATH_TRAVERSAL,
+        CONFIGURATION,
+    ]
+
+    @classmethod
+    def priority(cls, cat: str) -> int:
+        try:
+            return cls._PRIORITY.index(cat)
+        except ValueError:
+            return 99
+
 
 @dataclass
-class Baseline:
-    status_code:    int
-    content_type:   str
-    content_length: int
-    body_hash:      str      # sha256 of normalized body
-    headers:        Dict[str, str] = field(default_factory=dict)
-    timing_ms:      float    = 0.0
-    redirect_chain: List[str] = field(default_factory=list)
+class SurfaceResult:
+    endpoint_url:     str
+    method:           str
+    category:         str                    # AttackCategory constant
+    surface_type:     str                    # e.g. "IDOR", "Reflected XSS", "SQLi param"
+    parameters:       List[str]             # param names involved
+    auth_context:     str
+    confidence:       str                    # ConfidenceLevel constant
+    evidence:         List[str]
+    provenance_source: str                   # EvidenceSource or "config_probe"
+    burp_notes:       str                    # what to do in Burp Suite
+    requests_made:    int   = 0             # always 0 except ConfigurationMapper
+    status:           str   = SurfaceStatus.CANDIDATE
+
 
 @dataclass
-class TestObservation:
-    status_code:    int
-    content_type:   str
-    content_length: int
-    body_hash:      str
-    body_excerpt:   str      # first 500 chars of response
-    headers:        Dict[str, str] = field(default_factory=dict)
-    timing_ms:      float    = 0.0
-    redirect_chain: List[str] = field(default_factory=list)
-    error:          str      = ""
+class SurfaceSummary:
+    category:         str
+    total_candidates: int = 0
+    mapped:           int = 0
+    skipped:          int = 0
+    out_of_scope:     int = 0
+
 
 @dataclass
-class AttackTestResult:
-    test_id:              str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    category:             str = ""
-    attack_class:         str = ""          # e.g. "IDOR", "Reflected XSS", "SQL Injection"
-    target_url:           str = ""
-    parameter:            str = ""          # parameter or field that was tested
-    method:               str = "GET"
-    route:                str = ""
-    authentication_context: str = ""
-    evidence_source:      str = ""          # EvidenceSource constant
-    payload:              str = ""          # test payload used
-    baseline:             Optional[Baseline] = None
-    observation:          Optional[TestObservation] = None
-    status:               str = TestStatus.NOT_TESTED
-    confidence:           float = 0.0       # 0.0 - 1.0
-    evidence:             List[str] = field(default_factory=list)  # human-readable evidence lines
-    why_tested:           str = ""
-    what_changed:         str = ""
-    what_observed:        str = ""
-    what_remains_unverified: str = ""
-    requests_made:        int = 0
-    skipped_reason:       str = ""
-    timestamp:            datetime = field(default_factory=datetime.utcnow)
-
-@dataclass
-class AttackTestSummary:
-    category:    str
-    candidates:  int = 0
-    tested:      int = 0
-    skipped:     int = 0
-    validated:   int = 0
-    confirmed:   int = 0
-    inconclusive: int = 0
-    out_of_scope: int = 0
-
-@dataclass
-class AttackEngineReport:
+class SurfaceReport:
     target_url:       str
     started_at:       datetime
-    finished_at:      Optional[datetime] = None
+    finished_at:      Optional[datetime]
+    results:          List[SurfaceResult] = field(default_factory=list)
+    summaries:        List[SurfaceSummary] = field(default_factory=list)
     total_candidates: int = 0
-    total_tested:     int = 0
+    total_mapped:     int = 0
     total_skipped:    int = 0
-    total_validated:  int = 0
-    total_confirmed:  int = 0
-    total_requests:   int = 0
-    results:          List[AttackTestResult] = field(default_factory=list)
-    summaries:        List[AttackTestSummary] = field(default_factory=list)
     errors:           List[str] = field(default_factory=list)
