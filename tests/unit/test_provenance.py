@@ -52,7 +52,7 @@ def _finding(
         impact           = "Full payment API access.",
         remediation      = "Rotate immediately.",
         false_positive_notes = "",
-        status           = status,
+        confidence_label = status,
     )
 
 
@@ -87,37 +87,36 @@ def _endpoint(
 class TestProvenance:
     def test_defaults(self):
         p = Provenance()
-        assert p.source == "static"
-        assert p.validation_status == "NOT_VALIDATED"
+        assert p.evidence_source == "static"
+        assert p.validation_status == "not_attempted"
         assert p.auth_required is None
-        assert p.access_level == "UNKNOWN"
+        assert p.access_level == "unknown"
         assert p.skipped_reason == ""
 
     def test_to_dict_keys(self):
         p = Provenance(
-            source            = "runtime",
+            evidence_source   = "runtime",
             discovered_in     = "https://app.com/main.js",
             line_number       = 17,
             observed_at       = "https://app.com/dashboard",
-            correlation       = "static+runtime",
-            validation_status = "CONFIRMED",
+            validation_status = "confirmed",
             validation_http_status = 200,
             auth_required     = False,
-            access_level      = "PUBLIC",
+            access_level      = "public",
         )
         d = p.to_dict()
-        assert d["source"] == "runtime"
+        assert d["evidence_source"] == "runtime"
         assert d["discovered_in"] == "https://app.com/main.js"
         assert d["line_number"] == 17
-        assert d["validation_status"] == "CONFIRMED"
+        assert d["validation_status"] == "confirmed"
         assert d["validation_http_status"] == 200
         assert d["auth_required"] is False
-        assert d["access_level"] == "PUBLIC"
+        assert d["access_level"] == "public"
 
     def test_from_finding_static(self):
         f = _finding()
         p = Provenance.from_finding(f)
-        assert p.source == "static"
+        assert p.evidence_source == "static"
         assert p.discovered_in == f.file_url
         assert p.line_number == 42
         assert p.observed_at == f.source_page
@@ -125,7 +124,7 @@ class TestProvenance:
     def test_from_endpoint_static(self):
         ep = _endpoint()
         p = Provenance.from_endpoint(ep)
-        assert p.source == "static"
+        assert p.evidence_source == "static"
         assert p.discovered_in == ep.source_file
         assert p.line_number == ep.line_number
 
@@ -133,19 +132,19 @@ class TestProvenance:
         ep = _endpoint(auth_context="Bearer")
         p = Provenance.from_endpoint(ep)
         assert p.auth_required is True
-        assert p.access_level == "AUTHENTICATED"
+        assert p.access_level == "authenticated"
 
     def test_from_endpoint_no_auth(self):
         ep = _endpoint(auth_context="")
         p = Provenance.from_endpoint(ep)
         assert p.auth_required is None
-        assert p.access_level == "UNKNOWN"
+        assert p.access_level == "unknown"
 
     def test_from_endpoint_correlated(self):
         ep = _endpoint(source_type="correlated")
         p = Provenance.from_endpoint(ep)
-        assert p.source == "correlated"
-        assert p.correlation == "static+runtime"
+        # correlated normalizes to static evidence source
+        assert p.evidence_source == "static"
 
     def test_finding_provenance_field_default_none(self):
         f = _finding()
@@ -157,14 +156,14 @@ class TestProvenance:
 
     def test_provenance_round_trip(self):
         p = Provenance(
-            source="runtime",
+            evidence_source="runtime",
             discovered_in="https://a.com/a.js",
-            validation_status="CONFIRMED",
+            validation_status="confirmed",
             validation_http_status=200,
         )
         d = p.to_dict()
-        assert d["source"] == "runtime"
-        assert d["validation_status"] == "CONFIRMED"
+        assert d["evidence_source"] == "runtime"
+        assert d["validation_status"] == "confirmed"
         assert d["validation_http_status"] == 200
 
 
@@ -191,10 +190,10 @@ class TestCoverageLedger:
     def test_finding_with_provenance_confirmed(self):
         f = _finding(severity="HIGH")
         f.provenance = Provenance(
-            source              = "static",
-            validation_status   = "CONFIRMED",
+            evidence_source     = "static",
+            validation_status   = "confirmed",
             validation_http_status = 200,
-            access_level        = "PUBLIC",
+            access_level        = "public",
         )
         ledger = build_coverage_ledger([f], [])
         fs = ledger.findings
@@ -207,8 +206,8 @@ class TestCoverageLedger:
     def test_finding_with_provenance_unreachable(self):
         f = _finding(severity="HIGH")
         f.provenance = Provenance(
-            validation_status = "UNREACHABLE",
-            access_level      = "UNKNOWN",
+            validation_status = "unreachable",
+            access_level      = "unknown",
         )
         ledger = build_coverage_ledger([f], [])
         fs = ledger.findings
@@ -230,9 +229,9 @@ class TestCoverageLedger:
         ledger = build_coverage_ledger([], [ep1, ep2, ep3])
         eps = ledger.endpoints
         assert eps.total == 3
-        assert eps.from_static == 1
+        assert eps.from_static == 2        # ep1 (static) + ep3 (correlated maps to static bucket)
         assert eps.from_runtime == 1
-        assert eps.from_correlated == 1
+        assert eps.from_correlated == 1    # ep3 tracked separately by raw source_type
 
     def test_endpoint_auth_context(self):
         ep = _endpoint(auth_context="Bearer")
@@ -254,14 +253,14 @@ class TestCoverageLedger:
 
     def test_runtime_finding_source_count(self):
         f = _finding()
-        f.provenance = Provenance(source="runtime")
+        f.provenance = Provenance(evidence_source="runtime")
         ledger = build_coverage_ledger([f], [])
         assert ledger.findings.from_runtime == 1
         assert ledger.findings.from_static == 0
 
     def test_passive_finding_source_count(self):
         f = _finding()
-        f.provenance = Provenance(source="passive")
+        f.provenance = Provenance(evidence_source="passive")
         ledger = build_coverage_ledger([f], [])
         assert ledger.findings.from_passive == 1
 
@@ -300,7 +299,7 @@ class TestPassiveValidator:
         scope = self._make_scope(in_scope=False)
         report = run_passive_validation([f], scope)
         assert report.probed == 1  # Attempted but skipped by scope inside probe_finding
-        assert report.not_validated == 1
+        assert report.skipped == 1
 
     def test_skip_inline_url(self):
         from bundlespy.analysis.passive_validator import run_passive_validation
@@ -325,8 +324,8 @@ class TestPassiveValidator:
         assert report.probed == 1
         assert report.confirmed == 1
         assert f.provenance is not None
-        assert f.provenance.validation_status == "CONFIRMED"
-        assert f.provenance.access_level == "PUBLIC"
+        assert f.provenance.validation_status == "confirmed"
+        assert f.provenance.access_level == "public"
 
     @patch("bundlespy.analysis.passive_validator._probe_source_url")
     def test_unreachable_when_pattern_absent(self, mock_probe):
@@ -341,7 +340,8 @@ class TestPassiveValidator:
 
         assert report.probed == 1
         assert report.unreachable == 1
-        assert f.provenance.validation_status == "UNREACHABLE"
+        # 200 but pattern gone -> INVALIDATED, which counts as unreachable in report
+        assert f.provenance.validation_status == "invalidated"
 
     @patch("bundlespy.analysis.passive_validator._probe_source_url")
     def test_unreachable_on_404(self, mock_probe):
@@ -353,7 +353,7 @@ class TestPassiveValidator:
         report = run_passive_validation([f], scope, delay=0)
 
         assert report.unreachable == 1
-        assert f.provenance.validation_status == "UNREACHABLE"
+        assert f.provenance.validation_status == "unreachable"
 
     @patch("bundlespy.analysis.passive_validator._probe_source_url")
     def test_error_on_exception(self, mock_probe):
@@ -364,8 +364,10 @@ class TestPassiveValidator:
         scope = self._make_scope()
         report = run_passive_validation([f], scope, delay=0)
 
-        assert report.errors == 1
-        assert f.provenance.validation_status == "ERROR"
+        # connection refused -> UNREACHABLE (not a separate 'errors' bucket)
+        assert report.unreachable == 1
+        assert report.errors == 0
+        assert f.provenance.validation_status == "unreachable"
 
     @patch("bundlespy.analysis.passive_validator._probe_source_url")
     def test_deduplication_same_source_url(self, mock_probe):
@@ -467,8 +469,8 @@ class TestJSONReportProvenance:
         out    = generate(result)
         data   = json.loads(out)
         prov = data["findings"][0]["provenance"]
-        assert "source" in prov
-        assert prov["source"] in ("static", "runtime", "correlated", "passive")
+        assert "evidence_source" in prov
+        assert prov["evidence_source"] in ("static", "runtime", "passive", "supplied")
 
     def test_coverage_ledger_in_json(self):
         import json
