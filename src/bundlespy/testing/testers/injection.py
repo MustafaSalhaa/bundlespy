@@ -1,5 +1,5 @@
 """
-InjectionMapper - SQL/NoSQL/Command/SSTI injection surface identification.
+InjectionMapper - SQL/NoSQL/Command/SSTI/XXE/LDAP injection surface identification.
 Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 """
 from typing import List
@@ -53,6 +53,38 @@ _COMMAND_PATH_SIGNALS = {
     "/convert", "/compress", "/resize", "/generate",
 }
 
+# XXE - body field names that commonly carry XML payloads
+_XXE_BODY_FIELDS = {
+    "xml", "data", "payload", "content", "body", "document",
+    "input", "request", "soap", "envelope",
+}
+
+# XXE - content-type values that indicate XML parsing
+_XXE_CONTENT_TYPES = {
+    "application/xml", "text/xml", "application/soap+xml", "application/xhtml+xml",
+}
+
+# LDAP - param names that commonly map to directory attributes
+_LDAP_PARAMS = {
+    "username", "user", "cn", "dn", "ldap", "login", "uid",
+    "samaccountname", "userprincipalname", "email", "mail",
+}
+
+# LDAP - always LDAP-specific regardless of path context
+_LDAP_SPECIFIC_PARAMS = {"cn", "dn", "ldap", "samaccountname", "userprincipalname"}
+
+# LDAP - path patterns that suggest directory/auth backends
+_LDAP_PATH_SIGNALS = {
+    "/ldap", "/directory", "/search", "/lookup", "/ad",
+    "/auth", "/login", "/signin",
+}
+
+# Path patterns with injection-relevant semantics (search/filter endpoints)
+_PATH_SIGNALS = {"/search", "/query", "/filter", "/find", "/lookup"}
+
+# Search/filter body fields that commonly go straight into WHERE clauses
+_SEARCH_BODY_FIELDS = {"search", "query", "q", "filter"}
+
 _BURP_NOTES_SQLI = (
     "Test SQLi with sqlmap or manual boolean/time-based. "
     "For NoSQL: test with {$gt:''} operators. "
@@ -83,6 +115,18 @@ _BURP_NOTES_TENANT = (
     "Multi-tenant param - test for cross-tenant data access (horizontal privilege escalation). "
     "Try substituting another organization/tenant ID. "
     "Also test for SQLi: the value likely goes into a WHERE clause."
+)
+
+_BURP_NOTES_XXE = (
+    "Test XXE: <!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><foo>&xxe;</foo>. "
+    "Try blind XXE with Burp Collaborator OOB: <!ENTITY % xxe SYSTEM \"http://collaborator/\">. "
+    "Check SOAP endpoints for SSRF via XXE."
+)
+
+_BURP_NOTES_LDAP = (
+    "Test LDAP injection: *)(objectClass=*))(|(objectClass=* and )(|(password=*). "
+    "Use blind LDAP with timing or error-based. "
+    "Tool: ldap-brute, or manual with Burp."
 )
 
 
@@ -118,6 +162,14 @@ def _injection_confidence(name: str, method: str) -> str:
     if name in _SSTI_PARAMS:
         return ConfidenceLevel.MEDIUM
     return ConfidenceLevel.MEDIUM
+
+
+def _has_xml_content_type(ep: Endpoint) -> bool:
+    """Check if the endpoint declares an XML-based content-type header."""
+    headers = ep.headers or {}
+    ct = headers.get("content-type") or headers.get("Content-Type") or ""
+    ct = ct.lower()
+    return any(xml_ct in ct for xml_ct in _XXE_CONTENT_TYPES)
 
 
 class InjectionMapper(BaseSurfaceMapper):
@@ -195,6 +247,137 @@ class InjectionMapper(BaseSurfaceMapper):
                             f"Injection-relevant body field '{name}' on {method} {ep.url}",
                         ],
                         burp_notes   = burp_notes,
+                    )
+
+            # --- XXE Detection ---
+            # Three trigger conditions:
+            # 1. XML content-type header confirmed on the endpoint
+            # 2. Body field name matches known XML-carrying field names (POST/PUT/PATCH)
+            # 3. Path contains /xml, /soap, /wsdl, or /api with xml body field
+            xml_ct_confirmed = _has_xml_content_type(ep)
+            xml_path_signal = any(seg in path for seg in ("/xml", "/soap", "/wsdl"))
+            api_path = "/api" in path
+
+            if xml_ct_confirmed:
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "XXE",
+                    parameters   = ["header:content-type"],
+                    confidence   = ConfidenceLevel.HIGH,
+                    evidence     = [
+                        f"XML content-type confirmed on {method} {ep.url}",
+                        "Parser likely accepts external entity declarations",
+                    ],
+                    burp_notes   = _BURP_NOTES_XXE,
+                )
+            elif method in ("POST", "PUT", "PATCH"):
+                xxe_body_fields = [
+                    bf for bf in (ep.body_fields or [])
+                    if (bf.get("name") or "").lower() in _XXE_BODY_FIELDS
+                ]
+                for bf in xxe_body_fields:
+                    name = (bf.get("name") or "").lower()
+                    # MEDIUM for field name match alone; HIGH if path also signals XML
+                    if xml_path_signal or (api_path and name in ("xml", "soap", "envelope")):
+                        confidence = ConfidenceLevel.HIGH
+                        evidence = [
+                            f"XML body field '{name}' on {method} {ep.url}",
+                            f"Path also signals XML processing: {ep.url}",
+                        ]
+                    else:
+                        confidence = ConfidenceLevel.MEDIUM
+                        evidence = [
+                            f"Body field '{name}' commonly carries XML payloads on {method} {ep.url}",
+                        ]
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "XXE",
+                        parameters   = [f"body:{name}"],
+                        confidence   = confidence,
+                        evidence     = evidence,
+                        burp_notes   = _BURP_NOTES_XXE,
+                    )
+
+            # --- LDAP Injection Detection ---
+            # Trigger conditions:
+            # 1. Param name is always LDAP-specific (cn, dn, ldap, samaccountname, userprincipalname) - HIGH
+            # 2. Param in _LDAP_PARAMS AND path contains a _LDAP_PATH_SIGNAL - MEDIUM
+            path_is_ldap = any(sig in path for sig in _LDAP_PATH_SIGNALS)
+
+            all_params = list(ep.query_params or [])
+            if method in ("POST", "PUT", "PATCH"):
+                all_params += list(ep.body_fields or [])
+
+            for param in all_params:
+                pname = (param.get("name") or "").lower()
+                param_source = "query" if param in (ep.query_params or []) else "body"
+
+                if pname in _LDAP_SPECIFIC_PARAMS:
+                    # Always LDAP-specific - flag regardless of path
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "LDAP Injection",
+                        parameters   = [f"{param_source}:{pname}"],
+                        confidence   = ConfidenceLevel.HIGH,
+                        evidence     = [
+                            f"LDAP-specific param '{pname}' on {method} {ep.url}",
+                            "This param name is native to LDAP directory attributes",
+                        ],
+                        burp_notes   = _BURP_NOTES_LDAP,
+                    )
+                elif pname in _LDAP_PARAMS and path_is_ldap:
+                    # Generic auth param but path confirms directory/auth context
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "LDAP Injection",
+                        parameters   = [f"{param_source}:{pname}"],
+                        confidence   = ConfidenceLevel.MEDIUM,
+                        evidence     = [
+                            f"Param '{pname}' on auth/directory path {ep.url}",
+                            "Combination of param name and path suggests LDAP backend",
+                        ],
+                        burp_notes   = _BURP_NOTES_LDAP,
+                    )
+
+            # --- Search param on POST body (missing coverage) ---
+            # search/query/q/filter body fields on state-changing methods
+            # often go directly into WHERE clauses or document search pipelines
+            if method in ("POST", "PUT", "PATCH"):
+                for bf in (ep.body_fields or []):
+                    name = (bf.get("name") or "").lower()
+                    if name in _SEARCH_BODY_FIELDS:
+                        self._candidate(
+                            endpoint     = ep,
+                            surface_type = "SQL/NoSQL Injection",
+                            parameters   = [f"body:{name}"],
+                            confidence   = ConfidenceLevel.MEDIUM,
+                            evidence     = [
+                                f"Search/filter body field '{name}' on {method} {ep.url}",
+                                "These fields commonly feed directly into WHERE clauses or document search",
+                            ],
+                            burp_notes   = _BURP_NOTES_SQLI,
+                        )
+
+            # --- Injection-relevant path signal + body field ---
+            # Endpoints under /search, /query, /filter, /find, /lookup
+            # with any body field are worth flagging at MEDIUM
+            if method in ("POST", "PUT", "PATCH") and any(sig in path for sig in _PATH_SIGNALS):
+                body_fields = ep.body_fields or []
+                if body_fields:
+                    field_names = [
+                        (bf.get("name") or "unknown") for bf in body_fields
+                    ]
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SQL/NoSQL Injection",
+                        parameters   = [f"body:{n}" for n in field_names[:5]],
+                        confidence   = ConfidenceLevel.MEDIUM,
+                        evidence     = [
+                            f"Injection-relevant path pattern on {method} {ep.url}",
+                            f"Body fields present: {', '.join(field_names[:5])}",
+                            "Search/filter/lookup endpoints commonly pass input into DB queries",
+                        ],
+                        burp_notes   = _BURP_NOTES_SQLI,
                     )
 
         return self._results
