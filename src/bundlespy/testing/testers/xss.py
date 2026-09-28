@@ -118,6 +118,26 @@ _STORED_MEDIUM_FIELDS = {
     "label", "tag", "category", "reason", "notes",
 }
 
+# ─── POSTMESSAGE PATTERNS ────────────────────────────────────────────────────
+
+# Patterns that indicate a postMessage listener is registered
+_POSTMESSAGE_LISTENER_PATTERNS = [
+    "addEventListener(\"message\"",
+    "addEventListener('message'",
+    ".onmessage =",
+    ".onmessage=",
+]
+
+# Patterns that indicate the handler performs an origin check
+_ORIGIN_CHECK_PATTERNS = [
+    "event.origin",
+    "e.origin",
+    "message.origin",
+    "ev.origin",
+    "msg.origin",
+    "data.origin",
+]
+
 # ─── BURP NOTES ──────────────────────────────────────────────────────────────
 
 _BURP_NOTES_REFLECTED = (
@@ -179,6 +199,13 @@ _BURP_NOTES_NAV_SINK = (
     "Test: ?next=javascript:alert(1), then confirm if href is set without validation."
 )
 
+_BURP_NOTES_POSTMESSAGE = (
+    "postMessage XSS - no origin check. Open target in browser, open DevTools console, run: "
+    "window.postMessage('<img src=x onerror=alert(document.domain)>', '*') and watch for XSS. "
+    "Also test: window.postMessage({type:'update', data:'<script>alert(1)<\\/script>'}, '*'). "
+    "Check what the handler does with event.data before claiming exploitable."
+)
+
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -206,6 +233,12 @@ def _sink_burp_notes(sinks: List[str], frameworks: Dict[str, bool]) -> str:
     if frameworks.get("jquery"):
         return _BURP_NOTES_JQUERY
     return _BURP_NOTES_DOM_SURFACE
+
+def _has_postmessage_listener(content: str) -> bool:
+    return any(p in content for p in _POSTMESSAGE_LISTENER_PATTERNS)
+
+def _has_origin_check(content: str) -> bool:
+    return any(p in content for p in _ORIGIN_CHECK_PATTERNS)
 
 
 # ─── MAPPER ──────────────────────────────────────────────────────────────────
@@ -321,9 +354,6 @@ class XssMapper(BaseSurfaceMapper):
 
             all_sinks    = strong_sinks + nav_sinks
 
-            if not all_sinks:
-                continue
-
             ep_url = js.url or getattr(js, "source_page", "") or ""
             if not ep_url:
                 continue
@@ -344,6 +374,33 @@ class XssMapper(BaseSurfaceMapper):
                 auth_context="",
                 source_type=getattr(js, "source_type", "static") or "static",
             )
+
+            # ── postMessage XSS - runs on every JS file, independent of sinks ─
+            if _has_postmessage_listener(content) and not _has_origin_check(content):
+                pm_evidence = [
+                    "postMessage listener found: addEventListener(\"message\") or .onmessage handler",
+                    "No origin check detected (event.origin not present) - any origin can send messages",
+                ]
+                if strong_sinks:
+                    pm_evidence.append(f"Strong DOM sinks in same file: {', '.join(strong_sinks[:4])}")
+                    pm_evidence.append("Attacker can send arbitrary messages from evil.com to this handler")
+                    pm_confidence = ConfidenceLevel.HIGH
+                else:
+                    pm_evidence.append("Attacker can send arbitrary messages from evil.com to this handler")
+                    pm_confidence = ConfidenceLevel.MEDIUM
+
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "DOM XSS via postMessage",
+                    parameters   = [],
+                    confidence   = pm_confidence,
+                    evidence     = pm_evidence,
+                    burp_notes   = _BURP_NOTES_POSTMESSAGE,
+                )
+
+            # Skip sink/source analysis if no sinks present
+            if not all_sinks:
+                continue
 
             if sources and strong_sinks:
                 # Strong sink + user-controlled source = real DOM XSS surface
