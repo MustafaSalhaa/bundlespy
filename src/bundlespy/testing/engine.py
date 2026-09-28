@@ -1,57 +1,68 @@
 """
-AttackTestingEngine - orchestrates all testers against a completed ScanResult.
-Consumes existing BundleSpy intelligence; produces AttackEngineReport.
+SurfaceMappingEngine - orchestrates all passive surface mappers against a completed ScanResult.
+Produces a SurfaceReport suitable for Burp Suite follow-up.
+
+No payload injection. No exploitation. No destructive requests.
+Only ConfigurationMapper makes any HTTP requests (safe GETs to bounded list).
 """
 import logging
 import time
 from datetime import datetime
 from typing import List, Optional
 
-from .models import AttackEngineReport, AttackTestSummary, AttackCategory, TestStatus
-from .safety import SafetyPolicy
-from .prioritizer import prioritize
-from .testers.access_control import AccessControlTester
-from .testers.xss import XssTester
-from .testers.injection import InjectionTester
-from .testers.ssrf import SsrfTester
-from .testers.open_redirect import OpenRedirectTester
-from .testers.csrf import CsrfTester
-from .testers.path_traversal import PathTraversalTester
-from .testers.configuration import ConfigurationTester
+from .models import SurfaceReport, SurfaceSummary, SurfaceStatus, AttackCategory
+from .safety import SurfaceSafetyPolicy
+from .prioritizer import prioritize_surfaces
+from .testers.access_control import AccessControlMapper
+from .testers.xss import XssMapper
+from .testers.injection import InjectionMapper
+from .testers.ssrf import SsrfMapper
+from .testers.open_redirect import OpenRedirectMapper
+from .testers.csrf import CsrfMapper
+from .testers.path_traversal import PathTraversalMapper
+from .testers.configuration import ConfigurationMapper
 from ..storage.models import ScanResult
+
+# Keep the old name as an alias for backwards compatibility
+AttackTestingEngine = None  # will be set at bottom of file
 
 _log = logging.getLogger("bundlespy.testing.engine")
 
-class AttackTestingEngine:
-    """
-    Consumes a completed ScanResult and runs bounded, evidence-driven
-    security tests against the discovered attack surface.
 
-    Does not modify any existing BundleSpy infrastructure.
-    All testers are read-only consumers of the ScanResult.
+class SurfaceMappingEngine:
+    """
+    Passive attack surface mapping engine.
+
+    Consumes a completed ScanResult and maps attack surface candidates
+    from the collected intelligence. Returns a SurfaceReport with prioritized
+    candidates ready for manual follow-up in Burp Suite.
+
+    Rules:
+    - Zero payload injection
+    - Zero destructive HTTP requests
+    - Only ConfigurationMapper makes any requests (safe GET probes)
+    - All candidates are SURFACE CANDIDATES, not confirmed vulnerabilities
     """
 
     def __init__(
         self,
-        fetcher,
-        scope,
+        fetcher          = None,
+        scope            = None,
         rate_per_second: float = 2.0,
-        max_requests:    int   = 500,
-        allow_post:      bool  = False,
+        max_requests:    int   = 100,
         verbose:         bool  = False,
-        enabled_testers: Optional[List[str]] = None,
+        enabled_mappers: Optional[List[str]] = None,
     ):
         self._fetcher  = fetcher
         self._scope    = scope
         self._verbose  = verbose
-        self._policy   = SafetyPolicy(
-            scope=scope,
-            rate_per_second=rate_per_second,
-            max_requests=max_requests,
-            allow_post=allow_post,
-        )
-        # Which attack categories to run (default: all safe GET-based ones)
-        self._enabled = set(enabled_testers or [
+        self._policy   = SurfaceSafetyPolicy(
+            scope           = scope,
+            rate_per_second = rate_per_second,
+            max_requests    = max_requests,
+        ) if scope else None
+
+        self._enabled = set(enabled_mappers or [
             AttackCategory.ACCESS_CONTROL,
             AttackCategory.XSS,
             AttackCategory.INJECTION,
@@ -62,69 +73,60 @@ class AttackTestingEngine:
             AttackCategory.CONFIGURATION,
         ])
 
-    def _build_testers(self):
-        kwargs = dict(fetcher=self._fetcher, policy=self._policy, verbose=self._verbose)
-        all_testers = [
-            AccessControlTester(**kwargs),
-            XssTester(**kwargs),
-            InjectionTester(**kwargs),
-            SsrfTester(**kwargs),
-            OpenRedirectTester(**kwargs),
-            CsrfTester(**kwargs),
-            PathTraversalTester(**kwargs),
-            ConfigurationTester(**kwargs),
-        ]
-        return [t for t in all_testers if t.category in self._enabled]
+    def _build_mappers(self):
+        static_kwargs = dict(policy=self._policy, verbose=self._verbose)
+        config_kwargs = dict(fetcher=self._fetcher, policy=self._policy, verbose=self._verbose)
 
-    def run(self, result: ScanResult) -> AttackEngineReport:
+        all_mappers = [
+            AccessControlMapper(**static_kwargs),
+            XssMapper(**static_kwargs),
+            InjectionMapper(**static_kwargs),
+            SsrfMapper(**static_kwargs),
+            OpenRedirectMapper(**static_kwargs),
+            CsrfMapper(**static_kwargs),
+            PathTraversalMapper(**static_kwargs),
+            ConfigurationMapper(**config_kwargs),
+        ]
+        return [m for m in all_mappers if m.category in self._enabled]
+
+    def run(self, result: ScanResult) -> SurfaceReport:
         started = datetime.utcnow()
-        report  = AttackEngineReport(
-            target_url=result.target_url,
-            started_at=started,
+        report  = SurfaceReport(
+            target_url  = result.target_url,
+            started_at  = started,
+            finished_at = None,
         )
 
-        testers = self._build_testers()
+        mappers = self._build_mappers()
 
-        # Sort endpoints by priority so high-value targets are tested first
-        _sorted = prioritize(result.endpoints)
-        # Build a temporary ScanResult-like view with sorted endpoints
-        class _SortedResult:
-            def __init__(self, r, eps):
-                self.target_url  = r.target_url
-                self.endpoints   = [ep for _, ep in eps]
-                self.js_files    = r.js_files
-                self.findings    = r.findings
-                self.infrastructure = r.infrastructure
-                self.graph       = r.graph
-                self.page_states = r.page_states
-        sorted_result = _SortedResult(result, _sorted)
-
-        for tester in testers:
-            _log.debug("Running %s", tester.category)
+        for mapper in mappers:
+            _log.debug("Mapping %s", mapper.category)
             t0 = time.monotonic()
             try:
-                tester.run(sorted_result)
+                mapper.map(result)
             except Exception as e:
-                _log.warning("%s failed: %s", tester.category, e)
-                report.errors.append(f"{tester.category}: {e}")
+                _log.warning("%s failed: %s", mapper.category, e)
+                report.errors.append(f"{mapper.category}: {e}")
             elapsed = time.monotonic() - t0
-            _log.debug("%s done in %.1fs - %d results", tester.category, elapsed, len(tester.results))
+            _log.debug("%s done in %.1fs - %d candidates", mapper.category, elapsed, len(mapper.results))
 
-            report.results.extend(tester.results)
-            report.summaries.append(tester.summary())
+            report.results.extend(mapper.results)
+            report.summaries.append(mapper.summary())
+
+        # Prioritize all results
+        report.results = prioritize_surfaces(report.results)
 
         # Aggregate counts
         for r in report.results:
             report.total_candidates += 1
-            if r.status not in (TestStatus.SKIPPED, TestStatus.NOT_TESTED, TestStatus.OUT_OF_SCOPE):
-                report.total_tested += 1
-            if r.status == TestStatus.SKIPPED:
+            if r.status == SurfaceStatus.MAPPED:
+                report.total_mapped += 1
+            elif r.status == SurfaceStatus.SKIPPED:
                 report.total_skipped += 1
-            if r.status in (TestStatus.VALIDATED, TestStatus.CONFIRMED):
-                report.total_validated += 1
-            if r.status == TestStatus.CONFIRMED:
-                report.total_confirmed += 1
-            report.total_requests += r.requests_made
 
         report.finished_at = datetime.utcnow()
         return report
+
+
+# Backwards compatibility alias - old import path still works
+AttackTestingEngine = SurfaceMappingEngine
