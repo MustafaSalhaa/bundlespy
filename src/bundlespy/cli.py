@@ -107,15 +107,15 @@ other:
 
     # Features
     _fg = scan.add_argument_group("features")
-    _fg.add_argument("--source-maps",      action="store_true", help="Fetch and parse .map files to recover original source")
-    _fg.add_argument("--chunks",           action="store_true", help="Discover and download webpack chunk files")
-    _fg.add_argument("--passive",          action="store_true", help="Pull historical JS from Wayback Machine + CommonCrawl instead of crawling live")
-    _fg.add_argument("--headless",         action="store_true", help="Launch a real browser to trigger lazy-loaded JS and intercept network calls")
-    _fg.add_argument("--stealth",          action="store_true", help="Enable evasion: randomized delays, realistic headers, no automation flags")
-    _fg.add_argument("--validate",         action="store_true", help="HTTP-probe discovered endpoints to confirm they respond")
-    _fg.add_argument("--validate-secrets", action="store_true", help="Live-probe found secrets against their provider APIs to confirm they are active")
-    _fg.add_argument("--graphql",          action="store_true", help="Run GraphQL introspection on any GraphQL endpoints found")
-    _fg.add_argument("--harvest-subs",     action="store_true", help="Extract subdomains referenced in JS and endpoints")
+    _fg.add_argument("-M", "--source-maps",      action="store_true", help="Fetch and parse .map files to recover original source")
+    _fg.add_argument("-C", "--chunks",           action="store_true", help="Discover and download webpack chunk files")
+    _fg.add_argument("-P", "--passive",          action="store_true", help="Pull historical JS from Wayback Machine + CommonCrawl instead of crawling live")
+    _fg.add_argument("-H", "--headless",         action="store_true", help="Launch a real browser to trigger lazy-loaded JS and intercept network calls")
+    _fg.add_argument("-S", "--stealth",          action="store_true", help="Enable evasion: randomized delays, realistic headers, no automation flags")
+    _fg.add_argument("-V", "--validate",         action="store_true", help="HTTP-probe discovered endpoints to confirm they respond")
+    _fg.add_argument("-K", "--validate-secrets", action="store_true", help="Live-probe found secrets against their provider APIs to confirm they are active")
+    _fg.add_argument("-G", "--graphql",          action="store_true", help="Run GraphQL introspection on any GraphQL endpoints found")
+    _fg.add_argument("-U", "--harvest-subs",     action="store_true", help="Extract subdomains referenced in JS and endpoints")
 
     # Headless options
     _hg = scan.add_argument_group("headless options (require --headless)")
@@ -128,7 +128,7 @@ other:
 
     # Auth
     _ag = scan.add_argument_group("authentication")
-    _ag.add_argument("--cookie", default="", metavar="STRING",
+    _ag.add_argument("-c", "--cookie", default="", metavar="STRING",
                      help="Session cookie string to send with every request\n  e.g. --cookie \"session=abc123; csrf=xyz\"")
     _ag.add_argument("--header", action="append", default=[], metavar="NAME:VALUE",
                      help="Extra request header (repeat for multiple)\n  e.g. --header \"Authorization: Bearer token\"")
@@ -141,9 +141,9 @@ other:
 
     # Output
     _og = scan.add_argument_group("output")
-    _og.add_argument("--format",      default="terminal", metavar="FMT",
+    _og.add_argument("-f", "--format", default="terminal", metavar="FMT",
                      help="Output format: terminal (default), html, json, csv, burp\n  combine with commas: --format html,json,burp")
-    _og.add_argument("--output",      default="",         metavar="DIR",
+    _og.add_argument("-o", "--output", default="",         metavar="DIR",
                      help="Directory to write report files (default: ./bundlespy-reports/)")
     _og.add_argument("--report-name", default="",         metavar="NAME",
                      help="Custom filename stem for reports (e.g. client-webapp-2026)")
