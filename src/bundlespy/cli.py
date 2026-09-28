@@ -1418,25 +1418,23 @@ def run_scan(args) -> int:
     attack_report = None
     if not args.passive:
         try:
-            from .testing.engine import AttackTestingEngine
-            from .testing.reporter import print_attack_report
+            from .testing.engine import SurfaceMappingEngine
+            from .testing.reporter import print_surface_report
             if not args.quiet and not getattr(args, "silent", False):
-                phase("Running attack surface tests")
-            _engine = AttackTestingEngine(
+                phase("Mapping attack surface")
+            _engine = SurfaceMappingEngine(
                 fetcher         = fetcher,
                 scope           = scope,
                 rate_per_second = max(1.0, args.rate / 2),
-                allow_post      = False,
                 verbose         = getattr(args, "verbose", False),
             )
             attack_report = _engine.run(result)
             extras["attack_report"] = attack_report
             if not args.quiet and not getattr(args, "silent", False):
-                _confirmed = attack_report.total_confirmed
-                _validated = attack_report.total_validated
-                _tested    = attack_report.total_tested
-                _label = f"{_tested} tested  {_validated} validated  {_confirmed} confirmed"
-                phase_done("Attack tests", _label)
+                _candidates = attack_report.total_candidates
+                _mapped     = attack_report.total_mapped
+                _label = f"{_candidates} candidates  {_mapped} mapped"
+                phase_done("Attack surface", _label)
         except Exception as _ae:
             import logging as _ael
             _ael.getLogger("bundlespy.cli").warning("Attack engine error: %s", _ae)
@@ -1465,8 +1463,8 @@ def run_scan(args) -> int:
         )
         if attack_report is not None:
             try:
-                from .testing.reporter import print_attack_report
-                print_attack_report(attack_report)
+                from .testing.reporter import print_surface_report
+                print_surface_report(attack_report)
             except Exception as _are:
                 import logging as _arl
                 _arl.getLogger("bundlespy.cli").warning("Attack report print error: %s", _are)
