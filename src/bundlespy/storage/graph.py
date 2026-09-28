@@ -48,7 +48,11 @@ from enum import Enum
 from typing import Dict, List, Optional, Set, Any
 from urllib.parse import urlparse
 
-from .models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
+from .models import (
+    JSFile, Finding, Endpoint, InfrastructureItem, ScanResult,
+    EvidenceSource, AssetOrigin, ValidationStatus, AccessLevel, ScopeStatus,
+    Provenance,
+)
 
 
 # ── Node / Edge types ─────────────────────────────────────────────────────────
@@ -701,18 +705,28 @@ class AttackSurfaceGraph:
             elif js.source_type == "sourcemap" or js.url.startswith("sourcemap://"):
                 kind = NodeType.SOURCEMAP
 
+            # Ensure provenance is built before reading it
+            if js.provenance is None:
+                js.provenance = Provenance.from_js_file(js)
+            prov = js.provenance
+
             g.add_node(Node(
                 id         = nid,
                 kind       = kind,
                 label      = _js_label(js.url),
                 confidence = 1.0,
                 data       = {
-                    "url":         js.url,
-                    "size_bytes":  js.size_bytes,
-                    "sha256":      js.sha256[:12] if js.sha256 else "",
-                    "source_type": js.source_type,
-                    "technology":  js.technology,
-                    "has_map":     js.has_source_map,
+                    "url":              js.url,
+                    "size_bytes":       js.size_bytes,
+                    "sha256":           js.sha256[:12] if js.sha256 else "",
+                    "technology":       js.technology,
+                    "has_map":          js.has_source_map,
+                    # Trust model vocabulary
+                    "evidence_source":  prov.evidence_source,
+                    "asset_origin":     prov.asset_origin,
+                    "validation_status": prov.validation_status,
+                    "access_level":     prov.access_level,
+                    "scope_status":     prov.scope_status,
                 },
             ))
             js_ids[js.url] = nid
@@ -730,6 +744,11 @@ class AttackSurfaceGraph:
             nid  = _node_id("ep", ep.method, ep.url)
             label = _endpoint_label(ep)
 
+            # Ensure provenance is built before reading it
+            if ep.provenance is None:
+                ep.provenance = Provenance.from_endpoint(ep)
+            ep_prov = ep.provenance
+
             g.add_node(Node(
                 id         = nid,
                 kind       = NodeType.ENDPOINT,
@@ -741,13 +760,18 @@ class AttackSurfaceGraph:
                     "method":       ep.method,
                     "category":     ep.category,
                     "source_file":  ep.source_file,
-                    "source_type":  getattr(ep, "source_type", "static"),
                     "auth_context": ep.auth_context or "",
                     "kind":         ep.kind or "api",
-                    # Stage 6: Application State Intelligence
+                    # Stage 6: crawler-observed state
                     "http_status":  getattr(ep, "http_status",  0),
                     "access_state": getattr(ep, "access_state", "UNKNOWN"),
                     "route_state":  getattr(ep, "route_state",  "DISCOVERED"),
+                    # Trust model vocabulary (from provenance)
+                    "evidence_source":   ep_prov.evidence_source,
+                    "asset_origin":      ep_prov.asset_origin,
+                    "validation_status": ep_prov.validation_status,
+                    "access_level":      ep_prov.access_level,
+                    "scope_status":      ep_prov.scope_status,
                 },
             ))
             ep_ids[ep.url] = nid
@@ -809,8 +833,13 @@ class AttackSurfaceGraph:
         finding_ids: Dict[str, str] = {}  # finding.id → node_id
 
         for finding in result.findings:
-            if finding.status == "likely_false_positive":
+            if finding.confidence_label == "likely_false_positive":
                 continue
+
+            # Ensure provenance is built before reading it
+            if finding.provenance is None:
+                finding.provenance = Provenance.from_finding(finding)
+            f_prov = finding.provenance
 
             nid = _node_id("secret", finding.rule_id, finding.matched_value)
             g.add_node(Node(
@@ -819,16 +848,24 @@ class AttackSurfaceGraph:
                 label      = finding.title,
                 confidence = finding.confidence,
                 data       = {
-                    "rule_id":        finding.rule_id,
-                    "severity":       finding.severity,
-                    "category":       finding.category,
-                    "classification": finding.classification or "",
-                    "status":         finding.status,
-                    "file_url":       finding.file_url,
-                    "source_page":    finding.source_page,
-                    "line_number":    finding.line_number,
-                    "redacted_value": finding.redacted_value,
-                    "occurrences":    finding.occurrences or [],
+                    "rule_id":          finding.rule_id,
+                    "severity":         finding.severity,
+                    "category":         finding.category,
+                    "classification":   finding.classification or "",
+                    "confidence_label": finding.confidence_label,
+                    "file_url":         finding.file_url,
+                    "source_page":      finding.source_page,
+                    "line_number":      finding.line_number,
+                    "redacted_value":   finding.redacted_value,
+                    "occurrences":      finding.occurrences or [],
+                    # Trust model vocabulary (from provenance)
+                    "evidence_source":   f_prov.evidence_source,
+                    "asset_origin":      f_prov.asset_origin,
+                    "validation_status": f_prov.validation_status,
+                    "access_level":      f_prov.access_level,
+                    "scope_status":      f_prov.scope_status,
+                    "evidence":          f_prov.evidence,
+                    "validation_reason": f_prov.validation_reason,
                 },
             ))
             finding_ids[finding.id] = nid
