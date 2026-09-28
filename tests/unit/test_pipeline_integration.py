@@ -338,7 +338,7 @@ class TestAttackSurfaceGraph:
         g = AttackSurfaceGraph.from_scan_result(result)
         ep_nodes = g.nodes_of_kind(NodeType.ENDPOINT)
         assert len(ep_nodes) == 1
-        assert ep_nodes[0].data.get("source_type") == "correlated"
+        assert ep_nodes[0].data.get("evidence_source") == "static"
 
     def test_worker_node_type(self):
         """JS file with worker in URL gets WORKER node type."""
