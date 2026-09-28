@@ -487,7 +487,10 @@ def print_secret_analysis(findings):
     pub_ids   = [f for f in findings if _is_public_id(f)]
     total     = len(secrets)
     high_conf = sum(1 for f in secrets if f.confidence >= 0.85 and f.status != "likely_false_positive")
-    validated = sum(1 for f in secrets if f.status == "validated")
+    validated = sum(
+        1 for f in secrets
+        if f.provenance and f.provenance.validation_status == "confirmed"
+    )
     fps       = sum(1 for f in secrets if f.status == "likely_false_positive")
 
     _section("SECRET ANALYSIS", "", A.RED)
@@ -584,34 +587,40 @@ def _print_provenance(prov) -> None:
     Print a compact provenance block for a finding or endpoint.
     Called from _print_finding; may be called from endpoint verbose mode.
     """
-    vs = prov.validation_status or "NOT_VALIDATED"
+    vs = prov.validation_status or "not_attempted"
     vs_color = (
-        A.GREEN  if vs == "CONFIRMED"    else
-        A.YELLOW if vs == "UNREACHABLE"  else
-        A.RED    if vs == "ERROR"        else
-        A.GREY   # NOT_VALIDATED
+        A.GREEN  if vs == "confirmed"    else
+        A.YELLOW if vs == "unreachable"  else
+        A.YELLOW if vs == "invalidated"  else
+        A.GREY   # not_attempted / skipped / probed
     )
+    src = prov.evidence_source
     src_color = (
-        A.CYAN   if prov.source == "runtime"    else
-        A.GREEN  if prov.source == "correlated" else
+        A.CYAN   if src == "runtime"    else
+        A.GREEN  if src == "passive"    else
         A.GREY
     )
     access_color = (
-        A.GREEN  if prov.access_level == "PUBLIC"        else
-        A.YELLOW if prov.access_level == "AUTHENTICATED" else
+        A.GREEN  if prov.access_level == "public"        else
+        A.YELLOW if prov.access_level == "authenticated" else
         A.GREY
     )
 
     _p(f"  {A.GREY}{'─' * 40}{A.RESET}")
     _p(f"  {A.GREY}Provenance{A.RESET}")
-    _p(f"  {_label('  Discovery', 14)}{src_color}{prov.source}{A.RESET}")
+    _p(f"  {_label('  Source', 14)}{src_color}{src}{A.RESET}"
+       + (f"  {A.GREY}[{prov.asset_origin}]{A.RESET}" if prov.asset_origin else ""))
     if prov.observed_at:
         _p(f"  {_label('  Runtime', 14)}{A.GREY}{prov.observed_at[:_w()-20]}{A.RESET}")
-    if prov.correlation and prov.correlation != "single":
-        _p(f"  {_label('  Correlated', 14)}{A.CYAN}{prov.correlation}{A.RESET}")
-    _p(f"  {_label('  Status', 14)}{vs_color}{vs}{A.RESET}"
+    if prov.evidence:
+        _p(f"  {_label('  Evidence', 14)}{A.GREY}{prov.evidence[:80]}{A.RESET}")
+    _p(f"  {_label('  Validated', 14)}{vs_color}{vs}{A.RESET}"
        + (f"  {A.GREY}HTTP {prov.validation_http_status}{A.RESET}" if prov.validation_http_status else ""))
+    if prov.validation_reason:
+        _p(f"  {_label('  Reason', 14)}{A.GREY}{prov.validation_reason[:80]}{A.RESET}")
     _p(f"  {_label('  Access', 14)}{access_color}{prov.access_level}{A.RESET}")
+    if prov.scope_status == "out_of_scope":
+        _p(f"  {_label('  Scope', 14)}{A.GREY}out of scope{A.RESET}")
     if prov.skipped_reason:
         _p(f"  {_label('  Skipped', 14)}{A.GREY}{prov.skipped_reason[:80]}{A.RESET}")
 
@@ -739,9 +748,9 @@ def print_passive_validation(report) -> None:
         _p(f"  {A.GREY}Per-finding probes:{A.RESET}")
         for pr in report.probes[:15]:
             vs_c = (
-                A.GREEN  if pr.validation_status == "CONFIRMED"   else
-                A.YELLOW if pr.validation_status == "UNREACHABLE" else
-                A.RED    if pr.validation_status == "ERROR"       else
+                A.GREEN  if pr.validation_status == "confirmed"   else
+                A.YELLOW if pr.validation_status == "unreachable" else
+                A.YELLOW if pr.validation_status == "invalidated" else
                 A.GREY
             )
             sev_c = SEV_COLOR.get(pr.severity, "")
