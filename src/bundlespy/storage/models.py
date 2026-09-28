@@ -305,9 +305,16 @@ class Provenance:
         auth_required = (
             True if endpoint.auth_context and endpoint.auth_context not in ("", "None") else None
         )
+        # Endpoints that were actually visited/crawled are known-public.
+        # source_file == "crawler://page" means the crawler fetched it successfully.
+        # headless://route means the headless browser navigated to it.
+        _src = endpoint.source_file or ""
+        _was_visited = _src.startswith(("crawler://", "headless://"))
         access_level = (
             AccessLevel.AUTHENTICATED
             if endpoint.auth_context and endpoint.auth_context not in ("", "None")
+            else AccessLevel.PUBLIC
+            if _was_visited
             else AccessLevel.UNKNOWN
         )
 
