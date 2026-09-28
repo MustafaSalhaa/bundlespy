@@ -1,103 +1,128 @@
-"""Path traversal / file access tester."""
+"""
+PathTraversalMapper - path traversal / LFI attack surface identification.
+Pure static analysis of already-collected endpoint data. Zero HTTP requests.
+"""
 from typing import List
-from .base import BaseTester
-from ..models import AttackTestResult, TestStatus, AttackCategory
-from ..baseline import capture_baseline, capture_observation
-from ...storage.models import ScanResult
+from .base import BaseSurfaceMapper
+from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ...storage.models import ScanResult, Endpoint
 
-_FILE_PARAM_SIGNALS = {
-    "file", "path", "filename", "template", "document",
-    "download", "resource", "include", "page", "view",
-    "attachment", "asset", "name", "doc",
+# Param names strongly associated with file/path operations
+_HIGH_FILE_PARAMS = {
+    "file", "filename", "path", "filepath", "dir", "directory",
+    "folder", "doc", "document",
 }
 
-# Safe traversal probes - well-known but harmless
-_TRAVERSAL_PROBES = [
-    "../etc/passwd",
-    "..\\..\\windows\\win.ini",
-    "....//....//etc/passwd",
-]
+# Medium signal - often used for page includes and downloads
+_MEDIUM_FILE_PARAMS = {
+    "page", "template", "view", "include", "load", "read",
+    "download", "export", "attachment", "resource",
+}
 
-_TRAVERSAL_EVIDENCE = [
-    "root:x:0:0",          # /etc/passwd
-    "[extensions]",         # win.ini
-    "[fonts]",             # win.ini
-    "for 16-bit app support",
-]
+# Lower signal - asset serving
+_LOW_FILE_PARAMS = {
+    "asset", "image", "img", "photo", "pdf", "report",
+}
 
-class PathTraversalTester(BaseTester):
+_ALL_FILE_PARAMS = _HIGH_FILE_PARAMS | _MEDIUM_FILE_PARAMS | _LOW_FILE_PARAMS
+
+# Path fragments that suggest file serving or download functionality
+_FILE_PATH_SIGNALS = {
+    "/download", "/export", "/file", "/document", "/attachment",
+    "/static", "/assets", "/media", "/upload",
+}
+
+_BURP_NOTES = (
+    "Test with ../../../etc/passwd. "
+    "Try URL encoding: %2e%2e%2f. "
+    "Test null byte: file.php%00.txt. "
+    "Use Burp Intruder with traversal wordlist."
+)
+
+
+def _path_confidence(name: str, ep_path: str) -> str:
+    name     = name.lower()
+    ep_lower = ep_path.lower()
+    is_file_path = any(sig in ep_lower for sig in _FILE_PATH_SIGNALS)
+
+    if name in _HIGH_FILE_PARAMS and is_file_path:
+        return ConfidenceLevel.HIGH
+    if name in _HIGH_FILE_PARAMS:
+        return ConfidenceLevel.MEDIUM
+    if name in _MEDIUM_FILE_PARAMS:
+        return ConfidenceLevel.MEDIUM
+    return ConfidenceLevel.LOW
+
+
+class PathTraversalMapper(BaseSurfaceMapper):
     category = AttackCategory.PATH_TRAVERSAL
 
-    def run(self, result: ScanResult) -> List[AttackTestResult]:
+    def map(self, result: ScanResult) -> List[SurfaceResult]:
         for ep in result.endpoints:
-            all_params = list(ep.query_params or []) + list(ep.path_params or [])
-            for qp in all_params:
-                pname = (qp.get("name") or "").lower()
-                if pname not in _FILE_PARAM_SIGNALS:
-                    continue
+            ep_path = ep.path or ep.url or ""
+            method  = (ep.method or "GET").upper()
+            is_file_path = any(sig in ep_path.lower() for sig in _FILE_PATH_SIGNALS)
 
-                allowed, reason = self._policy.check(
-                    ep.url, ep.method, pname, "PATH_TRAVERSAL", ep.auth_context or "",
+            # 1. Query params
+            for qp in (ep.query_params or []):
+                name = (qp.get("name") or "").lower()
+                if name not in _ALL_FILE_PARAMS:
+                    continue
+                confidence = _path_confidence(name, ep_path)
+                evidence   = [f"File/path-signal query param '{name}' on {ep.url}"]
+                if is_file_path:
+                    evidence.append(f"Endpoint path suggests file serving: {ep_path}")
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Path Traversal / LFI",
+                    parameters   = [f"query:{name}"],
+                    confidence   = confidence,
+                    evidence     = evidence,
+                    burp_notes   = _BURP_NOTES,
                 )
-                if not allowed:
-                    self._skip(reason, category=self.category, attack_class="Path Traversal",
-                               target_url=ep.url, parameter=pname)
+
+            # 2. Body fields
+            for bf in (ep.body_fields or []):
+                name = (bf.get("name") or "").lower()
+                if name not in _ALL_FILE_PARAMS:
                     continue
+                confidence = _path_confidence(name, ep_path)
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Path Traversal / LFI",
+                    parameters   = [f"body:{name}"],
+                    confidence   = confidence,
+                    evidence     = [f"File/path-signal body field '{name}' on {method} {ep.url}"],
+                    burp_notes   = _BURP_NOTES,
+                )
 
-                baseline = capture_baseline(self._fetcher, ep.url)
+            # 3. Path params that look file-related
+            for pp in (ep.path_params or []):
+                name = (pp.get("name") or "").lower()
+                if name not in _ALL_FILE_PARAMS:
+                    continue
+                confidence = _path_confidence(name, ep_path)
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Path Traversal / LFI",
+                    parameters   = [f"path_param:{name}"],
+                    confidence   = confidence,
+                    evidence     = [f"File/path-signal path parameter '{name}' on {ep.url}"],
+                    burp_notes   = _BURP_NOTES,
+                )
 
-                for probe in _TRAVERSAL_PROBES[:1]:  # test one probe per param
-                    sep = "&" if "?" in ep.url else "?"
-                    test_url = f"{ep.url}{sep}{pname}={probe}"
-
-                    allowed2, _ = self._policy.check(
-                        test_url, ep.method, pname, "PATH_TRAVERSAL_PROBE", ep.auth_context or "",
-                    )
-                    if not allowed2:
-                        continue
-
-                    obs = capture_observation(self._fetcher, test_url)
-                    if obs is None:
-                        continue
-
-                    evidence = []
-                    status   = TestStatus.CANDIDATE
-                    confidence = 0.2
-
-                    body = obs.body_excerpt or ""
-                    for indicator in _TRAVERSAL_EVIDENCE:
-                        if indicator in body:
-                            evidence.append(f"File content indicator found: '{indicator}'")
-                            status = TestStatus.CONFIRMED
-                            confidence = 0.95
-
-                    if not evidence:
-                        if obs.status_code == 200 and baseline and obs.content_length != baseline.content_length:
-                            evidence.append("Response size changed with traversal probe - inconclusive")
-                            status = TestStatus.INCONCLUSIVE
-                            confidence = 0.3
-                        else:
-                            continue
-
-                    r = AttackTestResult(
-                        category=self.category,
-                        attack_class="Path Traversal",
-                        target_url=ep.url,
-                        parameter=pname,
-                        method=ep.method,
-                        route=ep.path,
-                        payload=probe,
-                        baseline=baseline,
-                        observation=obs,
-                        status=status,
-                        confidence=confidence,
-                        evidence=evidence,
-                        why_tested=f"Parameter '{pname}' suggests file/path access",
-                        what_changed=f"Injected traversal sequence into '{pname}'",
-                        what_observed=f"HTTP {obs.status_code}, {obs.content_length} bytes",
-                        what_remains_unverified="Encoding variations not tested (URL-encoded dots, null bytes)",
-                        requests_made=2,
-                    )
-                    self._results.append(r)
+            # 4. Download/file endpoint with no params yet still interesting
+            if is_file_path and not any(
+                (qp.get("name") or "").lower() in _ALL_FILE_PARAMS
+                for qp in (ep.query_params or [])
+            ):
+                self._candidate(
+                    endpoint     = ep,
+                    surface_type = "Path Traversal / LFI",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.LOW,
+                    evidence     = [f"File-serving endpoint with no detected params: {ep_path}"],
+                    burp_notes   = _BURP_NOTES,
+                )
 
         return self._results
