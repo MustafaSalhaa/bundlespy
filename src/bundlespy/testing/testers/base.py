@@ -40,7 +40,10 @@ class BaseSurfaceMapper(ABC):
         s = SurfaceSummary(category=self.category)
         for r in self._results:
             s.total_candidates += 1
-            if r.status == SurfaceStatus.MAPPED:
+            # CANDIDATE = successfully identified surface (static analysis)
+            # MAPPED    = HTTP-confirmed surface (ConfigurationMapper only)
+            # Both count as "mapped" in the summary table
+            if r.status in (SurfaceStatus.MAPPED, SurfaceStatus.CANDIDATE):
                 s.mapped += 1
             elif r.status == SurfaceStatus.SKIPPED:
                 s.skipped += 1
