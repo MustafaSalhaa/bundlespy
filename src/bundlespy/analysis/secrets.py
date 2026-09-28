@@ -42,6 +42,7 @@ class SecretRule:
     remediation: str
     fp_notes: str
     min_length: int = 0
+    min_entropy: float = 0.0  # per-rule entropy floor; 0.0 = use global default
 
 
 def _shannon_entropy(value: str) -> float:
@@ -55,16 +56,16 @@ def _shannon_entropy(value: str) -> float:
     return -sum((f / length) * math.log2(f / length) for f in freq.values())
 
 
-def _is_likely_fp(value: str) -> Tuple[bool, str]:
+def _is_likely_fp(value: str, min_entropy: float = 2.0) -> Tuple[bool, str]:
     """Check if a matched value looks like a placeholder or example."""
     lower = value.lower()
     for indicator in FP_INDICATORS:
         if indicator in lower:
             return True, f"contains placeholder indicator '{indicator}'"
 
-    # Very low entropy (all same chars, sequential, etc.)
+    # Entropy check: caller can pass a higher threshold for generic rules
     entropy = _shannon_entropy(value)
-    if len(value) > 8 and entropy < 2.0:
+    if len(value) > 8 and entropy < min_entropy:
         return True, f"low entropy ({entropy:.2f}) suggests non-random value"
 
     # Repeated character sequences
@@ -220,6 +221,7 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
                 remediation = raw["remediation"],
                 fp_notes    = raw.get("fp_notes", ""),
                 min_length  = int(raw.get("min_length", 0)),
+                min_entropy = float(raw.get("min_entropy", 0.0)),
             ))
         except re.error as e:
             logger.warning("Invalid regex in rule %s: %s", raw.get("id"), e)
@@ -290,8 +292,9 @@ class SecretScanner:
                 if rule.min_length and len(raw_value) < rule.min_length:
                     continue
 
-                # Check for false positives
-                is_fp, fp_reason = _is_likely_fp(raw_value)
+                # Check for false positives - use per-rule entropy floor when set
+                _entropy_floor = rule.min_entropy if rule.min_entropy > 0.0 else 2.0
+                is_fp, fp_reason = _is_likely_fp(raw_value, min_entropy=_entropy_floor)
 
                 confidence = rule.confidence
                 status     = "candidate"
