@@ -407,30 +407,37 @@ def build_coverage_ledger(findings: list, endpoints: list) -> CoverageLedger:
         fs.total += 1
         prov = _prov(f, Provenance.from_finding)
 
-        if prov.source == "static":         fs.from_static    += 1
-        elif prov.source == "runtime":      fs.from_runtime   += 1
-        elif prov.source == "passive":      fs.from_passive   += 1
-        elif prov.source == "correlated":   fs.from_correlated += 1
-        else:                               fs.from_static    += 1  # default
+        es = prov.evidence_source
+        if es == "static":          fs.from_static    += 1
+        elif es == "runtime":       fs.from_runtime   += 1
+        elif es == "passive":       fs.from_passive   += 1
+        else:                       fs.from_static    += 1  # default (supplied → static bucket)
+
+        # correlated: endpoint.source_type == "correlated" maps to static in normalize,
+        # so count it separately via the raw source_type field if present
+        raw_src = getattr(f, "source_type", "")
+        if raw_src == "correlated":
+            fs.from_correlated += 1
 
         vs = prov.validation_status
-        if vs == "CONFIRMED":       fs.confirmed      += 1
-        elif vs == "UNREACHABLE":   fs.unreachable    += 1
-        elif vs == "ERROR":         fs.validation_err += 1
-        else:                       fs.not_validated  += 1
+        if vs == "confirmed":         fs.confirmed      += 1
+        elif vs == "unreachable":     fs.unreachable    += 1
+        elif vs == "invalidated":     fs.unreachable    += 1
+        elif vs in ("skipped",):      fs.not_validated  += 1
+        else:                         fs.not_validated  += 1  # not_attempted / probed
 
         al = prov.access_level
-        if al == "AUTHENTICATED":   fs.auth_required  += 1
-        elif al == "PUBLIC":        fs.public         += 1
+        if al == "authenticated":   fs.auth_required  += 1
+        elif al == "public":        fs.public         += 1
         else:                       fs.unknown_access += 1
 
         # High/critical probe tracking
         sev = getattr(f, "severity", "")
         if sev in ("CRITICAL", "HIGH"):
             ledger.high_critical_total += 1
-            if vs != "NOT_VALIDATED":
+            if vs not in ("not_attempted", "skipped"):
                 ledger.high_critical_probed += 1
-            if vs == "CONFIRMED":
+            if vs == "confirmed":
                 ledger.high_critical_confirmed += 1
 
     # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -438,21 +445,25 @@ def build_coverage_ledger(findings: list, endpoints: list) -> CoverageLedger:
         eps.total += 1
         prov = _prov(ep, Provenance.from_endpoint)
 
-        if prov.source == "static":         eps.from_static    += 1
-        elif prov.source == "runtime":      eps.from_runtime   += 1
-        elif prov.source == "passive":      eps.from_passive   += 1
-        elif prov.source == "correlated":   eps.from_correlated += 1
-        else:                               eps.from_static    += 1
+        es = prov.evidence_source
+        if es == "static":          eps.from_static    += 1
+        elif es == "runtime":       eps.from_runtime   += 1
+        elif es == "passive":       eps.from_passive   += 1
+        else:                       eps.from_static    += 1
+
+        raw_src = getattr(ep, "source_type", "")
+        if raw_src == "correlated":
+            eps.from_correlated += 1
 
         vs = prov.validation_status
-        if vs == "CONFIRMED":       eps.confirmed      += 1
-        elif vs == "UNREACHABLE":   eps.unreachable    += 1
-        elif vs == "ERROR":         eps.validation_err += 1
-        else:                       eps.not_validated  += 1
+        if vs == "confirmed":         eps.confirmed      += 1
+        elif vs == "unreachable":     eps.unreachable    += 1
+        elif vs == "invalidated":     eps.unreachable    += 1
+        else:                         eps.not_validated  += 1
 
         al = prov.access_level
-        if al == "AUTHENTICATED":   eps.auth_required  += 1
-        elif al == "PUBLIC":        eps.public         += 1
+        if al == "authenticated":   eps.auth_required  += 1
+        elif al == "public":        eps.public         += 1
         else:                       eps.unknown_access += 1
 
         # Stage 6: Route state breakdown from endpoint.route_state
