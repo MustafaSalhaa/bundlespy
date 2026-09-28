@@ -497,7 +497,7 @@ class TestSummaryIntegrity:
             matched_value="testvalue", redacted_value="test****",
             sha256=hashlib.sha256(severity.encode()).hexdigest(),
             context="", description="", impact="", remediation="",
-            false_positive_notes="", status="likely_secret",
+            false_positive_notes="", confidence_label="likely_secret",
             occurrences=["test.js:1"],
         )
 
