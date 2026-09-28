@@ -1591,7 +1591,14 @@ def run_demo() -> int:
 
 def main() -> None:
     parser = build_parser()
-    args   = parser.parse_args()
+
+    # If the first arg looks like a URL or flag, inject "scan" so
+    # `bundlespy https://target.com` works without typing "scan"
+    argv = sys.argv[1:]
+    if argv and argv[0] not in ("scan", "local", "demo", "-h", "--help"):
+        argv = ["scan"] + argv
+
+    args = parser.parse_args(argv)
 
     if args.command == "scan":
         sys.exit(run_scan(args))
