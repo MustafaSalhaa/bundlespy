@@ -600,8 +600,8 @@ def _attack_mapper_html(attack_report) -> str:
 
     # Category display order
     CAT_ORDER = [
-        "Access Control", "Injection", "XSS", "SSRF",
-        "Open Redirect", "CSRF", "Path Traversal", "Configuration",
+        "Access Control", "Injection", "CORS", "Prototype Pollution",
+        "XSS", "SSRF", "Open Redirect", "CSRF", "Path Traversal", "Configuration",
     ]
     cats_sorted = sorted(by_cat.keys(), key=lambda c: CAT_ORDER.index(c) if c in CAT_ORDER else 99)
 
