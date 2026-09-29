@@ -48,14 +48,26 @@ _JS_SSRF_PATTERNS = [
     "request(", "got(",
 ]
 
-# JS source patterns that indicate the URL comes from user input
-_JS_URL_SOURCE_PATTERNS = [
-    "location.search", "URLSearchParams", "searchParams.get(",
-    "getParameter(", "location.hash", "document.referrer",
+# JS source patterns that indicate the URL comes from user input.
+# Split into server-side vs client-side sources so we can differentiate:
+# - Server-side: req.query, req.body, req.params → real SSRF risk
+# - Client-side: URLSearchParams, location.* → browser makes the request,
+#   not the server, so it's not SSRF (it's an open redirect risk at most)
+_JS_URL_SOURCE_PATTERNS_SERVER = [
     "req.query", "req.body", "req.params",
     "params.url", "params.uri", "body.url", "body.uri",
     "query.url", "query.uri",
+    "request.query", "request.body",
+    "ctx.query", "ctx.request",    # Koa.js
+    "event.queryStringParameters", # Lambda
 ]
+
+_JS_URL_SOURCE_PATTERNS_CLIENT = [
+    "location.search", "URLSearchParams", "searchParams.get(",
+    "getParameter(", "location.hash", "document.referrer",
+]
+
+_JS_URL_SOURCE_PATTERNS = _JS_URL_SOURCE_PATTERNS_SERVER + _JS_URL_SOURCE_PATTERNS_CLIENT
 
 _BURP_NOTES = (
     "Test with Burp Collaborator URL as value. "
@@ -103,49 +115,82 @@ class SsrfMapper(BaseSurfaceMapper):
     category = AttackCategory.SSRF
 
     def map(self, result: ScanResult) -> List[SurfaceResult]:
-        # JS SSRF pattern scan - look for fetch/XHR with URL source patterns
+        # JS SSRF pattern scan - look for fetch/XHR with URL source patterns.
+        # Only flag MEDIUM when server-side sources are present (req.query, req.body, etc).
+        # Client-side sources (URLSearchParams, location.*) mean the browser makes the
+        # request, not the server - that's not SSRF, so we flag it LOW with a note.
         for js in result.js_files:
             if not js.content:
                 continue
             content = js.content
 
-            has_fetch  = any(p in content for p in _JS_SSRF_PATTERNS)
-            has_source = any(p in content for p in _JS_URL_SOURCE_PATTERNS)
+            has_fetch         = any(p in content for p in _JS_SSRF_PATTERNS)
+            has_server_source = any(p in content for p in _JS_URL_SOURCE_PATTERNS_SERVER)
+            has_client_source = any(p in content for p in _JS_URL_SOURCE_PATTERNS_CLIENT)
+            has_source        = has_server_source or has_client_source
 
-            if has_fetch and has_source:
-                fetch_hits  = [p for p in _JS_SSRF_PATTERNS if p in content]
-                source_hits = [p for p in _JS_URL_SOURCE_PATTERNS if p in content]
+            if not (has_fetch and has_source):
+                continue
 
-                from ...storage.models import Endpoint as _Endpoint
-                js_url = js.url or getattr(js, "source_page", "") or ""
-                if js_url:
-                    synthetic_ep = _Endpoint(
-                        url=js_url,
-                        path=js_url,
-                        method="GET",
-                        category="",
-                        source_file=js.url or "",
-                        line_number=0,
-                        confidence=0.5,
-                        query_params=[],
-                        path_params=[],
-                        body_fields=[],
-                        request_headers={},
-                        auth_context="",
-                        source_type="static",
-                    )
-                    self._candidate(
-                        endpoint     = synthetic_ep,
-                        surface_type = "SSRF via JS Fetch",
-                        parameters   = [],
-                        confidence   = ConfidenceLevel.MEDIUM,
-                        evidence     = [
-                            f"HTTP client calls in JS: {', '.join(fetch_hits[:3])}",
-                            f"User-controlled URL sources: {', '.join(source_hits[:3])}",
-                            "Verify if request is server-side or client-side",
-                        ],
-                        burp_notes   = _BURP_NOTES_JS,
-                    )
+            fetch_hits  = [p for p in _JS_SSRF_PATTERNS if p in content]
+            source_hits = (
+                [p for p in _JS_URL_SOURCE_PATTERNS_SERVER if p in content] +
+                [p for p in _JS_URL_SOURCE_PATTERNS_CLIENT if p in content]
+            )
+
+            from ...storage.models import Endpoint as _Endpoint
+            js_url = js.url or getattr(js, "source_page", "") or ""
+            if not js_url:
+                continue
+
+            synthetic_ep = _Endpoint(
+                url=js_url,
+                path=js_url,
+                method="GET",
+                category="",
+                source_file=js.url or "",
+                line_number=0,
+                confidence=0.5,
+                query_params=[],
+                path_params=[],
+                body_fields=[],
+                request_headers={},
+                auth_context="",
+                source_type="static",
+            )
+
+            if has_server_source:
+                # Server-side URL source confirmed - this is a real SSRF candidate
+                server_hits = [p for p in _JS_URL_SOURCE_PATTERNS_SERVER if p in content]
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "SSRF via JS Fetch",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.MEDIUM,
+                    evidence     = [
+                        f"HTTP client calls in JS: {', '.join(fetch_hits[:3])}",
+                        f"Server-side URL sources: {', '.join(server_hits[:3])}",
+                        "Server-side URL source feeds into HTTP client - real SSRF candidate",
+                    ],
+                    burp_notes   = _BURP_NOTES_JS,
+                )
+            else:
+                # Only client-side sources - browser makes the request, not the server.
+                # Flag at LOW as open redirect / client-side request forgery risk instead.
+                client_hits = [p for p in _JS_URL_SOURCE_PATTERNS_CLIENT if p in content]
+                self._candidate(
+                    endpoint     = synthetic_ep,
+                    surface_type = "SSRF via JS Fetch",
+                    parameters   = [],
+                    confidence   = ConfidenceLevel.LOW,
+                    evidence     = [
+                        f"HTTP client calls in JS: {', '.join(fetch_hits[:3])}",
+                        f"Client-side URL sources only: {', '.join(client_hits[:3])}",
+                        "Request likely originates client-side (browser), not server-side - "
+                        "SSRF is unlikely; check for open redirect or client-side request forgery",
+                    ],
+                    burp_notes   = _BURP_NOTES_JS,
+                )
 
         for ep in result.endpoints:
             method = (ep.method or "GET").upper()
