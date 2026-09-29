@@ -44,7 +44,7 @@ def _findings_html(findings, extras):
         key=lambda f: severity_order.index(f.severity) if f.severity in severity_order else 99,
     )
     if not real:
-        return '<div class="empty-state"><span class="empty-icon">✓</span><p>No findings above confidence threshold</p></div>'
+        return '<div class="empty-state"><span class="empty-icon">✓</span><p>No secrets detected above confidence threshold</p></div>'
 
     rows = []
     for f in real:
@@ -1159,7 +1159,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Intelligence</div>
-      <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon">⚑</span>Findings<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
+      <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon">⚑</span>Secret Intelligence<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
       <button class="nav-item" onclick="show('endpoints',this)"><span class="nav-icon">⇄</span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
       {_nav_mapper}
       {_nav_state}
@@ -1219,7 +1219,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
             <tr><td class="meta-key">Scan started</td><td class="meta-val">{scan_start}</td></tr>
             <tr><td class="meta-key">Scan duration</td><td class="meta-val">{dur}</td></tr>
             <tr><td class="meta-key">Report generated</td><td class="meta-val">{gen_time}</td></tr>
-            <tr><td class="meta-key">Findings</td><td class="meta-val">{len(real)} confirmed · {len(fps)} excluded (likely false positive)</td></tr>
+            <tr><td class="meta-key">Secrets detected</td><td class="meta-val">{len(real)} detected · {len(fps)} suppressed (likely false positive)</td></tr>
             <tr><td class="meta-key">Endpoints</td><td class="meta-val">{len(result.endpoints)}</td></tr>
             <tr><td class="meta-key">JS assets</td><td class="meta-val">{len(result.js_files)}</td></tr>
             <tr><td class="meta-key">Vuln libraries</td><td class="meta-val">{len(lib_findings)} CVE(s) found</td></tr>
@@ -1266,9 +1266,9 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       </div>
     </div>
 
-    <!-- FINDINGS -->
+    <!-- SECRET INTELLIGENCE -->
     <div id="section-findings" class="section">
-      <div class="section-title">Findings <span class="count">{len(real)} confirmed · {len(fps)} excluded</span></div>
+      <div class="section-title">Secret Intelligence <span class="count">{len(real)} detected · {len(fps)} suppressed</span></div>
       <div class="findings-filter">
         <button class="filter-btn active" data-sev="ALL" onclick="filterF('ALL',this)">All ({len(real)})</button>
         {_btn_crit}{_btn_high}{_btn_med}{_btn_low}{_btn_info}
@@ -1530,4 +1530,3 @@ function gReset()   {{ if(gSvg&&gZoom) gSvg.transition().call(gZoom.transform,d3
 document.getElementById('graph-svg').addEventListener('click',()=>document.getElementById('detail-panel').classList.remove('open'));
 </script>
 </body>
-</html>"""
