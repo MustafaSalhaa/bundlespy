@@ -33,16 +33,39 @@ _COMMAND_INJECTION_PARAMS = {
     "eval", "code", "input",
 }
 
-# SSTI signals - template rendering with user input
-_SSTI_PARAMS = {
-    "template", "render", "view", "format", "layout",
-    "theme", "style", "page", "content", "text",
+# SSTI signals - template rendering with user input.
+# Split into two tiers:
+#   HIGH_SSTI: param names that are unambiguously about template rendering.
+#              These fire regardless of path context.
+#   CONTEXT_SSTI: generic param names that are only suspicious when the path
+#                 also suggests template/render semantics. Without path context
+#                 they generate too many false positives on ordinary content endpoints.
+_HIGH_SSTI_PARAMS = {
+    "template", "render", "layout", "theme",
+}
+
+_CONTEXT_SSTI_PARAMS = {
+    "view", "format", "style", "page", "content", "text",
+}
+
+_SSTI_PARAMS = _HIGH_SSTI_PARAMS | _CONTEXT_SSTI_PARAMS
+
+# Path signals that confirm a template/render context for CONTEXT_SSTI params.
+# When a param is in _CONTEXT_SSTI_PARAMS but the path doesn't match any of
+# these, the finding is suppressed to avoid flooding on benign content APIs.
+_SSTI_PATH_CORROBORATION = {
+    "/render", "/preview", "/template", "/theme",
+    "/pdf", "/convert", "/export", "/report",
+    "/email", "/notification", "/layout",
+    "/generate", "/compile",
 }
 
 _ALL_INJECTION_PARAMS = (
     _HIGH_SIGNAL_PARAMS | _MEDIUM_SIGNAL_PARAMS |
     _TENANT_PARAMS | _COMMAND_INJECTION_PARAMS | _SSTI_PARAMS
 )
+# Combined set for broad param matching; context filtering happens at flag time
+_ALL_SSTI_PARAMS = _HIGH_SSTI_PARAMS | _CONTEXT_SSTI_PARAMS
 
 _GRAPHQL_PATH_SIGNALS = {"/graphql", "/graphiql", "/playground", "/gql"}
 
@@ -130,6 +153,21 @@ _BURP_NOTES_LDAP = (
 )
 
 
+def _should_flag_ssti(name: str, path: str) -> bool:
+    """
+    Gate for SSTI param detection.
+    High-signal SSTI params fire unconditionally (template, render, layout, theme).
+    Context SSTI params (view, format, style, page, content, text) only fire when
+    the path also signals a render/template context - otherwise they generate false
+    positives on ordinary REST content fields.
+    """
+    if name in _HIGH_SSTI_PARAMS:
+        return True
+    if name in _CONTEXT_SSTI_PARAMS:
+        return any(sig in path for sig in _SSTI_PATH_CORROBORATION)
+    return False
+
+
 def _injection_type(name: str) -> str:
     if name in _COMMAND_INJECTION_PARAMS:
         return "Command Injection"
@@ -150,7 +188,7 @@ def _injection_burp(name: str, path: str) -> str:
     return _BURP_NOTES_SQLI
 
 
-def _injection_confidence(name: str, method: str) -> str:
+def _injection_confidence(name: str, method: str, path: str = "") -> str:
     if name in _COMMAND_INJECTION_PARAMS:
         return ConfidenceLevel.HIGH  # Command injection params are almost always injectable
     if name in _TENANT_PARAMS:
@@ -159,7 +197,14 @@ def _injection_confidence(name: str, method: str) -> str:
         return ConfidenceLevel.HIGH
     if name in _HIGH_SIGNAL_PARAMS:
         return ConfidenceLevel.HIGH
-    if name in _SSTI_PARAMS:
+    if name in _HIGH_SSTI_PARAMS:
+        # High-signal SSTI params (template, render, layout, theme) fire at MEDIUM;
+        # path corroboration bumps to HIGH
+        if path and any(sig in path for sig in _SSTI_PATH_CORROBORATION):
+            return ConfidenceLevel.HIGH
+        return ConfidenceLevel.MEDIUM
+    if name in _CONTEXT_SSTI_PARAMS:
+        # Context SSTI only fires when path corroborates - always MEDIUM at that point
         return ConfidenceLevel.MEDIUM
     return ConfidenceLevel.MEDIUM
 
@@ -213,18 +258,27 @@ class InjectionMapper(BaseSurfaceMapper):
                 if name not in _ALL_INJECTION_PARAMS:
                     continue
 
+                # SSTI context gate: broad SSTI params require path corroboration
+                if name in _SSTI_PARAMS and not _should_flag_ssti(name, path):
+                    continue
+
                 surface_type = _injection_type(name)
-                confidence   = _injection_confidence(name, method)
+                confidence   = _injection_confidence(name, method, path)
                 burp_notes   = _injection_burp(name, path)
+
+                evidence = [f"Injection-relevant query param '{name}' on {method} {ep.url}"]
+                if name in _CONTEXT_SSTI_PARAMS:
+                    evidence.append(
+                        f"Path '{path}' corroborates template/render context - "
+                        "param likely feeds a server-side template engine"
+                    )
 
                 self._candidate(
                     endpoint     = ep,
                     surface_type = surface_type,
                     parameters   = [f"query:{name}"],
                     confidence   = confidence,
-                    evidence     = [
-                        f"Injection-relevant query param '{name}' on {method} {ep.url}",
-                    ],
+                    evidence     = evidence,
                     burp_notes   = burp_notes,
                 )
 
@@ -235,18 +289,27 @@ class InjectionMapper(BaseSurfaceMapper):
                     if name not in _ALL_INJECTION_PARAMS:
                         continue
 
+                    # SSTI context gate: broad SSTI params require path corroboration
+                    if name in _SSTI_PARAMS and not _should_flag_ssti(name, path):
+                        continue
+
                     surface_type = _injection_type(name)
-                    confidence   = _injection_confidence(name, method)
+                    confidence   = _injection_confidence(name, method, path)
                     burp_notes   = _injection_burp(name, path)
+
+                    body_evidence = [f"Injection-relevant body field '{name}' on {method} {ep.url}"]
+                    if name in _CONTEXT_SSTI_PARAMS:
+                        body_evidence.append(
+                            f"Path '{path}' corroborates template/render context - "
+                            "field likely feeds a server-side template engine"
+                        )
 
                     self._candidate(
                         endpoint     = ep,
                         surface_type = surface_type,
                         parameters   = [f"body:{name}"],
                         confidence   = confidence,
-                        evidence     = [
-                            f"Injection-relevant body field '{name}' on {method} {ep.url}",
-                        ],
+                        evidence     = body_evidence,
                         burp_notes   = burp_notes,
                     )
 
