@@ -559,6 +559,24 @@ class XssMapper(BaseSurfaceMapper):
                     elif confidence == ConfidenceLevel.MEDIUM:
                         confidence = ConfidenceLevel.HIGH
 
+                # Auth-gated reflection is higher impact:
+                # - An attacker needs a valid session, reducing noise, but
+                #   exploitation typically leads to account takeover / stored XSS
+                #   pivot rather than just session theft. Flag it clearly.
+                auth_ctx = ep.auth_context or ""
+                is_authed = auth_ctx and auth_ctx.lower() not in ("", "none")
+                if is_authed:
+                    evidence.append(
+                        f"Auth-gated endpoint ({auth_ctx}) - reflected XSS here enables "
+                        "session-context XSS: steal session cookies, CSRF token theft, "
+                        "or account takeover via DOM manipulation"
+                    )
+                    # Bump confidence one level for auth-gated surfaces
+                    if confidence == ConfidenceLevel.LOW:
+                        confidence = ConfidenceLevel.MEDIUM
+                    elif confidence == ConfidenceLevel.MEDIUM:
+                        confidence = ConfidenceLevel.HIGH
+
                 self._candidate(
                     endpoint     = ep,
                     surface_type = "Reflected XSS",
@@ -566,6 +584,7 @@ class XssMapper(BaseSurfaceMapper):
                     confidence   = confidence,
                     evidence     = evidence,
                     burp_notes   = burp_notes,
+                    auth_context = auth_ctx,
                 )
 
             # ── 2. STORED XSS - POST/PUT/PATCH body fields ───────────────────
@@ -589,8 +608,15 @@ class XssMapper(BaseSurfaceMapper):
                     ]
 
                     auth_ctx = ep.auth_context or ""
-                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
-                        evidence.append(f"Auth-gated submission increases stored XSS impact")
+                    is_stored_authed = auth_ctx and auth_ctx.lower() not in ("", "none")
+                    if is_stored_authed:
+                        evidence.append(
+                            f"Auth-gated submission ({auth_ctx}) - stored XSS here targets "
+                            "everyone who views this content, including admins"
+                        )
+                        # Stored XSS on auth-gated input = HIGH regardless of field tier,
+                        # because it persists and can hit other authenticated users
+                        confidence = ConfidenceLevel.HIGH
 
                     self._candidate(
                         endpoint     = ep,
@@ -599,6 +625,7 @@ class XssMapper(BaseSurfaceMapper):
                         confidence   = confidence,
                         evidence     = evidence,
                         burp_notes   = _BURP_NOTES_STORED,
+                        auth_context = auth_ctx,
                     )
 
         # ── 3. DOM XSS - per JS file sink/source analysis ────────────────────
