@@ -20,14 +20,22 @@ from ..storage.models import Finding
 
 logger = logging.getLogger("bundlespy.analysis.secrets")
 
-# Strings that almost always indicate a placeholder or example value
+# Word/phrase indicators: any of these appearing ANYWHERE in the matched value
+# almost certainly means it is a placeholder.  Real secrets never contain
+# human-readable words like "example" or "changeme".
 FP_INDICATORS = [
     "example", "placeholder", "your-key", "your_key", "insert_key",
-    "api_key_here", "xxxx", "1234567890", "abcdefgh", "changeme",
-    "replace_me", "todo", "fixme", "dummy", "fake", "test_key",
-    "sample", "demo", "enter_your", "<your", "your-api", "xxxxxxxx",
-    "aaaaaaaaa", "0000000000", "your_secret",
+    "api_key_here", "changeme", "replace_me", "todo", "fixme", "dummy",
+    "fake", "test_key", "sample", "demo", "enter_your", "<your",
+    "your-api", "your_secret",
 ]
+
+# Sequential / repetitive patterns that should be caught by entropy checks.
+# These are NOT used for substring matching against real keys — a Stripe key
+# like sk_live_...1234567890 should not be suppressed just because those
+# digits happen to appear somewhere in the key.
+# (Kept here as documentation; the entropy + unique-char checks in
+# _is_likely_fp() already reject values that ARE these patterns.)
 
 
 @dataclass
