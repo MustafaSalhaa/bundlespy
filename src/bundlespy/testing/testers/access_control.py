@@ -60,7 +60,16 @@ _BURP_NOTES = (
     "Test adjacent IDs (id-1, id+1, id+100). "
     "Try unauthenticated. "
     "Try other user session with same ID. "
-    "Check if response content differs between sessions."
+    "Check if response content differs between sessions. "
+    "For DELETE: use another user's resource ID and confirm deletion succeeds."
+)
+
+_BURP_NOTES_GET_IDOR = (
+    "GET endpoint with ID param - classic IDOR. "
+    "Capture a resource ID from User A's session, then request it with User B's session. "
+    "If User B gets User A's data, it's IDOR. "
+    "Also test unauthenticated and with an incremented/decremented ID. "
+    "Use Burp Intruder to enumerate IDs at scale."
 )
 
 _BURP_NOTES_HEADER = (
@@ -197,10 +206,26 @@ class AccessControlMapper(BaseSurfaceMapper):
                 name = (pp.get("name") or "").lower()
                 if name in _IDOR_PARAM_NAMES:
                     params_found.append(f"path_param:{name}")
-                    evidence.append(
-                        f"Path parameter '{name}' matches object ID naming - "
+                    path_param_evidence = (
+                        f"Path parameter '{name}' matches object ID naming on {method} {ep.url} - "
                         "Type: Horizontal privilege escalation (accessing another user's resource)"
                     )
+                    if method == "GET":
+                        path_param_evidence += (
+                            " | GET + path ID = classic BOLA: "
+                            "swap the ID for another user's resource and check if data leaks"
+                        )
+                    elif method == "DELETE":
+                        path_param_evidence += (
+                            " | DELETE + path ID = resource deletion IDOR: "
+                            "use another user's resource ID and confirm deletion is accepted"
+                        )
+                    elif method in ("PUT", "PATCH"):
+                        path_param_evidence += (
+                            " | PUT/PATCH + path ID = write IDOR: "
+                            "modify another user's resource by substituting their ID"
+                        )
+                    evidence.append(path_param_evidence)
                     if ep.auth_context and ep.auth_context.lower() not in ("", "none"):
                         confidence = ConfidenceLevel.HIGH
 
@@ -280,6 +305,11 @@ class AccessControlMapper(BaseSurfaceMapper):
                     # Determine burp notes based on what we found
                     if "path:hash_id" in params_found and len(params_found) == 1:
                         burp = _BURP_NOTES_HASH
+                    elif method == "GET" and any(
+                        p.startswith("path_param:") or p == "path:numeric_id" or p == "path:uuid"
+                        for p in params_found
+                    ):
+                        burp = _BURP_NOTES_GET_IDOR
                     else:
                         burp = _BURP_NOTES
 
