@@ -181,6 +181,8 @@ class InjectionMapper(BaseSurfaceMapper):
             path   = (ep.path or ep.url or "").lower()
 
             # GraphQL endpoints - flag for introspection and injection
+            # NOTE: do NOT continue here - GraphQL endpoints can also have XXE/LDAP
+            # backends and should fall through to all subsequent checks.
             if ep.category == "GRAPHQL" or any(sig in path for sig in _GRAPHQL_PATH_SIGNALS):
                 self._candidate(
                     endpoint     = ep,
@@ -190,7 +192,6 @@ class InjectionMapper(BaseSurfaceMapper):
                     evidence     = [f"GraphQL endpoint: {ep.url}"],
                     burp_notes   = _BURP_NOTES_GRAPHQL,
                 )
-                continue
 
             # Path-based command injection signal (e.g. /api/ping, /exec)
             if any(sig in path for sig in _COMMAND_PATH_SIGNALS):
