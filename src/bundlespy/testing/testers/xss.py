@@ -29,6 +29,9 @@ _STRONG_SINKS = [
     "v-html",                    # Vue
     "[innerHTML]",               # Angular template binding
     "__html",                    # React shorthand for dangerouslySetInnerHTML
+    "{@html ",                   # Svelte raw HTML rendering (note: space after to avoid false matches)
+    "x-html=",                   # Alpine.js raw HTML directive
+    ":innerHTML",                # Alpine.js property binding shorthand for innerHTML
 ]
 
 # Navigation sinks - can be exploited with javascript: URIs
@@ -81,6 +84,17 @@ _DOM_SOURCES = [
     "snapshot.params",
     "snapshot.fragment",
     "activatedRoute.snapshot",
+    # Alpine.js sources - user-influenced data flowing through Alpine stores/router
+    "$store.",
+    "Alpine.store(",
+    "$router.query",
+    "$el.innerHTML",
+    # SvelteKit sources - $page store is the primary URL data source
+    "$page.url.searchParams",
+    "$page.params",
+    "$page.url.hash",
+    "page.url.searchParams",
+    "page.params.",
 ]
 
 # ─── REFLECTED XSS PARAMS ────────────────────────────────────────────────────
@@ -363,6 +377,23 @@ _BURP_NOTES_POSTMESSAGE = (
     "Check what the handler does with event.data before claiming exploitable."
 )
 
+_BURP_NOTES_SVELTE = (
+    "Svelte {@html} directive detected - Svelte's explicit XSS escape hatch. "
+    "Svelte does NOT sanitize values passed to {@html}; it renders them as raw HTML. "
+    "Trace what variable/expression is passed to {@html}. "
+    "If any part is user-controlled (URL param, API response, store value), it's XSS. "
+    "Payload: {@html '<img src=x onerror=alert(document.domain)>'}. "
+    "Search compiled bundle for '{@html' and review every usage - consider DOMPurify wrapping."
+)
+
+_BURP_NOTES_ALPINE = (
+    "Alpine.js x-html directive detected - Alpine's equivalent of innerHTML, bypasses Alpine's XSS protections. "
+    "x-html renders the bound expression as raw HTML with no sanitization. "
+    "Trace the expression back to its source: $store, URL params ($router.query), fetch() responses. "
+    "If user-controlled: inject <img src=x onerror=alert(document.domain)> as the value. "
+    "Also check :innerHTML bindings (Alpine property shorthand) for the same pattern."
+)
+
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -379,6 +410,8 @@ def _is_framework_sink(content: str) -> Dict[str, bool]:
     return {
         "react":   "dangerouslySetInnerHTML" in content or "__html" in content,
         "vue":     "v-html" in content,
+        "svelte":  "{@html " in content,
+        "alpine":  "x-html=" in content or ":innerHTML" in content,
         "jquery":  any(s in content for s in [".html(", ".append(", ".prepend(", ".after(", ".before("]),
         "angular": any(k in content for k in _ANGULAR_BYPASS_SINKS),
     }
@@ -388,6 +421,10 @@ def _sink_burp_notes(sinks: List[str], frameworks: Dict[str, bool]) -> str:
         return _BURP_NOTES_REACT
     if frameworks.get("vue"):
         return _BURP_NOTES_VUE
+    if frameworks.get("svelte"):
+        return _BURP_NOTES_SVELTE
+    if frameworks.get("alpine"):
+        return _BURP_NOTES_ALPINE
     if frameworks.get("angular"):
         return _BURP_NOTES_ANGULAR_BYPASS_HTML
     if frameworks.get("jquery"):
