@@ -166,7 +166,7 @@ def _injection_confidence(name: str, method: str) -> str:
 
 def _has_xml_content_type(ep: Endpoint) -> bool:
     """Check if the endpoint declares an XML-based content-type header."""
-    headers = ep.headers or {}
+    headers = ep.request_headers or {}
     ct = headers.get("content-type") or headers.get("Content-Type") or ""
     ct = ct.lower()
     return any(xml_ct in ct for xml_ct in _XXE_CONTENT_TYPES)
