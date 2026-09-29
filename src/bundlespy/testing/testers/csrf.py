@@ -13,10 +13,13 @@ _CSRF_HEADER_SIGNALS = {
     "x-csrftoken",
 }
 
-# Body field names that indicate CSRF token presence
+# Body field names that indicate CSRF token presence.
+# "token" is intentionally excluded - it's too generic and suppresses valid
+# CSRF findings on endpoints with unrelated token fields (auth tokens, API keys,
+# payment tokens, etc.). Only match names that are clearly CSRF-specific.
 _CSRF_BODY_SIGNALS = {
     "csrf", "_token", "authenticity_token", "csrfmiddlewaretoken",
-    "xsrf_token", "csrf_token", "_csrf", "token",
+    "xsrf_token", "csrf_token", "_csrf",
 }
 
 # JS patterns that indicate CSRF token management
