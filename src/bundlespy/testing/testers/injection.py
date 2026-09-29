@@ -252,6 +252,81 @@ class InjectionMapper(BaseSurfaceMapper):
                     burp_notes   = _BURP_NOTES_CMDI,
                 )
 
+            # Path params - /api/users/{id}, /api/posts/{slug}
+            # These are passed directly into DB queries, file reads, or shell commands
+            # in many frameworks without the same level of validation as body/query params.
+            # Every path param that matches an injection-relevant name is worth flagging.
+            for pp in (ep.path_params or []):
+                name = (pp.get("name") or "").lower()
+                if not name:
+                    continue
+
+                if name in _COMMAND_INJECTION_PARAMS:
+                    # Command injection via path param is very high signal
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "Command Injection",
+                        parameters   = [f"path_param:{name}"],
+                        confidence   = ConfidenceLevel.HIGH,
+                        evidence     = [
+                            f"Command injection-relevant path param '{name}' on {method} {ep.url}",
+                            "Path params feed directly into route handlers - "
+                            "often less sanitized than body/query params",
+                        ],
+                        burp_notes   = _BURP_NOTES_CMDI,
+                    )
+                elif name in _TENANT_PARAMS:
+                    # Multi-tenant path param: both SQLi AND IDOR risk
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SQL/NoSQL Injection + Tenant IDOR",
+                        parameters   = [f"path_param:{name}"],
+                        confidence   = ConfidenceLevel.HIGH,
+                        evidence     = [
+                            f"Multi-tenant path param '{name}' on {method} {ep.url}",
+                            "Tenant/org ID in path segment often goes into WHERE clause - "
+                            "test SQLi and cross-tenant access simultaneously",
+                        ],
+                        burp_notes   = _BURP_NOTES_TENANT,
+                    )
+                elif name in _HIGH_SIGNAL_PARAMS:
+                    # Core ID/name params in path - high SQLi signal
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SQL/NoSQL Injection",
+                        parameters   = [f"path_param:{name}"],
+                        confidence   = ConfidenceLevel.HIGH,
+                        evidence     = [
+                            f"High-signal injection path param '{name}' on {method} {ep.url}",
+                            "Path params like id/user/email commonly interpolated into DB queries",
+                        ],
+                        burp_notes   = _BURP_NOTES_SQLI,
+                    )
+                elif name in _MEDIUM_SIGNAL_PARAMS:
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SQL/NoSQL Injection",
+                        parameters   = [f"path_param:{name}"],
+                        confidence   = ConfidenceLevel.MEDIUM,
+                        evidence     = [
+                            f"Injection-relevant path param '{name}' on {method} {ep.url}",
+                        ],
+                        burp_notes   = _BURP_NOTES_SQLI,
+                    )
+                elif name in _HIGH_SSTI_PARAMS:
+                    # Template param in path = SSTI even without path corroboration
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "SSTI",
+                        parameters   = [f"path_param:{name}"],
+                        confidence   = ConfidenceLevel.MEDIUM,
+                        evidence     = [
+                            f"Template-relevant path param '{name}' on {method} {ep.url}",
+                            "Path param feeding a template renderer → SSTI",
+                        ],
+                        burp_notes   = _BURP_NOTES_SSTI,
+                    )
+
             # Query params
             for qp in (ep.query_params or []):
                 name = (qp.get("name") or "").lower()
