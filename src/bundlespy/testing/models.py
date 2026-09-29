@@ -37,11 +37,13 @@ class AttackCategory:
     CSRF            = "CSRF"
     PATH_TRAVERSAL  = "Path Traversal"
     CONFIGURATION   = "Configuration"
+    CORS            = "CORS"
 
     # Priority order for sorting (lower index = higher priority)
     _PRIORITY = [
         ACCESS_CONTROL,
         INJECTION,
+        CORS,
         XSS,
         SSRF,
         OPEN_REDIRECT,
