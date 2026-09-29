@@ -579,6 +579,97 @@ def _sourcemap_html(sm_details):
 </table>"""
 
 
+def _attack_mapper_html(attack_report) -> str:
+    """Render the Attack Surface Mapper results section."""
+    if not attack_report:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No attack surface mapping data available.</p></div>'
+
+    results = attack_report.results or []
+    if not results:
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No attack surface candidates identified.</p></div>'
+
+    # Confidence colour mapping
+    CONF_COLOR = {"HIGH": "#f85149", "MEDIUM": "#f0883e", "LOW": "#8b949e"}
+    CONF_BG    = {"HIGH": "#3d1515", "MEDIUM": "#3d2215", "LOW": "#1c2128"}
+
+    # Group by category
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    for r in results:
+        by_cat[r.category].append(r)
+
+    # Category display order
+    CAT_ORDER = [
+        "Access Control", "Injection", "XSS", "SSRF",
+        "Open Redirect", "CSRF", "Path Traversal", "Configuration",
+    ]
+    cats_sorted = sorted(by_cat.keys(), key=lambda c: CAT_ORDER.index(c) if c in CAT_ORDER else 99)
+
+    # Summary tiles
+    conf_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for r in results:
+        conf_counts[r.confidence] = conf_counts.get(r.confidence, 0) + 1
+
+    tiles = ""
+    if conf_counts["HIGH"]:
+        tiles += f'<div class="metric-card c-red"><div class="metric-num">{conf_counts["HIGH"]}</div><div class="metric-lbl">High Confidence</div></div>'
+    if conf_counts["MEDIUM"]:
+        tiles += f'<div class="metric-card c-orange"><div class="metric-num">{conf_counts["MEDIUM"]}</div><div class="metric-lbl">Medium Confidence</div></div>'
+    if conf_counts["LOW"]:
+        tiles += f'<div class="metric-card c-grey"><div class="metric-num">{conf_counts["LOW"]}</div><div class="metric-lbl">Low Confidence</div></div>'
+    tiles += f'<div class="metric-card c-purple"><div class="metric-num">{len(cats_sorted)}</div><div class="metric-lbl">Categories</div></div>'
+
+    html = f'<div class="overview-grid" style="margin-bottom:20px">{tiles}</div>'
+
+    # One card per category
+    for cat in cats_sorted:
+        items = by_cat[cat]
+        rows_html = ""
+        for r in items:
+            conf       = r.confidence
+            c_color    = CONF_COLOR.get(conf, "#8b949e")
+            c_bg       = CONF_BG.get(conf, "#1c2128")
+            method     = _e(r.method or "")
+            url        = _e(r.endpoint_url or "")
+            stype      = _e(r.surface_type or "")
+            params     = ", ".join(_e(p) for p in (r.parameters or []))
+            evidence   = "<br>".join(_e(e) for e in (r.evidence or []))
+            burp       = _e(r.burp_notes or "")
+            auth       = _e(r.auth_context or "")
+            meth_cls   = f"method-{method.lower()}" if method.lower() in ("get","post","put","delete","patch","head") else "method-unknown"
+
+            rows_html += f"""
+<div class="finding-card" style="margin-bottom:8px">
+  <div class="finding-top">
+    <div class="finding-left">
+      <span class="method-badge {meth_cls}">{method}</span>
+      <span class="finding-name" style="font-size:12px;word-break:break-all">{url}</span>
+    </div>
+    <div class="finding-right">
+      <span class="sev-pill" style="background:{c_bg};color:{c_color}">{conf}</span>
+      <span style="font-size:11px;color:var(--text3)">{stype}</span>
+    </div>
+  </div>
+  <div class="finding-body" style="padding:10px 14px">
+    {"".join(f'<span class="param-tag query-param" style="margin-right:4px;margin-bottom:4px;display:inline-block">{_e(p)}</span>' for p in (r.parameters or []))}
+    {f'<div style="margin-top:8px"><div class="evidence-label">Evidence</div><div style="font-size:11px;color:var(--text2);margin-top:3px">{evidence}</div></div>' if evidence else ""}
+    {f'<div style="margin-top:8px"><div class="evidence-label">Auth</div><div style="font-size:11px;color:var(--cyan)">{auth}</div></div>' if auth and auth not in ("", "none", "None") else ""}
+    {f'<div style="margin-top:8px"><div class="evidence-label">Burp Notes</div><div style="font-family:SF Mono,Fira Code,Consolas,monospace;font-size:10px;color:var(--text2);white-space:pre-wrap;background:#0a0d13;border:1px solid var(--border);border-radius:4px;padding:8px;margin-top:3px;max-height:80px;overflow:hidden">{burp}</div></div>' if burp else ""}
+  </div>
+</div>"""
+
+        html += f"""
+<div class="card" style="margin-bottom:16px">
+  <div class="card-header">
+    {_e(cat)}
+    <span style="font-size:11px;color:var(--text3);font-weight:400">{len(items)} candidate{"s" if len(items) != 1 else ""}</span>
+  </div>
+  <div class="card-body" style="padding:12px">{rows_html}</div>
+</div>"""
+
+    return html
+
+
 def _state_intelligence_html(page_states, state_report=None):
     """Render the Application State Intelligence section."""
     if not page_states and state_report is None:
@@ -736,6 +827,7 @@ def generate(
     passive_stats   = extras.get("passive_stats",     {})
     chunk_stats     = extras.get("chunk_stats",       {})
     attack_surface  = extras.get("attack_surface",    {})
+    attack_report   = extras.get("attack_report",     None)
 
     # Stage 6: build state report on-the-fly if not supplied
     page_states = getattr(result, "page_states", None) or {}
@@ -789,6 +881,8 @@ def generate(
     _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ',this)"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
     _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ',this)"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
     _nav_state    = ('<button class="nav-item" onclick="show(' + _so + 'stateint' + _sc + ',this)"><span class="nav-icon">⊚</span>State Intelligence<span class="nav-badge">' + str(len(page_states)) + '</span></button>' if _state_used else '')
+    _attack_report_candidates = attack_report.total_candidates if attack_report else 0
+    _nav_mapper   = ('<button class="nav-item" onclick="show(' + _so + 'mapper' + _sc + ',this)"><span class="nav-icon">⦿</span>Attack Surface<span class="nav-badge' + (' orange' if _attack_report_candidates else '') + '">' + str(_attack_report_candidates) + '</span></button>' if attack_report else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1067,6 +1161,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="nav-label">Intelligence</div>
       <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon">⚑</span>Findings<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
       <button class="nav-item" onclick="show('endpoints',this)"><span class="nav-icon">⇄</span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
+      {_nav_mapper}
       {_nav_state}
       <button class="nav-item" onclick="show('assets',this)"><span class="nav-icon">◻</span>JS Assets<span class="nav-badge">{len(result.js_files)}</span></button>
       <button class="nav-item" onclick="show('vulnlibs',this)"><span class="nav-icon">⚠</span>Vuln Libraries<span class="nav-badge {_lib_badge_cls}">{len(lib_findings)}</span></button>
@@ -1185,6 +1280,14 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <div id="section-endpoints" class="section">
       <div class="section-title">Endpoints <span class="count">{len(result.endpoints)} discovered</span></div>
       {_endpoints_html(result.endpoints)}
+    </div>
+
+    <!-- ATTACK SURFACE MAPPER -->
+    <div id="section-mapper" class="section">
+      <div class="section-title">Attack Surface Mapping
+        <span class="count">{attack_report.total_candidates if attack_report else 0} candidates · {attack_report.total_mapped if attack_report else 0} mapped</span>
+      </div>
+      {_attack_mapper_html(attack_report)}
     </div>
 
     <!-- STATE INTELLIGENCE -->
