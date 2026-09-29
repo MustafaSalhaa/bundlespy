@@ -21,6 +21,7 @@ from .testers.open_redirect import OpenRedirectMapper
 from .testers.csrf import CsrfMapper
 from .testers.path_traversal import PathTraversalMapper
 from .testers.configuration import ConfigurationMapper
+from .testers.cors import CorsMapper
 from ..storage.models import ScanResult
 
 # Keep the old name as an alias for backwards compatibility
@@ -71,6 +72,7 @@ class SurfaceMappingEngine:
             AttackCategory.CSRF,
             AttackCategory.PATH_TRAVERSAL,
             AttackCategory.CONFIGURATION,
+            AttackCategory.CORS,
         ])
 
     def _build_mappers(self):
@@ -86,6 +88,7 @@ class SurfaceMappingEngine:
             CsrfMapper(**static_kwargs),
             PathTraversalMapper(**static_kwargs),
             ConfigurationMapper(**config_kwargs),
+            CorsMapper(**static_kwargs),
         ]
         return [m for m in all_mappers if m.category in self._enabled]
 
