@@ -20,11 +20,11 @@ _STRONG_SINKS = [
     "Function(",
     "setTimeout(",       # only dangerous when first arg is a string, not a fn
     "setInterval(",      # same
-    "$.html(",           # jQuery - extremely common
-    "$.append(",         # jQuery - can inject HTML nodes
-    "$.prepend(",
-    "$.after(",
-    "$.before(",
+    ".html(",            # jQuery .html() - matches $(...).html( in minified code
+    ".append(",          # jQuery .append() - can inject HTML nodes
+    ".prepend(",
+    ".after(",
+    ".before(",
     "dangerouslySetInnerHTML",   # React
     "v-html",                    # Vue
     "[innerHTML]",               # Angular template binding
@@ -222,7 +222,7 @@ def _is_framework_sink(content: str) -> Dict[str, bool]:
     return {
         "react":  "dangerouslySetInnerHTML" in content or "__html" in content,
         "vue":    "v-html" in content,
-        "jquery": any(s in content for s in ["$.html(", "$.append(", "$.prepend(", "$.after(", "$.before("]),
+        "jquery": any(s in content for s in [".html(", ".append(", ".prepend(", ".after(", ".before("]),
     }
 
 def _sink_burp_notes(sinks: List[str], frameworks: Dict[str, bool]) -> str:
@@ -239,6 +239,35 @@ def _has_postmessage_listener(content: str) -> bool:
 
 def _has_origin_check(content: str) -> bool:
     return any(p in content for p in _ORIGIN_CHECK_PATTERNS)
+
+# Patterns that indicate event.data is only used in strict equality comparisons
+# (e.g. Vue Router / Inertia.js token resolver: `i === G && s === n`)
+# In this pattern event.data is deserialized into typed tokens compared by ===,
+# not fed into any DOM sink - it's a callback resolver, not an XSS vector.
+_POSTMESSAGE_EQUALITY_ONLY_PATTERNS = [
+    "event.data ===",
+    "event.data!==",
+    "e.data ===",
+    "e.data!==",
+    "data.type ===",
+    "data.type!==",
+]
+
+_POSTMESSAGE_DOM_ADJACENCY = [
+    "innerHTML", "outerHTML", "document.write", "eval(",
+    "Function(", "insertAdjacentHTML", ".html(",
+    "dangerouslySetInnerHTML", "v-html",
+]
+
+def _is_postmessage_equality_resolver(content: str) -> bool:
+    """
+    Returns True when event.data only appears inside === comparisons with no
+    adjacent DOM sink. This is the Vue Router / Inertia.js token-gated callback
+    resolver pattern - not an XSS vector.
+    """
+    has_equality = any(p in content for p in _POSTMESSAGE_EQUALITY_ONLY_PATTERNS)
+    has_dom_sink = any(p in content for p in _POSTMESSAGE_DOM_ADJACENCY)
+    return has_equality and not has_dom_sink
 
 
 # ─── MAPPER ──────────────────────────────────────────────────────────────────
@@ -381,7 +410,18 @@ class XssMapper(BaseSurfaceMapper):
                     "postMessage listener found: addEventListener(\"message\") or .onmessage handler",
                     "No origin check detected (event.origin not present) - any origin can send messages",
                 ]
-                if strong_sinks:
+
+                # Downgrade to LOW when this looks like a framework token resolver
+                # (Vue Router / Inertia.js pattern: event.data only in === comparisons,
+                # no DOM sinks adjacent - it's a callback dispatcher, not an XSS sink)
+                if _is_postmessage_equality_resolver(content):
+                    pm_evidence.append(
+                        "event.data only appears in strict equality checks (=== comparisons) "
+                        "with no adjacent DOM sink - pattern matches Vue Router / Inertia.js "
+                        "token resolver, not a real XSS data flow"
+                    )
+                    pm_confidence = ConfidenceLevel.LOW
+                elif strong_sinks:
                     pm_evidence.append(f"Strong DOM sinks in same file: {', '.join(strong_sinks[:4])}")
                     pm_evidence.append("Attacker can send arbitrary messages from evil.com to this handler")
                     pm_confidence = ConfidenceLevel.HIGH
