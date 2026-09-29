@@ -29,21 +29,23 @@ class ConfidenceLevel:
 
 
 class AttackCategory:
-    ACCESS_CONTROL  = "Access Control"
-    XSS             = "XSS"
-    INJECTION       = "Injection"
-    SSRF            = "SSRF"
-    OPEN_REDIRECT   = "Open Redirect"
-    CSRF            = "CSRF"
-    PATH_TRAVERSAL  = "Path Traversal"
-    CONFIGURATION   = "Configuration"
-    CORS            = "CORS"
+    ACCESS_CONTROL       = "Access Control"
+    XSS                  = "XSS"
+    INJECTION            = "Injection"
+    SSRF                 = "SSRF"
+    OPEN_REDIRECT        = "Open Redirect"
+    CSRF                 = "CSRF"
+    PATH_TRAVERSAL       = "Path Traversal"
+    CONFIGURATION        = "Configuration"
+    CORS                 = "CORS"
+    PROTOTYPE_POLLUTION  = "Prototype Pollution"
 
     # Priority order for sorting (lower index = higher priority)
     _PRIORITY = [
         ACCESS_CONTROL,
         INJECTION,
         CORS,
+        PROTOTYPE_POLLUTION,
         XSS,
         SSRF,
         OPEN_REDIRECT,
