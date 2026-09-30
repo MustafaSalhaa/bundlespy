@@ -51,18 +51,147 @@ class CrawlAction:
     """
     A typed crawl action — models a state transition, not just a URL visit.
     Inspired by Katana's action-based crawl graph.
+
+    origin_id: SHA-256 prefix of the DOM fingerprint of the page state from
+    which this action was discovered.  Before executing the action the engine
+    checks that the browser is still on that state; if not it navigates back
+    (navigateBackToStateOrigin pattern from Katana's crawler.go).
     """
     action_type: ActionType
     url:         str
     selector:    str  = ""   # CSS selector for FillForm / LeftClick targets
     depth:       int  = 0
     parent_url:  str  = ""
+    origin_id:   str  = ""   # DOM-state hash at discovery time (OriginID)
 
     def key(self) -> str:
         """Deduplication key — same action on same element = same key."""
         return hashlib.sha256(
             f"{self.action_type.value}:{self.url}:{self.selector}".encode()
         ).hexdigest()[:16]
+
+
+
+# ── CrawlGraph — DAG of page states and action edges ─────────────────────────
+
+@dataclass
+class _PageState:
+    """A single node in the crawl DAG — one unique DOM state."""
+    state_id:   str        # DOM fingerprint hash (origin_id)
+    url:        str
+    depth:      int        = 0
+    discovered: float      = field(default_factory=time.time)
+
+
+class CrawlGraph:
+    """
+    Directed Acyclic Graph of page states and the action edges that connect them.
+    Mirrors Katana's CrawlGraph (crawler.go).
+
+    Nodes = page states (keyed by DOM fingerprint / origin_id).
+    Edges = CrawlActions that transition between states.
+
+    Thread-safe for concurrent readers.  Mutations go through add_page_state()
+    and add_edge() which hold the internal lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock:  threading.Lock       = threading.Lock()
+        self._nodes: Dict[str, _PageState] = {}   # origin_id -> PageState
+        self._edges: List[CrawlAction]     = []   # all action edges
+
+    def add_page_state(self, state_id: str, url: str, depth: int = 0) -> bool:
+        """Register a page state. Returns True if newly added, False if seen."""
+        with self._lock:
+            if state_id in self._nodes:
+                return False
+            self._nodes[state_id] = _PageState(
+                state_id=state_id, url=url, depth=depth
+            )
+        return True
+
+    def add_edge(self, action: CrawlAction) -> None:
+        """Record a CrawlAction as a directed edge in the graph."""
+        with self._lock:
+            self._edges.append(action)
+
+    def nodes(self) -> List[_PageState]:
+        with self._lock:
+            return list(self._nodes.values())
+
+    def edges(self) -> List[CrawlAction]:
+        with self._lock:
+            return list(self._edges)
+
+    def summary(self) -> dict:
+        with self._lock:
+            return {
+                "nodes":       len(self._nodes),
+                "edges":       len(self._edges),
+                "fill_forms":  sum(1 for e in self._edges if e.action_type == ActionType.FILL_FORM),
+                "left_clicks": sum(1 for e in self._edges if e.action_type == ActionType.LEFT_CLICK),
+                "load_urls":   sum(1 for e in self._edges if e.action_type == ActionType.LOAD_URL),
+            }
+
+
+# ── DiagnosticsWriter — optional per-action screenshot + action log ───────────
+
+import os as _os
+import tempfile as _tempfile
+
+class DiagnosticsWriter:
+    """
+    When enable_diagnostics=True is passed to HeadlessEngine, this writer
+    captures a screenshot + metadata entry for every action executed.
+
+    All output goes to a temp directory under /tmp (or the system tmp) that
+    is printed to the log at startup.  Screenshots are written as PNG files
+    named by action index.  A JSON-lines action log is also written.
+
+    Mirrors Katana's DiagnosticsWriter pattern.
+    """
+
+    def __init__(self, label: str = "bundlespy") -> None:
+        self.dir = _tempfile.mkdtemp(prefix=f"bundlespy_diag_{label}_")
+        self._log_path = _os.path.join(self.dir, "actions.jsonl")
+        self._idx = 0
+        self._lock = threading.Lock()
+        logger.info("DiagnosticsWriter: output dir = %s", self.dir)
+
+    def record(self, page, action: CrawlAction, note: str = "") -> None:
+        """Capture a screenshot and write an action log entry."""
+        with self._lock:
+            idx = self._idx
+            self._idx += 1
+
+        # Screenshot
+        try:
+            ss_path = _os.path.join(self.dir, f"action_{idx:05d}.png")
+            page.screenshot(path=ss_path, full_page=False)
+        except Exception:
+            ss_path = ""
+
+        # Log entry
+        entry = {
+            "idx":         idx,
+            "ts":          time.time(),
+            "action_type": action.action_type.value,
+            "url":         action.url,
+            "selector":    action.selector,
+            "origin_id":   action.origin_id,
+            "note":        note,
+            "screenshot":  ss_path,
+        }
+        try:
+            with open(self._log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        """Flush and close the log."""
+        logger.info("DiagnosticsWriter: closed — %d actions logged in %s",
+                    self._idx, self.dir)
 
 
 # ── Route priority — high-value routes processed first ───────────────────────
@@ -144,6 +273,102 @@ SKIP_FORM_CONTEXTS = {
     "order", "purchase", "buy", "transaction", "stripe",
     "paypal", "braintree", "adyen", "square", "invoice",
 }
+
+
+# ── Cookie consent bypass selectors ──────────────────────────────────────────
+# Ordered roughly by effectiveness across EU/global GDPR banner frameworks.
+# We try each selector in order and click the first visible match.
+CONSENT_SELECTORS = [
+    # Common Accept / Allow buttons
+    'button[id*="accept"]',
+    'button[id*="agree"]',
+    'button[id*="allow"]',
+    'button[class*="accept"]',
+    'button[class*="agree"]',
+    'button[class*="allow"]',
+    # aria-label variants
+    'button[aria-label*="Accept"]',
+    'button[aria-label*="Agree"]',
+    'button[aria-label*="Allow"]',
+    # data-* attributes (OneTrust, Cookiebot, etc.)
+    'button[data-testid*="accept"]',
+    '#onetrust-accept-btn-handler',
+    '#CybotCookiebotDialogBodyButtonAccept',
+    '#cookie-accept',
+    '#cookies-accept',
+    '#accept-cookies',
+    '#accept_cookies',
+    '.cookie-accept',
+    '.js-cookie-accept',
+    '[data-action="accept-cookies"]',
+    '[data-accept-cookies]',
+    # Generic text-based match — last resort
+    'button:has-text("Accept")',
+    'button:has-text("Accept all")',
+    'button:has-text("Accept All")',
+    'button:has-text("Allow all")',
+    'button:has-text("I agree")',
+    'button:has-text("Agree")',
+    'button:has-text("I Accept")',
+    'button:has-text("Got it")',
+    'button:has-text("OK")',
+    'a:has-text("Accept")',
+    'a:has-text("I agree")',
+]
+
+# ── Captcha page indicators ───────────────────────────────────────────────────
+# Detects both embedded captcha widgets and full captcha challenge pages.
+_CAPTCHA_SELECTORS = [
+    # reCAPTCHA v2/v3
+    '.g-recaptcha',
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="google.com/recaptcha"]',
+    # hCaptcha
+    '.h-captcha',
+    'iframe[src*="hcaptcha.com"]',
+    # Cloudflare Turnstile / IUAM
+    '.cf-turnstile',
+    'iframe[src*="challenges.cloudflare.com"]',
+    'div#cf-please-wait',
+    'div.cf-challenge-running',
+    # FunCaptcha / Arkose Labs
+    'iframe[src*="arkoselabs.com"]',
+    'iframe[src*="funcaptcha.com"]',
+    # Generic
+    '[class*="captcha"]',
+    '[id*="captcha"]',
+]
+
+_CAPTCHA_TEXT_MARKERS = (
+    "complete the captcha",
+    "verify you are human",
+    "i'm not a robot",
+    "human verification",
+    "bot detection",
+    "security check",
+    "prove you're human",
+    "ddos protection by cloudflare",
+    "checking your browser",
+)
+
+# ── DIT-style login form heuristics (enhanced) ───────────────────────────────
+# Katana uses a DIT classifier for login form detection that handles obfuscated
+# field names and React-rendered forms where field names are hashed or minified.
+# These patterns capture field name variants used by common obfuscated forms.
+
+_DIT_PASSWORD_NAMES = re.compile(
+    r"(pass(w(or)?d?)?|psw|pwd|secret|credential|cred|pin|token"
+    r"|auth[_-]?key|private[_-]?key|api[_-]?key|access[_-]?token"
+    r"|session[_-]?key|security[_-]?code|otp|mfa[_-]?code|totp)",
+    re.IGNORECASE,
+)
+
+_DIT_USERNAME_NAMES = re.compile(
+    r"(user(name|id)?|u[_-]?name|login|email|e[_-]?mail|account"
+    r"|ident(ifier)?|nick(name)?|handle|logon|signin|member[_-]?id"
+    r"|customer[_-]?id|employee[_-]?id|uid|userid|member)",
+    re.IGNORECASE,
+)
 
 
 # ── Form fill values ──────────────────────────────────────────────────────────
@@ -734,18 +959,64 @@ def _is_login_url(url: str) -> bool:
 def _is_login_page(page) -> bool:
     """
     Return True if the current page looks like an auth/login wall.
-    Checks both URL and DOM — catches custom login paths that _is_login_url misses.
+
+    Three-layer detection — layered so fast checks run first:
+    1. URL path keyword match (fast, no DOM access)
+    2. Standard CSS selector match (type=password, autocomplete, form action)
+    3. DIT-style heuristic scan — handles obfuscated field names, React forms
+       with hashed attribute values, and input elements that lack type="password"
+       but carry password-related name/id/placeholder attributes.
+
+    This mirrors Katana's tryAutoLogin / DIT classifier approach.
     """
     try:
         if _is_login_url(page.url):
             return True
-        # DOM check: any password field = login/auth page
+
+        # Layer 2: standard selectors
         for sel in _LOGIN_DOM_PATTERNS:
             try:
                 if page.query_selector(sel):
                     return True
             except Exception:
                 pass
+
+        # Layer 3: DIT-style heuristic — scan all input elements for
+        # password-related name/id/placeholder attributes (handles obfuscated
+        # React/Vue forms where type="password" may be absent or minified).
+        try:
+            found = page.evaluate("""
+                (function() {
+                    var inputs = document.querySelectorAll('input, [role="textbox"]');
+                    for (var i = 0; i < inputs.length; i++) {
+                        var el = inputs[i];
+                        var attrs = [
+                            el.getAttribute('name')        || '',
+                            el.getAttribute('id')          || '',
+                            el.getAttribute('placeholder') || '',
+                            el.getAttribute('aria-label')  || '',
+                            el.getAttribute('data-field')  || '',
+                            el.getAttribute('data-name')   || '',
+                        ].join(' ').toLowerCase();
+                        // password-like attribute on any input = auth page
+                        if (/pass(w(or)?d?)?|psw|pwd|credential|secret/.test(attrs))
+                            return true;
+                    }
+                    // Check page title / h1 for auth-page language
+                    var t = (document.title + ' ' +
+                             (document.querySelector('h1,h2') || {}).innerText || ''
+                            ).toLowerCase();
+                    if (/\b(log\s*in|sign\s*in|login|signin|authenticate)\b/.test(t) &&
+                        document.querySelectorAll('input').length > 0)
+                        return true;
+                    return false;
+                })()
+            """)
+            if found:
+                return True
+        except Exception:
+            pass
+
     except Exception:
         pass
     return False
@@ -764,17 +1035,24 @@ class HeadlessEngine:
 
     def __init__(
         self,
-        target_url:    str,
+        target_url:         str,
         scope,
-        timeout:       int   = 30,
-        stealth:       bool  = False,
-        max_pages:     int   = 100,
-        interact:      bool  = False,
-        workers:       int   = 3,
-        external_seen: Set[str]  = None,
-        cookies:       List[dict] = None,
-        extra_headers: dict       = None,
-        seen_hashes:   Set[str]  = None,
+        timeout:            int   = 30,
+        stealth:            bool  = False,
+        max_pages:          int   = 100,
+        interact:           bool  = False,
+        workers:            int   = 3,
+        external_seen:      Set[str]   = None,
+        cookies:            List[dict] = None,
+        extra_headers:      dict       = None,
+        seen_hashes:        Set[str]   = None,
+        # ── Katana enhancements ─────────────────────────────────────────────
+        max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
+        max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
+        enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
+        slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
+        captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
+        cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -786,6 +1064,14 @@ class HeadlessEngine:
         self.cookies       = cookies or []        # Playwright cookie dicts
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
+
+        # Katana enhancement params
+        self.max_failures          = max(1, max_failures)
+        self.max_crawl_duration    = max(0, max_crawl_duration)
+        self.enable_diagnostics    = enable_diagnostics
+        self.slow_mo               = max(0, slow_mo)
+        self.captcha_handler       = captcha_handler
+        self.cookie_consent_bypass = cookie_consent_bypass
 
         self.registry    = AssetRegistry(external_seen)
         # Pre-seed content hash registry with hashes from crawler
@@ -807,9 +1093,201 @@ class HeadlessEngine:
         self._action_queue:   deque         = deque()
         self._seen_actions:   Set[str]      = set()
 
+        # CrawlGraph — DAG of page states and action edges (Katana enhancement 1)
+        self.crawl_graph: CrawlGraph = CrawlGraph()
+
+        # DiagnosticsWriter — optional (Katana enhancement 11)
+        self._diagnostics: Optional[DiagnosticsWriter] = (
+            DiagnosticsWriter() if enable_diagnostics else None
+        )
+
+        # MaxCrawlDuration start time — set after auth completes (Katana enhancement 10)
+        self._crawl_start_time: float = 0.0
+
+        # Consecutive failure counter for MaxFailureCount guard (Katana enhancement 4)
+        self._consecutive_failures: int = 0
+
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
         self.external_seen = external_seen or set()
+
+    # ── Katana enhancement helpers ────────────────────────────────────────────
+
+    def _slow_mo_wait(self, page) -> None:
+        """SlowMotion mode: inject a configurable delay between interactions.
+        Only fires when slow_mo > 0. Used for visual debugging. (Enhancement 12)"""
+        if self.slow_mo > 0:
+            try:
+                page.wait_for_timeout(self.slow_mo)
+            except Exception:
+                pass
+
+    def _is_crawl_deadline_exceeded(self) -> bool:
+        """MaxCrawlDuration: returns True if the crawl timer has expired.
+        Timer starts after auth completes — not at run() entry. (Enhancement 10)"""
+        if self.max_crawl_duration <= 0 or self._crawl_start_time == 0.0:
+            return False
+        return (time.monotonic() - self._crawl_start_time) >= self.max_crawl_duration
+
+    def _dismiss_cookie_consent(self, page) -> bool:
+        """Cookie consent bypass: try to click an accept/allow button on the
+        page and return True if one was found and clicked. Uses a priority-ordered
+        list of selectors covering OneTrust, Cookiebot, Quantcast, IAB TCF, and
+        generic button text patterns. (Enhancement 8)"""
+        if not self.cookie_consent_bypass:
+            return False
+        for sel in CONSENT_SELECTORS:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    el.click(timeout=1000)
+                    logger.debug("Cookie consent dismissed via: %s", sel)
+                    page.wait_for_timeout(400)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _is_captcha_page(self, page) -> bool:
+        """Captcha detection: checks for known captcha widgets and challenge
+        page text markers. Returns True if a captcha is detected. (Enhancement 9)"""
+        try:
+            for sel in _CAPTCHA_SELECTORS:
+                try:
+                    if page.query_selector(sel):
+                        return True
+                except Exception:
+                    pass
+            # Text-based check on page body (catches Cloudflare IUAM, etc.)
+            body_text = ""
+            try:
+                body_text = (page.evaluate("() => document.body.innerText") or "").lower()
+            except Exception:
+                pass
+            if body_text and any(m in body_text for m in _CAPTCHA_TEXT_MARKERS):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _handle_captcha(self, page) -> bool:
+        """Handle captcha: call the optional captcha_handler, or just log and
+        return False if no handler is configured. (Enhancement 9)"""
+        if not self._is_captcha_page(page):
+            return False
+        logger.warning("Captcha detected on %s", page.url)
+        if self.captcha_handler is not None:
+            try:
+                solved = self.captcha_handler(page)
+                if solved:
+                    logger.info("Captcha solver returned success")
+                    return True
+                else:
+                    logger.warning("Captcha solver returned failure")
+            except Exception as e:
+                logger.warning("Captcha handler raised: %s", e)
+        return False
+
+    def _capture_session_state(self, page) -> dict:
+        """Session delta verification: snapshot cookies + localStorage keys
+        at a point in time. Compare before/after to confirm auth succeeded.
+        (Enhancement 6)"""
+        snap = {"cookies": [], "storage_keys": []}
+        try:
+            snap["cookies"] = [c["name"] for c in page.context.cookies()]
+        except Exception:
+            pass
+        try:
+            snap["storage_keys"] = page.evaluate(
+                "() => Object.keys(window.localStorage || {})"
+            )
+        except Exception:
+            pass
+        return snap
+
+    def _session_state_changed(self, before: dict, after: dict) -> bool:
+        """Return True if the session state changed (new cookies or storage keys
+        appeared), which confirms an auth flow established a session. (Enhancement 6)"""
+        before_cookies = set(before.get("cookies", []))
+        after_cookies  = set(after.get("cookies",  []))
+        before_storage = set(before.get("storage_keys", []))
+        after_storage  = set(after.get("storage_keys",  []))
+        return bool(
+            (after_cookies  - before_cookies)  or
+            (after_storage  - before_storage)
+        )
+
+    def _navigate_back_to_state_origin(
+        self, page, action: CrawlAction, stabilizer
+    ) -> bool:
+        """navigateBackToStateOrigin: if the browser is not on the page that
+        owns this action (by URL and origin_id), navigate back and verify
+        the DOM state matches before returning True.  Returns False if
+        restoration fails. (Enhancement 3)"""
+        # If already on the right URL, check the DOM state
+        if page.url == action.url or page.url.rstrip("/") == action.url.rstrip("/"):
+            if not action.origin_id:
+                return True  # no origin_id to verify — assume ok
+            current_fp = self._dom_fingerprint(page)
+            if current_fp and current_fp[:16] == action.origin_id:
+                return True  # browser is on the correct state
+            # Same URL but DOM changed — the SPA transitioned; navigate back
+        # Navigate to the action's source URL
+        try:
+            page.goto(action.url, timeout=self.timeout * 1000,
+                      wait_until="domcontentloaded")
+            stabilizer.wait_for_framework(max_ms=2000)
+        except Exception as e:
+            logger.debug("navigateBackToStateOrigin: goto failed for %s: %s",
+                         action.url, e)
+            return False
+        # Verify the DOM fingerprint if we have an origin_id
+        if action.origin_id:
+            fp = self._dom_fingerprint(page)
+            if fp and fp[:16] != action.origin_id:
+                logger.debug(
+                    "navigateBackToStateOrigin: state mismatch after navigate "
+                    "(expected %s, got %s) for %s",
+                    action.origin_id, fp[:16], action.url,
+                )
+                # Mismatch is non-fatal: SPA state may differ — log and continue
+        return True
+
+    def _check_element_interactable(self, page, el) -> bool:
+        """Interactability check: verify the element is not covered by an overlay
+        (modal, cookie banner, spinner) before clicking it.  Mirrors Katana's
+        CoveredError / interactability check. (Enhancement 5)
+
+        Returns True if the element is safe to click.
+        """
+        try:
+            box = el.bounding_box()
+            if not box:
+                return False
+            # Sample the center point and check if elementFromPoint returns
+            # the same element or a descendant, meaning no overlay is in the way.
+            cx = box["x"] + box["width"]  / 2
+            cy = box["y"] + box["height"] / 2
+            covered = page.evaluate(
+                """([cx, cy]) => {
+                    var top = document.elementFromPoint(cx, cy);
+                    if (!top) return true;  // no element = covered
+                    // walk up to see if the hit target is the same element
+                    var probe = top;
+                    while (probe) {
+                        if (probe === arguments[0]) return false;  // not covered
+                        probe = probe.parentElement;
+                    }
+                    return true;  // covered by something else
+                }""",
+                [cx, cy],
+            )
+            return not covered
+        except Exception:
+            # If the check fails we fall back to attempting the click anyway
+            return True
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _add_js_file(self, js_file: JSFile) -> bool:
         """Thread-safe JS file registration."""
@@ -1021,7 +1499,20 @@ class HeadlessEngine:
         for dedicated follow-up crawling — same pattern Katana uses for FillForm
         action type. This ensures form-triggered API calls are captured even if
         the form wasn't visible during the main page visit.
+
+        Sets origin_id from the current DOM fingerprint so Phase 3 can verify
+        the browser is on the correct state before executing (OriginID pattern).
         """
+        # Capture DOM fingerprint at discovery time — used as OriginID (Enhancement 2)
+        origin_id = ""
+        try:
+            fp = self._dom_fingerprint(page)
+            if fp:
+                origin_id = fp[:16]
+                self.crawl_graph.add_page_state(origin_id, source_url)
+        except Exception:
+            pass
+
         try:
             forms = page.evaluate("""
                 (function() {
@@ -1052,19 +1543,34 @@ class HeadlessEngine:
             if any(kw in ctx for kw in skip_kws):
                 continue
             selector = f"form:nth-of-type({f['idx'] + 1})"
-            self._queue_action(CrawlAction(
+            action = CrawlAction(
                 action_type=ActionType.FILL_FORM,
                 url=source_url,
                 selector=selector,
                 parent_url=source_url,
-            ))
+                origin_id=origin_id,
+            )
+            if self._queue_action(action):
+                self.crawl_graph.add_edge(action)  # register in CrawlGraph
 
     def _discover_click_actions(self, page, source_url: str) -> None:
         """
         Discover JS-only interactive elements (buttons with no href, elements
         with onclick/data-action) and queue them as LEFT_CLICK actions.
         Katana queues these as ActionTypeLeftClick — we do the same.
+
+        Sets origin_id from the current DOM fingerprint (OriginID pattern).
         """
+        # Capture DOM fingerprint at discovery time — used as OriginID (Enhancement 2)
+        origin_id = ""
+        try:
+            fp = self._dom_fingerprint(page)
+            if fp:
+                origin_id = fp[:16]
+                self.crawl_graph.add_page_state(origin_id, source_url)
+        except Exception:
+            pass
+
         try:
             elements = page.evaluate("""
                 (function() {
@@ -1105,12 +1611,15 @@ class HeadlessEngine:
             if any(kw in text for kw in LOGOUT_KEYWORDS):
                 continue
             selector = f"{el['sel']}:nth-of-type({el['idx'] + 1})"
-            self._queue_action(CrawlAction(
+            action = CrawlAction(
                 action_type=ActionType.LEFT_CLICK,
                 url=source_url,
                 selector=selector,
                 parent_url=source_url,
-            ))
+                origin_id=origin_id,
+            )
+            if self._queue_action(action):
+                self.crawl_graph.add_edge(action)  # register in CrawlGraph
 
     def _extract_routes(self, page) -> Set[str]:
         try:
@@ -2149,11 +2658,15 @@ class HeadlessEngine:
             "cookies_present":      [],
             "authenticated":        False,
             "reason":               "",
+            "session_delta":        False,  # True if cookies/storage changed (Enhancement 6)
         }
 
         if not result["credentials_supplied"]:
             # Anonymous scan — skip verification entirely
             return result
+
+        # Session delta: snapshot state before navigation (Enhancement 6)
+        session_before = self._capture_session_state(page)
 
         redirect_chain: List[str] = []
         final_status   = 0
@@ -2198,6 +2711,12 @@ class HeadlessEngine:
                 result["cookies_present"] = [c["name"] for c in browser_cookies]
             except Exception:
                 pass
+
+            # Session delta: compare after navigation — confirms auth established (Enhancement 6)
+            session_after = self._capture_session_state(page)
+            result["session_delta"] = self._session_state_changed(session_before, session_after)
+            if result["session_delta"]:
+                logger.debug("Session delta confirmed: cookies/storage changed after auth navigation")
 
             result["status"]         = final_status
             result["final_url"]      = final_url
@@ -2506,10 +3025,11 @@ class HeadlessEngine:
             if self.cookies or self.extra_headers:
                 self.auth_result = self._verify_auth(page, self.target_url)
                 logger.info(
-                    "Auth: authenticated=%s final=%s status=%s",
+                    "Auth: authenticated=%s final=%s status=%s session_delta=%s",
                     self.auth_result["authenticated"],
                     self.auth_result["final_url"],
                     self.auth_result["status"],
+                    self.auth_result.get("session_delta", False),
                 )
                 # Extra stability wait after auth — SPAs may still be mounting
                 # their router after the framework detect fires in _verify_auth
@@ -2520,6 +3040,7 @@ class HeadlessEngine:
                 fp = self._dom_fingerprint(page)
                 if fp:
                     _seen_dom_states.add(fp)
+                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0)
                 initial_routes = self._flush_page_intel(page, self.target_url)
             else:
                 try:
@@ -2534,7 +3055,25 @@ class HeadlessEngine:
                 fp = self._dom_fingerprint(page)
                 if fp:
                     _seen_dom_states.add(fp)
+                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0)
                 initial_routes = self._flush_page_intel(page, self.target_url)
+
+            # Cookie consent bypass — run on root page before crawl starts (Enhancement 8)
+            if self.cookie_consent_bypass:
+                dismissed = self._dismiss_cookie_consent(page)
+                if dismissed:
+                    # Re-flush after dismissal — banner may have been blocking JS rendering
+                    for r in self._flush_page_intel(page, self.target_url):
+                        initial_routes.add(r)
+
+            # Captcha check on root page (Enhancement 9)
+            if self._is_captcha_page(page):
+                self._handle_captcha(page)
+
+            # MaxCrawlDuration timer starts HERE — after auth completes (Enhancement 10)
+            self._crawl_start_time = time.monotonic()
+            if self.max_crawl_duration > 0:
+                logger.info("MaxCrawlDuration: %ds (starts after auth)", self.max_crawl_duration)
 
             for r in initial_routes:
                 self._add_route(r)
@@ -2569,12 +3108,31 @@ class HeadlessEngine:
             # Bug 11 fix: _build_urls already sorts by priority; don't sort again.
             bfs_queue: deque = deque(initial_urls)
             login_loop_count = 0
+            bfs_depth: Dict[str, int] = {}  # url -> BFS depth for CrawlGraph
 
             while bfs_queue:
                 if self.pages_visited >= self.max_pages:
                     break
 
+                # MaxCrawlDuration guard — timer starts after auth (Enhancement 10)
+                if self._is_crawl_deadline_exceeded():
+                    logger.info(
+                        "MaxCrawlDuration (%ds) reached — stopping BFS",
+                        self.max_crawl_duration,
+                    )
+                    break
+
+                # MaxFailureCount guard — halt if too many consecutive failures (Enhancement 4)
+                if self._consecutive_failures >= self.max_failures:
+                    logger.warning(
+                        "MaxFailureCount (%d) reached — halting BFS to avoid "
+                        "spinning on a broken or blocked target",
+                        self.max_failures,
+                    )
+                    break
+
                 url = bfs_queue.popleft()
+                current_depth = bfs_depth.get(url, 1)
 
                 if not self.registry.register_url(url):
                     continue
@@ -2616,14 +3174,33 @@ class HeadlessEngine:
                     else:
                         login_loop_count = 0  # reset on successful non-login page
 
+                    # Cookie consent bypass — try once per new page (Enhancement 8)
+                    if self.cookie_consent_bypass:
+                        self._dismiss_cookie_consent(page)
+
+                    # Captcha detection — try handler if configured (Enhancement 9)
+                    if self._is_captcha_page(page):
+                        self._handle_captcha(page)
+
                     # DOM state dedup — skip identical states
                     stabilizer.wait_for_framework(max_ms=2000)
                     fp = self._dom_fingerprint(page)
                     if fp and fp in _seen_dom_states:
                         logger.debug("Duplicate DOM state, skipping: %s", url)
+                        self._consecutive_failures = 0  # dedup is expected, not a failure
                         continue
                     if fp:
                         _seen_dom_states.add(fp)
+                        # Register page state in CrawlGraph (Enhancement 1)
+                        self.crawl_graph.add_page_state(fp[:16], url, depth=current_depth)
+                        # Record LOAD_URL edge
+                        load_action = CrawlAction(
+                            action_type=ActionType.LOAD_URL,
+                            url=url,
+                            depth=current_depth,
+                            parent_url=url,
+                        )
+                        self.crawl_graph.add_edge(load_action)
 
                     if self.interact:
                         self._interact(page, stabilizer)
@@ -2642,9 +3219,14 @@ class HeadlessEngine:
                         if not self.registry.seen_url(new_url):
                             self._add_route(urlparse(new_url).path or "/")
                             bfs_queue.append(new_url)
+                            bfs_depth[new_url] = current_depth + 1
+
+                    # Successful page visit — reset consecutive failure counter
+                    self._consecutive_failures = 0
 
                 except Exception as e:
                     logger.debug("Error visiting %s: %s", url, e)
+                    self._consecutive_failures += 1
 
             self.timer.stop("phase2_routes")
 
@@ -2656,18 +3238,38 @@ class HeadlessEngine:
             _action_pages_visited = 0
             _MAX_ACTION_PAGES = min(20, max(0, self.max_pages - self.pages_visited))
 
+            phase3_consecutive_failures = 0
+
             while self._action_queue and _action_pages_visited < _MAX_ACTION_PAGES:
+                # MaxCrawlDuration guard in Phase 3 as well (Enhancement 10)
+                if self._is_crawl_deadline_exceeded():
+                    logger.info("MaxCrawlDuration reached — stopping Phase 3")
+                    break
+
+                # MaxFailureCount guard for Phase 3 (Enhancement 4)
+                if phase3_consecutive_failures >= self.max_failures:
+                    logger.warning(
+                        "MaxFailureCount (%d) reached in Phase 3 — halting",
+                        self.max_failures,
+                    )
+                    break
+
                 action = self._action_queue.popleft()
                 try:
-                    # Navigate to the page that hosts this action
+                    # navigateBackToStateOrigin: verify browser is on the correct
+                    # DOM state before executing the action (Enhancements 2 + 3)
                     self._recover_drift(page, action.url, stabilizer)
-                    if page.url != action.url:
-                        try:
-                            page.goto(action.url, timeout=self.timeout * 1000,
-                                      wait_until="domcontentloaded")
-                            stabilizer.wait_for_framework(max_ms=2000)
-                        except Exception:
-                            continue
+                    restored = self._navigate_back_to_state_origin(page, action, stabilizer)
+                    if not restored:
+                        phase3_consecutive_failures += 1
+                        continue
+
+                    # Diagnostics: record pre-action state (Enhancement 11)
+                    if self._diagnostics:
+                        self._diagnostics.record(page, action, note="pre-action")
+
+                    # SlowMotion delay before action (Enhancement 12)
+                    self._slow_mo_wait(page)
 
                     if action.action_type == ActionType.FILL_FORM:
                         try:
@@ -2682,14 +3284,33 @@ class HeadlessEngine:
                                             if not self.registry.seen_url(u):
                                                 bfs_queue.append(u)
                                 _action_pages_visited += 1
+                                phase3_consecutive_failures = 0
+                                # Diagnostics: record post-action state (Enhancement 11)
+                                if self._diagnostics:
+                                    self._diagnostics.record(page, action, note="post-fill_form")
                         except Exception as e:
                             logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
+                            phase3_consecutive_failures += 1
 
                     elif action.action_type == ActionType.LEFT_CLICK:
                         try:
                             el = page.query_selector(action.selector)
                             if el and el.is_visible() and el.is_enabled():
                                 el.scroll_into_view_if_needed(timeout=500)
+                                # Interactability check: verify no overlay covers
+                                # the element before clicking (Enhancement 5)
+                                if not self._check_element_interactable(page, el):
+                                    logger.debug(
+                                        "Element covered by overlay, skipping: %s on %s",
+                                        action.selector, action.url,
+                                    )
+                                    # Try consent bypass — a cookie banner may be covering it
+                                    if self.cookie_consent_bypass:
+                                        self._dismiss_cookie_consent(page)
+                                    phase3_consecutive_failures += 1
+                                    continue
+                                # SlowMotion delay before click (Enhancement 12)
+                                self._slow_mo_wait(page)
                                 el.click(timeout=800)
                                 stabilizer.wait_after_interaction(max_ms=1000)
                                 new_routes = self._flush_page_intel(page, action.url)
@@ -2700,14 +3321,24 @@ class HeadlessEngine:
                                             if not self.registry.seen_url(u):
                                                 bfs_queue.append(u)
                                 _action_pages_visited += 1
+                                phase3_consecutive_failures = 0
+                                # Diagnostics: record post-click state (Enhancement 11)
+                                if self._diagnostics:
+                                    self._diagnostics.record(page, action, note="post-left_click")
                         except Exception as e:
                             logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
+                            phase3_consecutive_failures += 1
 
                 except Exception as e:
                     logger.debug("Action processing error: %s", e)
+                    phase3_consecutive_failures += 1
 
             self.timer.stop("phase3_actions")
             logger.info("Phase 3 done: %d action pages", _action_pages_visited)
+
+            # Close DiagnosticsWriter (Enhancement 11)
+            if self._diagnostics:
+                self._diagnostics.close()
 
             try:
                 ctx.close()
@@ -2728,6 +3359,8 @@ class HeadlessEngine:
         es_mod_found  = [js for js in self.js_files if js.technology in ("es-module",)]
         shadow_found  = [js for js in self.js_files if "shadow-dom" in (js.technology or "")]
 
+        crawl_graph_summary = self.crawl_graph.summary()
+
         stats = {
             "pages":         self.pages_visited,
             "js":            len(self.js_files),
@@ -2742,13 +3375,15 @@ class HeadlessEngine:
             "es_modules":    len(es_mod_found),
             "shadow_dom":    len(shadow_found),
             "actions_queued": len(self._seen_actions),
+            "crawl_graph":   crawl_graph_summary,
             "timings":       timings,
         }
 
         logger.info(
-            "Headless done: %d pages, %d JS, %d routes, %.1fs total",
+            "Headless done: %d pages, %d JS, %d routes, %d graph-nodes, %.1fs total",
             self.pages_visited, len(self.js_files),
-            len(self.routes), timings.get("total", 0),
+            len(self.routes), crawl_graph_summary["nodes"],
+            timings.get("total", 0),
         )
         return {
             "js_files":    self.js_files,
@@ -2759,6 +3394,7 @@ class HeadlessEngine:
             "stats":       stats,
             "timings":     timings,
             "auth_result": self.auth_result,
+            "crawl_graph": crawl_graph_summary,
         }
 
 def _playwright_available() -> bool:
@@ -2777,40 +3413,60 @@ def collect_headless_js(url: str, scope, timeout: int = 30,
 
 
 def collect_headless_full(
-    url:           str,
+    url:                  str,
     scope,
-    timeout:       int   = 30,
-    stealth:       bool  = False,
-    max_pages:     int   = 100,
-    external_seen: set   = None,
-    seed_urls:     list  = None,
-    interact:      bool  = False,
-    workers:       int   = 3,
-    cookies:       list  = None,
-    extra_headers: dict  = None,
-    seen_hashes:   set   = None,
+    timeout:              int            = 30,
+    stealth:              bool           = False,
+    max_pages:            int            = 100,
+    external_seen:        set            = None,
+    seed_urls:            list           = None,
+    interact:             bool           = False,
+    workers:              int            = 3,
+    cookies:              list           = None,
+    extra_headers:        dict           = None,
+    seen_hashes:          set            = None,
+    # Katana enhancements (Enhancement 4, 10, 11, 12, 9, 8)
+    max_failures:         int            = 10,
+    max_crawl_duration:   int            = 0,
+    enable_diagnostics:   bool           = False,
+    slow_mo:              int            = 0,
+    captcha_handler       = None,
+    cookie_consent_bypass: bool          = True,
 ) -> dict:
     """
-    Full headless scan.
-    seed_urls:     routes from static analysis to pre-seed the engine.
-    workers:       concurrent page processing (default 3).
-    interact:      enable tab/dropdown interaction (slower, more coverage).
-    cookies:       Playwright cookie dicts injected before first navigation.
-    extra_headers: extra HTTP headers (non-Cookie) applied to every request.
-    seen_hashes:   content SHA-256 hashes already seen by the crawler (for dedup).
+    Full headless scan — all Katana enhancements exposed.
+
+    seed_urls:             routes from static analysis to pre-seed the engine.
+    workers:               concurrent page processing (default 3).
+    interact:              enable tab/dropdown interaction (slower, more coverage).
+    cookies:               Playwright cookie dicts injected before first navigation.
+    extra_headers:         extra HTTP headers (non-Cookie) applied to every request.
+    seen_hashes:           content SHA-256 hashes already seen by the crawler (for dedup).
+    max_failures:          halt crawl after this many consecutive page/action failures (default 10).
+    max_crawl_duration:    max crawl time in seconds, 0 = unlimited; timer starts after auth (default 0).
+    enable_diagnostics:    write screenshots + action log to a temp dir (default False).
+    slow_mo:               milliseconds to pause between interactions for visual debugging (default 0).
+    captcha_handler:       optional callable(page) -> bool that tries to solve detected captchas.
+    cookie_consent_bypass: auto-dismiss GDPR/cookie banners before crawling (default True).
     """
     engine = HeadlessEngine(
-        target_url    = url,
-        scope         = scope,
-        timeout       = timeout,
-        stealth       = stealth,
-        max_pages     = max_pages,
-        interact      = interact,
-        workers       = workers,
-        external_seen = external_seen or set(),
-        cookies       = cookies or [],
-        extra_headers = extra_headers or {},
-        seen_hashes   = seen_hashes or set(),
+        target_url             = url,
+        scope                  = scope,
+        timeout                = timeout,
+        stealth                = stealth,
+        max_pages              = max_pages,
+        interact               = interact,
+        workers                = workers,
+        external_seen          = external_seen or set(),
+        cookies                = cookies or [],
+        extra_headers          = extra_headers or {},
+        seen_hashes            = seen_hashes or set(),
+        max_failures           = max_failures,
+        max_crawl_duration     = max_crawl_duration,
+        enable_diagnostics     = enable_diagnostics,
+        slow_mo                = slow_mo,
+        captcha_handler        = captcha_handler,
+        cookie_consent_bypass  = cookie_consent_bypass,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
