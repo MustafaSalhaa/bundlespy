@@ -876,6 +876,14 @@ def generate(
 
     # Pre-compute filter buttons (Python 3.10: no backslash in f-string expressions)
     _q = "'"  # single quote helper - backslash not allowed in f-string on Python 3.10
+
+    # Pre-build legend HTML (avoids backslash-in-f-string on Python < 3.12)
+    _legend_html = "".join(
+        f'<div class="legend-item" data-kind="{k}" onclick="toggleKindFilter(this,{_q}{k}{_q})"'
+        f' title="Click to filter by {k.title()}">'
+        f'<div class="legend-dot" style="background:{c}"></div>{k.title()}</div>'
+        for k, c in NODE_COLOR.items()
+    )
     _btn_crit   = (f'<button class="filter-btn" data-sev="CRITICAL" onclick="filterF({_q}CRITICAL{_q},this)">Critical ({len(critical)})</button>' if critical else "")
     _btn_high   = (f'<button class="filter-btn" data-sev="HIGH" onclick="filterF({_q}HIGH{_q},this)">High ({len(high)})</button>' if high else "")
     _btn_med    = (f'<button class="filter-btn" data-sev="MEDIUM" onclick="filterF({_q}MEDIUM{_q},this)">Medium ({len(medium)})</button>' if medium else "")
@@ -1127,31 +1135,46 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .data-table tr:last-child td{{border-bottom:none}}
 .data-table tr:hover td{{background:rgba(255,255,255,.015)}}
 /* ── Graph ── */
-#graph-container{{width:100%;height:600px;background:#0a0d13;border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}}
+#graph-container{{width:100%;height:680px;background:#070a10;border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}}
 #graph-svg{{width:100%;height:100%}}
-.graph-controls{{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:5px}}
-.graph-btn{{background:var(--surface);border:1px solid var(--border);color:var(--text2);width:28px;height:28px;border-radius:var(--radius-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;transition:all .15s}}
+.graph-toolbar{{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}}
+.graph-controls{{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:5px;z-index:10}}
+.graph-btn{{background:rgba(15,20,30,.85);border:1px solid var(--border);color:var(--text2);width:30px;height:30px;border-radius:var(--radius-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;transition:all .15s;backdrop-filter:blur(4px)}}
 .graph-btn:hover{{border-color:var(--accent);color:var(--accent)}}
-.graph-legend{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}}
-.legend-item{{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text3)}}
-.legend-dot{{width:9px;height:9px;border-radius:50%;flex-shrink:0}}
-.node-tooltip{{position:absolute;background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;font-size:11px;pointer-events:none;z-index:200;max-width:260px;box-shadow:0 8px 24px rgba(0,0,0,.5);display:none}}
-.tt-kind{{font-size:9px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:3px;font-weight:600}}
-.tt-label{{font-weight:600;color:var(--text);margin-bottom:5px;word-break:break-all}}
-.tt-meta{{font-size:10px;color:var(--text2)}}
-.graph-detail-panel{{position:absolute;right:0;top:0;bottom:0;width:270px;background:var(--surface);border-left:1px solid var(--border);padding:14px;overflow-y:auto;transform:translateX(100%);transition:transform .25s;z-index:50}}
+.graph-btn.active{{border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,.12)}}
+.graph-focus-bar{{position:absolute;bottom:0;left:0;right:0;background:rgba(10,13,19,.92);border-top:1px solid var(--border);padding:7px 14px;display:none;align-items:center;gap:10px;z-index:20;backdrop-filter:blur(6px)}}
+.graph-focus-bar.visible{{display:flex}}
+.gfb-label{{font-size:11px;color:var(--text2)}}
+.gfb-node{{font-size:12px;font-weight:600;color:var(--text)}}
+.gfb-count{{font-size:11px;color:var(--text3)}}
+.gfb-clear{{margin-left:auto;background:none;border:1px solid var(--border);color:var(--text3);border-radius:var(--radius-sm);padding:3px 10px;cursor:pointer;font-size:11px;transition:all .15s}}
+.gfb-clear:hover{{border-color:var(--accent);color:var(--accent)}}
+.graph-legend{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}}
+.legend-item{{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text3);padding:3px 8px;border-radius:20px;border:1px solid transparent;cursor:pointer;transition:all .15s;user-select:none}}
+.legend-item:hover{{border-color:var(--border);color:var(--text2)}}
+.legend-item.filtered{{border-color:var(--accent);color:var(--text);background:rgba(99,102,241,.08)}}
+.legend-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
+.node-tooltip{{position:absolute;background:#0f1420;border:1px solid var(--border2);border-radius:var(--radius);padding:10px 13px;font-size:11px;pointer-events:none;z-index:200;max-width:270px;box-shadow:0 12px 32px rgba(0,0,0,.7);display:none}}
+.tt-kind{{font-size:9px;text-transform:uppercase;letter-spacing:0.7px;color:var(--text3);margin-bottom:3px;font-weight:600}}
+.tt-label{{font-weight:600;color:var(--text);margin-bottom:5px;word-break:break-all;line-height:1.4}}
+.tt-meta{{font-size:10px;color:var(--text2);line-height:1.6}}
+.tt-hint{{font-size:9px;color:var(--text3);margin-top:5px;border-top:1px solid var(--border);padding-top:5px}}
+.graph-detail-panel{{position:absolute;right:0;top:0;bottom:0;width:280px;background:#0c0f18;border-left:1px solid var(--border);padding:14px;overflow-y:auto;transform:translateX(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);z-index:50}}
 .graph-detail-panel.open{{transform:translateX(0)}}
-.detail-close{{position:absolute;top:8px;right:8px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;padding:4px}}
-.detail-kind{{font-size:10px;text-transform:uppercase;letter-spacing:0.7px;color:var(--text3);font-weight:600;margin-bottom:5px}}
-.detail-label{{font-size:13px;font-weight:600;margin-bottom:12px;word-break:break-all}}
-.detail-sec-title{{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);font-weight:600;margin:10px 0 5px;border-bottom:1px solid var(--border);padding-bottom:3px}}
-.detail-row{{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;font-size:11px}}
+.detail-close{{position:absolute;top:9px;right:9px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;padding:4px;line-height:1}}
+.detail-kind{{font-size:9px;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);font-weight:700;margin-bottom:4px}}
+.detail-label{{font-size:13px;font-weight:600;margin-bottom:12px;word-break:break-all;line-height:1.4}}
+.detail-sec-title{{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);font-weight:700;margin:12px 0 6px;border-bottom:1px solid var(--border);padding-bottom:3px}}
+.detail-row{{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11px}}
 .detail-key{{color:var(--text3);flex-shrink:0}}
 .detail-val{{color:var(--text);text-align:right;word-break:break-all}}
-.detail-chip{{display:inline-block;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600}}
+.detail-chip{{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600}}
 .neighbor-list{{display:flex;flex-direction:column;gap:3px}}
-.neighbor-item{{font-size:11px;color:var(--text2);padding:4px 7px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.neighbor-item:hover{{color:var(--accent)}}
+.neighbor-item{{font-size:11px;color:var(--text2);padding:5px 8px;background:var(--bg);border-radius:3px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid transparent;transition:all .12s}}
+.neighbor-item:hover{{color:var(--accent);border-color:var(--border)}}
+.edge-pill{{display:inline-block;font-size:9px;color:var(--text3);background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1px 6px;margin-right:4px;flex-shrink:0}}
+.detail-focus-btn{{width:100%;margin-top:12px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);color:#818cf8;border-radius:var(--radius-sm);padding:7px;cursor:pointer;font-size:11px;font-weight:600;transition:all .15s}}
+.detail-focus-btn:hover{{background:rgba(99,102,241,.2);border-color:#818cf8}}
 /* ── State Intelligence ── */
 .si-stats{{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}}
 .si-stat{{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;min-width:80px;text-align:center}}
@@ -1271,20 +1294,31 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="section-title">Attack Surface Graph
         <span class="count">{g_stats.get("PAGE",0)} pages · {g_stats.get("JS",0)+g_stats.get("CHUNK",0)} assets · {g_stats.get("ENDPOINT",0)} endpoints · {g_stats.get("SECRET",0)} secrets</span>
       </div>
-      <div class="graph-legend">
-        {''.join(f'<div class="legend-item"><div class="legend-dot" style="background:{c}"></div>{k.title()}</div>' for k,c in NODE_COLOR.items())}
+      <div class="graph-toolbar">
+        <div class="graph-legend" id="graph-legend" style="margin:0;flex:1">
+          {_legend_html}
+        </div>
+        <button class="graph-btn" id="btn-cluster" onclick="toggleCluster(this)" title="Cluster by type" style="width:auto;padding:0 10px;font-size:10px;letter-spacing:.4px;font-weight:600">GROUP</button>
+        <button class="graph-btn" id="btn-labels" onclick="toggleLabels(this)" title="Toggle edge labels" style="width:auto;padding:0 10px;font-size:10px;letter-spacing:.4px;font-weight:600">LABELS</button>
       </div>
       <div id="graph-container">
         <svg id="graph-svg"></svg>
         <div class="graph-controls">
           <button class="graph-btn" onclick="gZoomIn()" title="Zoom in">+</button>
           <button class="graph-btn" onclick="gZoomOut()" title="Zoom out">−</button>
-          <button class="graph-btn" onclick="gReset()" title="Reset">⊙</button>
+          <button class="graph-btn" onclick="gFit()" title="Fit to view">⊙</button>
+        </div>
+        <div class="graph-focus-bar" id="focus-bar">
+          <span class="gfb-label">Focused on</span>
+          <span class="gfb-node" id="fbar-name"></span>
+          <span class="gfb-count" id="fbar-count"></span>
+          <button class="gfb-clear" onclick="clearFocus()">✕ Clear focus</button>
         </div>
         <div class="node-tooltip" id="node-tooltip">
           <div class="tt-kind" id="tt-kind"></div>
           <div class="tt-label" id="tt-label"></div>
           <div class="tt-meta" id="tt-meta"></div>
+          <div class="tt-hint">Click to inspect · Double-click to focus</div>
         </div>
         <div class="graph-detail-panel" id="detail-panel">
           <button class="detail-close" onclick="closeDetail()">✕</button>
@@ -1418,201 +1452,394 @@ function filterF(sev, btn) {{
   }});
 }}
 
-// ── Graph ─────────────────────────────────────────────────────────────────────
-let gInit = false, gSvg, gZoom, gG;
+// ── Graph engine ──────────────────────────────────────────────────────────────
+let gInit=false, gSvg, gZoom, gG, gSim, gNodes, gEdges, gById;
+let gFocusId=null, gActiveKinds=new Set(), gShowLabels=false, gCluster=false;
+
+// Node radii by type
+const R = {{PAGE:14,JS:12,ENDPOINT:11,SECRET:12,WORKER:10,PARAMETER:6,HOST:11,CHUNK:9,SOURCEMAP:8,CONFIG:8}};
+// Icons inside nodes
+const ICONS = {{PAGE:'PG',JS:'JS',ENDPOINT:'EP',SECRET:'SK',WORKER:'WK',PARAMETER:'PM',HOST:'H',CHUNK:'CH',SOURCEMAP:'SM',CONFIG:'CF'}};
+// Cluster center positions by type (as fraction of W/H)
+const CLUSTER_POS = {{
+  PAGE:[.5,.15], JS:[.25,.35], CHUNK:[.35,.55], SOURCEMAP:[.15,.7],
+  ENDPOINT:[.65,.35], SECRET:[.8,.2], WORKER:[.5,.75],
+  PARAMETER:[.75,.65], HOST:[.15,.35], CONFIG:[.85,.6]
+}};
 
 function initGraph() {{
   if (gInit || !GRAPH_DATA) return;
   gInit = true;
-  const box  = document.getElementById('graph-container');
-  const W    = box.clientWidth  || 900;
-  const H    = box.clientHeight || 600;
-  const pad  = 40;
+  _buildGraph();
+}}
 
-  const nodes = (GRAPH_DATA.nodes || []).map(n => ({{...n}}));
-  const edges = (GRAPH_DATA.edges || []).map(e => ({{...e}}));
-  if (!nodes.length) return;
+function _buildGraph() {{
+  const box = document.getElementById('graph-container');
+  const W   = box.clientWidth  || 960;
+  const H   = box.clientHeight || 640;
+  const pad = 50;
 
-  const byId = {{}};
-  nodes.forEach(n => byId[n.id] = n);
+  gNodes = (GRAPH_DATA.nodes || []).map(n => ({{...n}}));
+  gEdges = (GRAPH_DATA.edges || []).map(e => ({{...e}}));
+  if (!gNodes.length) return;
+
+  gById = {{}};
+  gNodes.forEach(n => gById[n.id] = n);
 
   const svg = d3.select('#graph-svg');
   svg.selectAll('*').remove();
 
-  // Arrow markers
+  // Gradient defs + arrow markers per type
   const defs = svg.append('defs');
   Object.entries(NC).forEach(([k, c]) => {{
     defs.append('marker').attr('id','arr-'+k)
-      .attr('viewBox','0 -4 8 8').attr('refX',20).attr('refY',0)
+      .attr('viewBox','0 -4 8 8').attr('refX',22).attr('refY',0)
       .attr('markerWidth',5).attr('markerHeight',5).attr('orient','auto')
-      .append('path').attr('d','M0,-4L8,0L0,4').attr('fill',c).attr('opacity',.6);
+      .append('path').attr('d','M0,-4L8,0L0,4').attr('fill',c).attr('opacity',.7);
   }});
 
   const g = svg.append('g');
   gG    = g;
-  gZoom = d3.zoom().scaleExtent([.1, 6]).on('zoom', e => g.attr('transform', e.transform));
+  gZoom = d3.zoom().scaleExtent([.05, 8]).on('zoom', e => g.attr('transform', e.transform));
   svg.call(gZoom);
 
-  // Node radii — kept compact
-  const R = {{PAGE:13,JS:11,ENDPOINT:10,SECRET:11,WORKER:9,PARAMETER:5,HOST:10,CHUNK:8,SOURCEMAP:7,CONFIG:7}};
+  // Link distance / strength by relationship type
+  const LD = {{LOADS:80,IMPORTS:70,CALLS:90,EXPOSES:75,ACCEPTS:55,OBSERVED_ON:95,RELATED_TO:85,HOSTS:100,RECOVERS:70,REFERENCES:80}};
 
-  // Link distances — tight so the graph stays compact
-  const LD = {{LOADS:55,IMPORTS:45,CALLS:65,EXPOSES:55,ACCEPTS:35,OBSERVED_ON:70,RELATED_TO:60,HOSTS:75,RECOVERS:50,REFERENCES:60}};
+  gSim = d3.forceSimulation(gNodes)
+    .force('link',   d3.forceLink(gEdges).id(d=>d.id).distance(e=>LD[e.kind]||80).strength(.55))
+    .force('charge', d3.forceManyBody().strength(-420).distanceMax(350).distanceMin(20))
+    .force('center', d3.forceCenter(W/2, H/2).strength(.05))
+    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+14).strength(.9))
+    .force('boundX', d3.forceX(W/2).strength(.03))
+    .force('boundY', d3.forceY(H/2).strength(.03))
+    .alphaDecay(.018).velocityDecay(.4);
 
-  const sim = d3.forceSimulation(nodes)
-    .force('link',   d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||55).strength(.7))
-    .force('charge', d3.forceManyBody().strength(-280).distanceMax(250))
-    .force('center', d3.forceCenter(W/2, H/2).strength(.08))
-    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+5).strength(.85))
-    .force('boundX', d3.forceX(W/2).strength(.06))
-    .force('boundY', d3.forceY(H/2).strength(.06))
-    .alphaDecay(.02);
+  // ── Link layer
+  const linkG = g.append('g').attr('class','link-layer');
+  let link = linkG.selectAll('line').data(gEdges).join('line')
+    .attr('class','glink')
+    .attr('stroke', e => {{ const s=gById[_sid(e)]; return s?(NC[s.kind]||'#334155')+'99':'#334155'; }})
+    .attr('stroke-width', 1.2)
+    .attr('stroke-opacity', .5)
+    .attr('marker-end', e => {{ const s=gById[_sid(e)]; return s?'url(#arr-'+s.kind+')':''; }});
 
-  // Links
-  const link = g.append('g').selectAll('line').data(edges).join('line')
-    .attr('stroke', e => {{
-      const s = byId[typeof e.source==='object'?e.source.id:e.source];
-      return s ? (NC[s.kind]||'#475569') : '#475569';
-    }})
-    .attr('stroke-opacity',.35).attr('stroke-width',1.1)
-    .attr('marker-end', e => {{
-      const s = byId[typeof e.source==='object'?e.source.id:e.source];
-      return s ? 'url(#arr-'+s.kind+')' : '';
+  // ── Edge label layer (hidden by default)
+  const eLabelG = g.append('g').attr('class','elabel-layer').style('display','none');
+  let eLabel = eLabelG.selectAll('text').data(gEdges).join('text')
+    .attr('font-size',8).attr('fill','#4b5563')
+    .attr('text-anchor','middle').attr('pointer-events','none')
+    .attr('dy',-4)
+    .text(e=>e.kind.toLowerCase().replace(/_/g,' '));
+
+  // ── Node layer
+  const nodeG = g.append('g').attr('class','node-layer');
+  let node = _buildNodes(nodeG, gNodes);
+
+  // ── Tick
+  function clamp(v,lo,hi){{return Math.max(lo,Math.min(hi,v));}}
+  gSim.on('tick', ()=>{{
+    gNodes.forEach(d=>{{
+      const r=R[d.kind]||9;
+      d.x=clamp(d.x,pad+r,W-pad-r);
+      d.y=clamp(d.y,pad+r,H-pad-r);
     }});
-
-  // Edge labels (only the most useful ones)
-  const SHOW = new Set(['CALLS','EXPOSES','RELATED_TO']);
-  const eLabel = g.append('g').selectAll('text')
-    .data(edges.filter(e=>SHOW.has(e.kind))).join('text')
-    .attr('font-size',8).attr('fill','#4a5568').attr('text-anchor','middle').attr('dy',-3)
-    .text(e => e.kind.toLowerCase().replace(/_/g,' '));
-
-  // Node groups
-  const node = g.append('g').selectAll('g').data(nodes).join('g')
-    .attr('cursor','pointer')
-    .call(d3.drag()
-      .on('start',(ev,d)=>{{ if(!ev.active) sim.alphaTarget(.3).restart(); d.fx=d.x;d.fy=d.y; }})
-      .on('drag', (ev,d)=>{{ d.fx=ev.x; d.fy=ev.y; }})
-      .on('end',  (ev,d)=>{{ if(!ev.active) sim.alphaTarget(0); d.fx=d.x; d.fy=d.y; }}))
-    .on('mouseenter', showTT).on('mousemove', moveTT).on('mouseleave', hideTT)
-    .on('click', showDetail);
-
-  node.append('circle')
-    .attr('r', d=>R[d.kind]||9)
-    .attr('fill', d=>(NC[d.kind]||'#475569')+'28')
-    .attr('stroke', d=>NC[d.kind]||'#475569')
-    .attr('stroke-width',1.5);
-
-  const ICONS={{PAGE:'P',JS:'JS',ENDPOINT:'EP',SECRET:'S',WORKER:'W',PARAMETER:'p',HOST:'H',CHUNK:'C',SOURCEMAP:'M',CONFIG:'Cf'}};
-  node.append('text')
-    .attr('text-anchor','middle').attr('dominant-baseline','central')
-    .attr('font-size', d=>d.kind==='JS'?6:7).attr('font-weight','700')
-    .attr('fill', d=>NC[d.kind]||'#475569')
-    .attr('pointer-events','none')
-    .text(d=>ICONS[d.kind]||'?');
-
-  const LABELED = new Set(['SECRET','ENDPOINT']);
-  node.filter(d=>LABELED.has(d.kind)).append('text')
-    .attr('text-anchor','middle')
-    .attr('y', d=>(R[d.kind]||9)+10)
-    .attr('font-size',8).attr('fill','#8b949e')
-    .attr('pointer-events','none')
-    .text(d=>d.label.length>22?d.label.slice(0,22)+'…':d.label);
-
-  // Clamp positions to viewport on every tick
-  function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
-
-  sim.on('tick', ()=>{{
-    nodes.forEach(d=>{{
-      const r = R[d.kind]||9;
-      d.x = clamp(d.x, pad+r, W-pad-r);
-      d.y = clamp(d.y, pad+r, H-pad-r);
-    }});
-    link
-      .attr('x1',e=>e.source.x).attr('y1',e=>e.source.y)
-      .attr('x2',e=>e.target.x).attr('y2',e=>e.target.y);
-    eLabel
-      .attr('x',e=>(e.source.x+e.target.x)/2)
-      .attr('y',e=>(e.source.y+e.target.y)/2);
+    link.attr('x1',e=>e.source.x).attr('y1',e=>e.source.y)
+        .attr('x2',e=>_tx(e)).attr('y2',e=>_ty(e));
+    eLabel.attr('x',e=>(e.source.x+e.target.x)/2).attr('y',e=>(e.source.y+e.target.y)/2);
     node.attr('transform',d=>`translate(${{d.x}},${{d.y}})`);
   }});
 
-  // Auto-fit once the simulation settles
-  sim.on('end', ()=>{{
-    const xs = nodes.map(d=>d.x), ys = nodes.map(d=>d.y);
-    const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
-    const gW=x1-x0||1, gH=y1-y0||1;
-    const scale = Math.min(.92, Math.min((W-2*pad)/gW, (H-2*pad)/gH));
-    const tx = W/2 - scale*(x0+x1)/2, ty = H/2 - scale*(y0+y1)/2;
-    svg.transition().duration(600)
-       .call(gZoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
-  }});
+  // ── Auto-fit after settle
+  gSim.on('end', ()=>_autoFit(W,H,pad));
 
   gSvg = svg;
+  // expose for toggle functions
+  window._glink = ()=>link;
+  window._gelabel = ()=>eLabel;
+  window._gnode = ()=>node;
+  window._glinkG = ()=>linkG;
+  window._eLabelG = ()=>eLabelG;
+  window._nodeG = ()=>nodeG;
+  window._W = W; window._H = H;
 }}
 
+function _sid(e){{ return typeof e.source==='object'?e.source.id:e.source; }}
+function _tid(e){{ return typeof e.target==='object'?e.target.id:e.target; }}
+function _tx(e){{
+  if(typeof e.target!=='object') return 0;
+  const dx=e.target.x-e.source.x, dy=e.target.y-e.source.y;
+  const d=Math.sqrt(dx*dx+dy*dy)||1;
+  const r=(R[e.target.kind]||9)+3;
+  return e.target.x - dx/d*r;
+}}
+function _ty(e){{
+  if(typeof e.target!=='object') return 0;
+  const dx=e.target.x-e.source.x, dy=e.target.y-e.source.y;
+  const d=Math.sqrt(dx*dx+dy*dy)||1;
+  const r=(R[e.target.kind]||9)+3;
+  return e.target.y - dy/d*r;
+}}
+
+function _buildNodes(container, data) {{
+  const node = container.selectAll('g').data(data, d=>d.id).join(
+    enter => {{
+      const ng = enter.append('g').attr('cursor','pointer')
+        .call(d3.drag()
+          .on('start',(ev,d)=>{{ if(!ev.active) gSim.alphaTarget(.2).restart(); d.fx=d.x;d.fy=d.y; }})
+          .on('drag', (ev,d)=>{{ d.fx=ev.x; d.fy=ev.y; }})
+          .on('end',  (ev,d)=>{{ if(!ev.active) gSim.alphaTarget(0); d.fx=d.x; d.fy=d.y; }}))
+        .on('mouseenter', showTT).on('mousemove', moveTT).on('mouseleave', hideTT)
+        .on('click', showDetail)
+        .on('dblclick', (ev,d)=>{{ ev.stopPropagation(); focusNode(d); }});
+
+      // Glow circle
+      ng.append('circle').attr('class','node-glow')
+        .attr('r', d=>(R[d.kind]||9)+6)
+        .attr('fill', d=>NC[d.kind]||'#475569')
+        .attr('fill-opacity',.06)
+        .attr('stroke','none');
+
+      // Main circle
+      ng.append('circle').attr('class','node-circle')
+        .attr('r', d=>R[d.kind]||9)
+        .attr('fill', d=>(NC[d.kind]||'#475569')+'22')
+        .attr('stroke', d=>NC[d.kind]||'#475569')
+        .attr('stroke-width', 1.8);
+
+      // Icon text inside
+      ng.append('text').attr('class','node-icon')
+        .attr('text-anchor','middle').attr('dominant-baseline','central')
+        .attr('font-size', d=>d.kind==='ENDPOINT'?5.5:6.5)
+        .attr('font-weight','800').attr('letter-spacing','-.3')
+        .attr('fill', d=>NC[d.kind]||'#475569')
+        .attr('pointer-events','none')
+        .text(d=>ICONS[d.kind]||'?');
+
+      // Node label below (all nodes get short label)
+      ng.append('text').attr('class','node-label')
+        .attr('text-anchor','middle')
+        .attr('y', d=>(R[d.kind]||9)+11)
+        .attr('font-size',8.5).attr('fill','#6b7280')
+        .attr('pointer-events','none')
+        .text(d=>d.label.length>20?d.label.slice(0,20)+'…':d.label);
+
+      return ng;
+    }}
+  );
+  return node;
+}}
+
+function _autoFit(W,H,pad) {{
+  if(!gNodes.length) return;
+  const xs=gNodes.map(d=>d.x), ys=gNodes.map(d=>d.y);
+  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  const gW=x1-x0||1, gH=y1-y0||1;
+  const scale=Math.min(.88,Math.min((W-2*pad)/gW,(H-2*pad)/gH));
+  const tx=W/2-scale*(x0+x1)/2, ty=H/2-scale*(y0+y1)/2;
+  gSvg.transition().duration(700)
+    .call(gZoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
+}}
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
 function showTT(ev,d) {{
-  const tt = document.getElementById('node-tooltip');
-  document.getElementById('tt-kind').textContent = d.kind;
-  document.getElementById('tt-label').textContent = d.label;
-  const m = [];
-  if(d.data.url)      m.push(d.data.url);
-  if(d.data.method)   m.push('Method: '+d.data.method);
-  if(d.data.severity) m.push('Severity: '+d.data.severity);
-  if(d.data.source_type) m.push('Source: '+d.data.source_type);
-  document.getElementById('tt-meta').textContent = m.join(' · ');
-  tt.style.display = 'block';
+  hideTT();
+  const tt=document.getElementById('node-tooltip');
+  const c=NC[d.kind]||'#8b949e';
+  document.getElementById('tt-kind').innerHTML=`<span style="color:${{c}}">${{d.kind}}</span>`;
+  document.getElementById('tt-label').textContent=d.label;
+  const m=[];
+  if(d.data.url)        m.push(d.data.url);
+  if(d.data.method)     m.push('Method: '+d.data.method);
+  if(d.data.severity)   m.push('Severity: '+d.data.severity);
+  if(d.data.size_bytes) m.push('Size: '+(d.data.size_bytes/1024).toFixed(1)+' KB');
+  // connection count
+  const deg=(gEdges.filter(e=>_sid(e)===d.id||_tid(e)===d.id)).length;
+  if(deg) m.push(deg+' connection'+(deg>1?'s':''));
+  document.getElementById('tt-meta').textContent=m.join(' · ');
+  tt.style.display='block';
   moveTT(ev);
 }}
 function moveTT(ev) {{
-  const tt = document.getElementById('node-tooltip');
-  const b  = document.getElementById('graph-container').getBoundingClientRect();
-  let x = ev.clientX-b.left+12, y = ev.clientY-b.top+12;
-  if(x+270>b.width)  x = ev.clientX-b.left-270;
-  if(y+90>b.height)  y = ev.clientY-b.top-90;
+  const tt=document.getElementById('node-tooltip');
+  const b=document.getElementById('graph-container').getBoundingClientRect();
+  let x=ev.clientX-b.left+14, y=ev.clientY-b.top+14;
+  if(x+280>b.width)  x=ev.clientX-b.left-280;
+  if(y+120>b.height) y=ev.clientY-b.top-120;
   tt.style.left=x+'px'; tt.style.top=y+'px';
 }}
 function hideTT() {{ document.getElementById('node-tooltip').style.display='none'; }}
 
+// ── Detail panel ─────────────────────────────────────────────────────────────
 function showDetail(ev,d) {{
   ev.stopPropagation();
-  const panel = document.getElementById('detail-panel');
-  const c = NC[d.kind]||'#8b949e';
-  document.getElementById('dp-kind').textContent = d.kind;
-  document.getElementById('dp-kind').style.color = c;
-  document.getElementById('dp-label').textContent = d.label;
-  const data = d.data||{{}};
-  const rows = [];
+  const panel=document.getElementById('detail-panel');
+  const c=NC[d.kind]||'#8b949e';
+  document.getElementById('dp-kind').textContent=d.kind;
+  document.getElementById('dp-kind').style.color=c;
+  document.getElementById('dp-label').textContent=d.label;
+  const data=d.data||{{}};
+  const rows=[];
   if(data.url)           rows.push(['URL',`<code style="font-size:10px;word-break:break-all">${{data.url}}</code>`]);
   if(data.method)        rows.push(['Method',`<span class="detail-chip" style="background:${{c}}22;color:${{c}}">${{data.method}}</span>`]);
   if(data.category)      rows.push(['Category',data.category]);
   if(data.severity)      rows.push(['Severity',data.severity]);
   if(data.source_type)   rows.push(['Source',data.source_type]);
-  if(d.confidence<1)     rows.push(['Confidence',`${{(d.confidence*100).toFixed(0)}}%`]);
+  if(d.confidence!=null&&d.confidence<1) rows.push(['Confidence',`${{(d.confidence*100).toFixed(0)}}%`]);
   if(data.auth_context)  rows.push(['Auth',data.auth_context]);
   if(data.size_bytes)    rows.push(['Size',`${{(data.size_bytes/1024).toFixed(1)}} KB`]);
-  if(data.redacted_value) rows.push(['Value',`<code style="color:#3fb950">${{data.redacted_value}}</code>`]);
+  if(data.technology)    rows.push(['Tech',data.technology]);
+  if(data.redacted_value)rows.push(['Value',`<code style="color:#3fb950">${{data.redacted_value}}</code>`]);
   if(data.line_number)   rows.push(['Line',data.line_number]);
-  const rHtml = rows.map(([k,v])=>`<div class="detail-row"><span class="detail-key">${{k}}</span><span class="detail-val">${{v}}</span></div>`).join('');
-  const allEdges = GRAPH_DATA.edges||[];
-  const byId = {{}};
-  (GRAPH_DATA.nodes||[]).forEach(n=>byId[n.id]=n);
-  const out = allEdges.filter(e=>e.source===d.id);
-  const inn = allEdges.filter(e=>e.target===d.id);
-  const nItems = [...out.slice(0,6).map(e=>{{ const n=byId[e.target]; return n?`<div class="neighbor-item" title="${{e.kind}}">→ ${{n.label}}</div>`:''; }}),
-                  ...inn.slice(0,4).map(e=>{{ const n=byId[e.source]; return n?`<div class="neighbor-item" title="${{e.kind}}">← ${{n.label}}</div>`:''; }})]
-    .filter(Boolean);
-  document.getElementById('dp-body').innerHTML = `
+  const rHtml=rows.map(([k,v])=>`<div class="detail-row"><span class="detail-key">${{k}}</span><span class="detail-val">${{v}}</span></div>`).join('');
+
+  // Connections
+  const out=gEdges.filter(e=>_sid(e)===d.id);
+  const inn=gEdges.filter(e=>_tid(e)===d.id);
+  const nItems=[
+    ...out.slice(0,8).map(e=>{{
+      const t=gById[_tid(e)];
+      return t?`<div class="neighbor-item" onclick="focusNode(gById['${{t.id}}'])">
+        <span class="edge-pill">${{e.kind.toLowerCase()}}</span>→ ${{t.label}}</div>`:'';
+    }}),
+    ...inn.slice(0,6).map(e=>{{
+      const s=gById[_sid(e)];
+      return s?`<div class="neighbor-item" onclick="focusNode(gById['${{s.id}}'])">
+        <span class="edge-pill">${{e.kind.toLowerCase()}}</span>← ${{s.label}}</div>`:'';
+    }})
+  ].filter(Boolean);
+
+  const totalConn=out.length+inn.length;
+  document.getElementById('dp-body').innerHTML=`
     <div class="detail-sec-title">Properties</div>
-    ${{rHtml||'<span style="color:var(--text3);font-size:11px">No data</span>'}}
-    ${{nItems.length?`<div class="detail-sec-title">Connected (${{out.length+inn.length}})</div><div class="neighbor-list">${{nItems.join('')}}</div>`:''}}`;
+    ${{rHtml||'<span style="color:var(--text3);font-size:11px">No properties</span>'}}
+    ${{nItems.length?`<div class="detail-sec-title">Connections (${{totalConn}})</div><div class="neighbor-list">${{nItems.join('')}}</div>`:''}}
+    <button class="detail-focus-btn" onclick="focusNode(gById['${{d.id}}'])">Focus on this node →</button>`;
   panel.classList.add('open');
+  _highlightNode(d.id);
 }}
-function closeDetail() {{ document.getElementById('detail-panel').classList.remove('open'); }}
-function gZoomIn()  {{ if(gSvg&&gZoom) gSvg.transition().call(gZoom.scaleBy,1.4); }}
-function gZoomOut() {{ if(gSvg&&gZoom) gSvg.transition().call(gZoom.scaleBy,.7); }}
-function gReset()   {{ if(gSvg&&gZoom) gSvg.transition().call(gZoom.transform,d3.zoomIdentity); }}
-document.getElementById('graph-svg').addEventListener('click',()=>document.getElementById('detail-panel').classList.remove('open'));
+function closeDetail() {{
+  document.getElementById('detail-panel').classList.remove('open');
+  _clearHighlight();
+}}
+
+function _highlightNode(id) {{
+  if(!gG) return;
+  const connIds=new Set([id]);
+  gEdges.forEach(e=>{{ if(_sid(e)===id)connIds.add(_tid(e)); if(_tid(e)===id)connIds.add(_sid(e)); }});
+  gG.selectAll('.node-layer g').attr('opacity',d=>connIds.has(d.id)?1:.25);
+  gG.selectAll('.link-layer line').attr('opacity',e=>(_sid(e)===id||_tid(e)===id)?.9:.08);
+}}
+function _clearHighlight() {{
+  if(!gG) return;
+  gG.selectAll('.node-layer g').attr('opacity',1);
+  gG.selectAll('.link-layer line').attr('opacity',.5);
+}}
+
+// ── Focus mode: isolate a node and its direct neighbours ───────────────────
+function focusNode(d) {{
+  if(!d) return;
+  gFocusId=d.id;
+  const connIds=new Set([d.id]);
+  const connEdges=[];
+  gEdges.forEach(e=>{{
+    const s=_sid(e),t=_tid(e);
+    if(s===d.id||t===d.id){{ connIds.add(s);connIds.add(t);connEdges.push(e); }}
+  }});
+
+  // Dim non-connected
+  gG.selectAll('.node-layer g')
+    .attr('opacity',n=>connIds.has(n.id)?1:.08)
+    .select('.node-circle')
+    .attr('stroke-width',n=>n.id===d.id?3:1.8);
+  gG.selectAll('.link-layer line')
+    .attr('opacity',e=>(connEdges.includes(e))?.85:.04)
+    .attr('stroke-width',e=>(connEdges.includes(e))?1.8:1);
+
+  // Focus bar
+  const bar=document.getElementById('focus-bar');
+  document.getElementById('fbar-name').textContent=d.label;
+  document.getElementById('fbar-count').textContent=`${{connIds.size-1}} connected node${{connIds.size-1!==1?'s':''}}`;
+  bar.classList.add('visible');
+  hideTT();
+}}
+
+function clearFocus() {{
+  gFocusId=null;
+  _clearHighlight();
+  document.getElementById('focus-bar').classList.remove('visible');
+  gG.selectAll('.node-circle').attr('stroke-width',1.8);
+  gG.selectAll('.link-layer line').attr('stroke-width',1.2);
+}}
+
+// ── Toggle: edge labels ────────────────────────────────────────────────────
+function toggleLabels(btn) {{
+  gShowLabels=!gShowLabels;
+  btn.classList.toggle('active',gShowLabels);
+  if(window._eLabelG) window._eLabelG().style('display',gShowLabels?null:'none');
+}}
+
+// ── Toggle: cluster by type ────────────────────────────────────────────────
+function toggleCluster(btn) {{
+  gCluster=!gCluster;
+  btn.classList.toggle('active',gCluster);
+  if(!gSim) return;
+  const W=window._W||960, H=window._H||640;
+  if(gCluster) {{
+    // Add per-type centering forces
+    Object.entries(CLUSTER_POS).forEach(([kind,[fx,fy]])=>{{
+      gSim.force('cx-'+kind, d3.forceX(fx*W).strength(d=>d.kind===kind?.18:0));
+      gSim.force('cy-'+kind, d3.forceY(fy*H).strength(d=>d.kind===kind?.18:0));
+    }});
+  }} else {{
+    // Remove clustering forces
+    Object.keys(CLUSTER_POS).forEach(kind=>{{
+      gSim.force('cx-'+kind,null).force('cy-'+kind,null);
+    }});
+  }}
+  gSim.alpha(.5).restart();
+}}
+
+// ── Toggle: filter by node kind (legend click) ─────────────────────────────
+function toggleKindFilter(el,kind) {{
+  if(gActiveKinds.has(kind)) {{ gActiveKinds.delete(kind); el.classList.remove('filtered'); }}
+  else {{ gActiveKinds.add(kind); el.classList.add('filtered'); }}
+  applyKindFilter();
+}}
+function applyKindFilter() {{
+  if(!gG) return;
+  const active=gActiveKinds;
+  if(active.size===0) {{
+    // No filter — show all
+    gG.selectAll('.node-layer g').attr('opacity',1);
+    gG.selectAll('.link-layer line').attr('opacity',.5);
+    return;
+  }}
+  // Show only selected kinds and their connecting edges
+  gG.selectAll('.node-layer g').attr('opacity',d=>active.has(d.kind)?1:.07);
+  gG.selectAll('.link-layer line').attr('opacity',e=>{{
+    const s=gById[_sid(e)], t=gById[_tid(e)];
+    return (s&&active.has(s.kind))||(t&&active.has(t.kind))?.6:.04;
+  }});
+}}
+
+// ── Zoom controls ─────────────────────────────────────────────────────────
+function gZoomIn()  {{ if(gSvg&&gZoom) gSvg.transition().duration(250).call(gZoom.scaleBy,1.5); }}
+function gZoomOut() {{ if(gSvg&&gZoom) gSvg.transition().duration(250).call(gZoom.scaleBy,.67); }}
+function gFit() {{
+  if(!gSvg||!gNodes||!gNodes.length) return;
+  const W=window._W||960,H=window._H||640,pad=50;
+  _autoFit(W,H,pad);
+}}
+
+// Close detail on SVG background click
+document.getElementById('graph-svg').addEventListener('click',e=>{{
+  if(e.target.tagName==='svg'||e.target.tagName==='g') {{
+    closeDetail();
+    if(gFocusId) clearFocus();
+    if(gActiveKinds.size) {{ gActiveKinds.clear(); document.querySelectorAll('.legend-item').forEach(el=>el.classList.remove('filtered')); applyKindFilter(); }}
+  }}
+}});
 </script>
 </body>
 </html>"""
