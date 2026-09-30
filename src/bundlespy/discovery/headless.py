@@ -15,6 +15,16 @@ Optimization principles:
 - Browser drift detection + auto-recovery
 - Session state verification with mid-crawl loss detection
 - Phase timing metrics
+- Recorded auth flow replay (multi-step SSO/MFA)
+- Auto-login fallback when recorded flow fails
+- Typed error classification for click failures
+- Hooks system for lifecycle callbacks
+- Terminal visible assertion in auth verification
+- ScrollIntoView before all clicks
+- loggedIn state tracking
+- CrawlGraph DOT file export
+- PageLoadStrategy passthrough
+- Sub-page (popup/new-tab) detection
 """
 
 import re
@@ -133,6 +143,45 @@ class CrawlGraph:
                 "load_urls":   sum(1 for e in self._edges if e.action_type == ActionType.LOAD_URL),
             }
 
+    def draw_dot(self, path: str) -> None:
+        """Export the crawl graph as a Graphviz .dot file.
+        Nodes = page states (labeled with truncated URL + state_id).
+        Edges = typed crawl actions (LOAD_URL / FILL_FORM / LEFT_CLICK).
+        Called automatically when enable_diagnostics=True at end of run().
+        (Enhancement 8 — CrawlGraph DOT file export)"""
+        with self._lock:
+            lines = [
+                "digraph CrawlGraph {",
+                '  rankdir=LR;',
+                '  node [shape=box fontname="monospace" fontsize=10];',
+                '  edge [fontname="monospace" fontsize=9];',
+            ]
+            for sid, state in self._nodes.items():
+                # Truncate URL for readability; escape quotes/backslashes
+                short_url = state.url[:60].replace('"', '\\"').replace("\\", "\\\\")
+                label = f"{short_url}\\n[{sid[:8]}]"
+                lines.append(f'  "{sid}" [label="{label}"];')
+            for edge in self._edges:
+                src = edge.origin_id[:16] if edge.origin_id else "start"
+                dst = edge.key()
+                lbl = edge.action_type.value
+                if edge.selector:
+                    # include first 30 chars of selector for readability
+                    sel = edge.selector[:30].replace('"', '\\"')
+                    lbl = f"{lbl}\\n{sel}"
+                lines.append(f'  "{src}" -> "{dst}" [label="{lbl}"];')
+            lines.append("}")
+        dot_content = "\n".join(lines)
+        try:
+            import os as _os
+            _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(dot_content)
+            logger.info("CrawlGraph DOT exported: %s (%d nodes, %d edges)",
+                        path, len(self._nodes), len(self._edges))
+        except Exception as e:
+            logger.warning("CrawlGraph DOT export failed: %s", e)
+
 
 # ── DiagnosticsWriter — optional per-action screenshot + action log ───────────
 
@@ -192,6 +241,66 @@ class DiagnosticsWriter:
         """Flush and close the log."""
         logger.info("DiagnosticsWriter: closed — %d actions logged in %s",
                     self._idx, self.dir)
+
+
+# ── Recorded auth flow types ──────────────────────────────────────────────────
+
+@dataclass
+class LoginStep:
+    """
+    One step in a recorded authentication flow.
+    Mirrors Katana's auth.StepsFromFile / RecordedFlow replay.
+
+    step_type values:
+      "navigate"       — navigate the browser to `url`
+      "fill"           — fill `selector` input with `value`
+      "click"          — click element at `selector`
+      "wait"           — pause for `timeout_ms` milliseconds
+      "assert_visible" — verify `assertion_text` is visible on-screen
+                          (terminal visible assertion — Enhancement 5)
+    """
+    step_type:      str
+    selector:       str = ""          # CSS selector (fill / click / assert_visible)
+    value:          str = ""          # Value to type (fill)
+    url:            str = ""          # URL to navigate to (navigate)
+    timeout_ms:     int = 2000        # Timeout / wait duration in ms
+    assertion_text: str = ""          # Text that must be visible to confirm login
+
+
+@dataclass
+class CrawlHooks:
+    """
+    Lifecycle callback hooks injected into HeadlessEngine.
+    All callbacks receive the Playwright `page` object (and the action where
+    relevant) and are called synchronously in the Playwright thread.
+    None = no-op for that hook.
+
+    Mirrors Katana's Hooks interface.
+    (Enhancement 4 — Hooks system)
+    """
+    before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
+    after_action:        Optional[callable] = None  # (page, action: CrawlAction) -> None
+    on_navigation:       Optional[callable] = None  # (url: str) -> None
+    on_login_detected:   Optional[callable] = None  # (page) -> None
+    on_captcha_detected: Optional[callable] = None  # (page) -> None
+
+
+# ── Typed click error classes — precise failure recovery ──────────────────────
+
+class ElementCoveredError(Exception):
+    """Element exists and is visible but a foreground overlay intercepts the
+    hit-test at the element's center point. Recovery: dismiss consent banner /
+    modal and retry. (Enhancement 3 — typed click errors)"""
+
+class ElementInvisibleError(Exception):
+    """Element was found in the DOM but is not visible (display:none,
+    visibility:hidden, opacity:0, zero-size bounding box). Recovery: skip.
+    (Enhancement 3 — typed click errors)"""
+
+class ElementNoPointerEventsError(Exception):
+    """Element has pointer-events:none set, so no click will ever reach it.
+    Recovery: try JavaScript click() fallback or skip.
+    (Enhancement 3 — typed click errors)"""
 
 
 # ── Route priority — high-value routes processed first ───────────────────────
@@ -1053,6 +1162,10 @@ class HeadlessEngine:
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
         captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
         cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
+        # New Katana enhancements (session 2)
+        auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
+        page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
+        hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -1072,6 +1185,11 @@ class HeadlessEngine:
         self.slow_mo               = max(0, slow_mo)
         self.captcha_handler       = captcha_handler
         self.cookie_consent_bypass = cookie_consent_bypass
+        # Session 2 Katana enhancements
+        self.auth_steps            = auth_steps or []
+        self.page_load_strategy    = page_load_strategy or "domcontentloaded"
+        self.hooks                 = hooks or CrawlHooks()
+        self._logged_in:      bool = False   # loggedIn flag — avoids re-auth mid-crawl
 
         self.registry    = AssetRegistry(external_seen)
         # Pre-seed content hash registry with hashes from crawler
@@ -1286,6 +1404,383 @@ class HeadlessEngine:
         except Exception:
             # If the check fails we fall back to attempting the click anyway
             return True
+
+    # ── Session 2 Katana enhancement helpers ─────────────────────────────────
+
+    def _scroll_into_view(self, page, el) -> None:
+        """Universal ScrollIntoView — call before every click, not just Phase 3.
+        Mirrors Katana's ScrollIntoView() call before every action.
+        Falls back silently if the element is gone or raises. (Enhancement 6)"""
+        try:
+            el.scroll_into_view_if_needed(timeout=600)
+        except Exception:
+            try:
+                # Fallback: use JS scrollIntoView in case Playwright can't do it
+                page.evaluate("el => el.scrollIntoView({block:'center',behavior:'instant'})", el)
+            except Exception:
+                pass
+
+    def _classify_click_error(self, e: Exception, page=None, el=None) -> Exception:
+        """Classify a click failure into a typed error subclass so that the
+        recovery path can be specific to the root cause.
+        (Enhancement 3 — typed click error classification)
+
+        Returns one of:
+          ElementCoveredError        — overlay is in the way
+          ElementInvisibleError      — element not visible / no bounding box
+          ElementNoPointerEventsError — pointer-events:none
+          the original exception     — anything else (network, timeout, etc.)
+        """
+        msg = str(e).lower()
+
+        # Check pointer-events via computed style if we have element + page
+        if el is not None and page is not None:
+            try:
+                pe = page.evaluate(
+                    "el => window.getComputedStyle(el).pointerEvents", el
+                )
+                if pe == "none":
+                    return ElementNoPointerEventsError(str(e))
+            except Exception:
+                pass
+
+        # Check bounding box — zero-size means invisible
+        if el is not None:
+            try:
+                box = el.bounding_box()
+                if not box or (box["width"] == 0 and box["height"] == 0):
+                    return ElementInvisibleError(str(e))
+            except Exception:
+                pass
+
+        # Playwright error messages for covered / invisible
+        if any(k in msg for k in ("covered", "intercept", "obscured", "overlapping",
+                                   "blocked by", "other element")):
+            return ElementCoveredError(str(e))
+
+        if any(k in msg for k in ("not visible", "invisible", "hidden",
+                                   "display: none", "visibility: hidden")):
+            return ElementInvisibleError(str(e))
+
+        if "pointer-events" in msg:
+            return ElementNoPointerEventsError(str(e))
+
+        return e
+
+    def _has_terminal_visible_assertion(self, steps: List[LoginStep]) -> bool:
+        """Return True if any step in the recorded flow is an assert_visible step.
+        A terminal visible assertion is an explicit UI check that login succeeded
+        (e.g. 'Welcome back' is visible). Mirrors HasTerminalVisibleAssertion in
+        Katana. (Enhancement 5)"""
+        return any(s.step_type == "assert_visible" for s in steps)
+
+    def _run_recorded_auth_flow(self, page, stabilizer) -> bool:
+        """Replay a recorded authentication flow (multi-step SSO/MFA).
+        Mirrors Katana's auth.StepsFromFile + replay loop.
+
+        Executes each LoginStep in order:
+          navigate        — page.goto(url)
+          fill            — locator(selector).fill(value)
+          click           — locator(selector).click()
+          wait            — page.wait_for_timeout(timeout_ms)
+          assert_visible  — assert element/text is visible (terminal assertion)
+
+        Returns True if the flow completed AND either:
+          - A terminal visible assertion passed, OR
+          - The session state changed (cookies / localStorage delta)
+        Returns False on any step failure or assertion failure.
+        (Enhancement 1 — Recorded auth flow replay)"""
+        if not self.auth_steps:
+            return False
+
+        logger.info("Recorded auth flow: %d steps", len(self.auth_steps))
+        session_before = self._capture_session_state(page)
+
+        for i, step in enumerate(self.auth_steps):
+            try:
+                if step.step_type == "navigate":
+                    target = step.url or self.target_url
+                    page.goto(target, timeout=step.timeout_ms or self.timeout * 1000,
+                              wait_until=self.page_load_strategy)
+                    stabilizer.wait_for_framework(max_ms=1500)
+                    logger.debug("Auth step %d navigate: %s", i, target)
+
+                elif step.step_type == "fill":
+                    page.locator(step.selector).fill(
+                        step.value, timeout=step.timeout_ms
+                    )
+                    logger.debug("Auth step %d fill: %s", i, step.selector)
+
+                elif step.step_type == "click":
+                    loc = page.locator(step.selector)
+                    loc.scroll_into_view_if_needed(timeout=500)
+                    loc.click(timeout=step.timeout_ms)
+                    stabilizer.wait_after_interaction(max_ms=1500)
+                    logger.debug("Auth step %d click: %s", i, step.selector)
+
+                elif step.step_type == "wait":
+                    page.wait_for_timeout(step.timeout_ms)
+                    logger.debug("Auth step %d wait: %dms", i, step.timeout_ms)
+
+                elif step.step_type == "assert_visible":
+                    # Terminal visible assertion — confirm login succeeded by
+                    # checking that a success indicator is visible on-screen.
+                    if step.assertion_text:
+                        try:
+                            page.get_by_text(step.assertion_text).wait_for(
+                                state="visible", timeout=step.timeout_ms
+                            )
+                            logger.info(
+                                "Auth step %d assert_visible PASSED: '%s'",
+                                i, step.assertion_text,
+                            )
+                        except Exception as ae:
+                            logger.warning(
+                                "Auth step %d assert_visible FAILED: '%s' not visible — %s",
+                                i, step.assertion_text, ae,
+                            )
+                            return False
+                    elif step.selector:
+                        try:
+                            page.locator(step.selector).wait_for(
+                                state="visible", timeout=step.timeout_ms
+                            )
+                            logger.info(
+                                "Auth step %d assert_visible PASSED: selector '%s'",
+                                i, step.selector,
+                            )
+                        except Exception as ae:
+                            logger.warning(
+                                "Auth step %d assert_visible FAILED: '%s' — %s",
+                                i, step.selector, ae,
+                            )
+                            return False
+                else:
+                    logger.warning("Unknown auth step type '%s', skipping", step.step_type)
+
+            except Exception as e:
+                logger.warning("Auth step %d (%s) failed: %s", i, step.step_type, e)
+                return False
+
+        # Check session delta — did cookies / localStorage change?
+        session_after = self._capture_session_state(page)
+        delta = self._session_state_changed(session_before, session_after)
+
+        # If the flow had a terminal visible assertion AND it passed (we didn't
+        # return False above), the flow succeeded regardless of session delta.
+        has_terminal = self._has_terminal_visible_assertion(self.auth_steps)
+
+        if delta:
+            logger.info("Recorded auth flow: session delta confirmed — authenticated")
+            return True
+        if has_terminal:
+            logger.info("Recorded auth flow: terminal assertion passed — authenticated")
+            return True
+
+        logger.warning(
+            "Recorded auth flow: completed but no session delta and no terminal "
+            "assertion — assuming NOT authenticated"
+        )
+        return False
+
+    def _submit_login_form(self, page) -> bool:
+        """Find and click the submit button on a login form.
+        Tries common submit selector patterns in priority order.
+        Returns True if a submit button was clicked. (Enhancement 2 helper)"""
+        submit_selectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Login")',
+            'button:has-text("Log in")',
+            'button:has-text("Sign in")',
+            'button:has-text("Submit")',
+            'button:has-text("Continue")',
+            '[data-testid*="submit"]',
+            '[data-testid*="login"]',
+            'form button',  # last resort: any button in a form
+        ]
+        for sel in submit_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible() and el.is_enabled():
+                    el.scroll_into_view_if_needed(timeout=400)
+                    el.click(timeout=1500)
+                    logger.debug("_submit_login_form: clicked '%s'", sel)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _try_auto_login(self, page, stabilizer) -> bool:
+        """DIT-style auto-login fallback — called when the recorded flow fails
+        or no recorded flow exists but we land on a login page.
+
+        Attempts to fill detected username/password fields and submit.
+        Uses the same DIT classifier patterns as Katana's auto-login.
+        Only attempted when we have a user:pass from an auth header or the
+        caller injected credentials via a special auth_credentials dict.
+        Returns True if a session delta confirms login. (Enhancement 2)"""
+        # Require a stored credential pair — look for "Authorization: Basic"
+        # header or an "auth_credentials" attribute set externally
+        cred_pair = getattr(self, "auth_credentials", None)
+        if not cred_pair:
+            # Try extracting from extra_headers Basic auth
+            for k, v in (self.extra_headers or {}).items():
+                if k.lower() == "authorization" and v.lower().startswith("basic "):
+                    import base64
+                    try:
+                        decoded = base64.b64decode(v[6:]).decode("utf-8", errors="replace")
+                        if ":" in decoded:
+                            u, p = decoded.split(":", 1)
+                            cred_pair = {"username": u, "password": p}
+                    except Exception:
+                        pass
+                    break
+        if not cred_pair:
+            logger.debug("_try_auto_login: no credentials available, skipping")
+            return False
+
+        username = cred_pair.get("username", "")
+        password = cred_pair.get("password", "")
+        if not username or not password:
+            return False
+
+        logger.info("Auto-login fallback: attempting on %s", page.url)
+        session_before = self._capture_session_state(page)
+
+        # Fill username
+        user_selectors = [
+            'input[type="email"]',
+            'input[name="username"]',
+            'input[name="email"]',
+            'input[name="user"]',
+            'input[id*="username"]',
+            'input[id*="email"]',
+            'input[placeholder*="username" i]',
+            'input[placeholder*="email" i]',
+            'input[autocomplete="username"]',
+            'input[autocomplete="email"]',
+        ]
+        filled_user = False
+        for sel in user_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    el.fill(username, timeout=1000)
+                    filled_user = True
+                    logger.debug("Auto-login: filled username via '%s'", sel)
+                    break
+            except Exception:
+                continue
+
+        if not filled_user:
+            logger.debug("Auto-login: could not find username field")
+            return False
+
+        # Fill password
+        pass_selectors = [
+            'input[type="password"]',
+            'input[name="password"]',
+            'input[name="pass"]',
+            'input[id*="password"]',
+            'input[autocomplete="current-password"]',
+            'input[autocomplete="password"]',
+        ]
+        filled_pass = False
+        for sel in pass_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    el.fill(password, timeout=1000)
+                    filled_pass = True
+                    logger.debug("Auto-login: filled password via '%s'", sel)
+                    break
+            except Exception:
+                continue
+
+        if not filled_pass:
+            logger.debug("Auto-login: could not find password field")
+            return False
+
+        # Submit form
+        submitted = self._submit_login_form(page)
+        if not submitted:
+            logger.debug("Auto-login: could not find submit button")
+            return False
+
+        # Wait for navigation / SPA transition
+        try:
+            stabilizer.wait_for_framework(max_ms=3000)
+        except Exception:
+            pass
+
+        # Verify via session delta
+        session_after = self._capture_session_state(page)
+        if self._session_state_changed(session_before, session_after):
+            logger.info("Auto-login: session delta confirmed — authenticated")
+            return True
+
+        logger.debug("Auto-login: no session delta — login may have failed")
+        return False
+
+    def _detect_sub_pages(self, ctx, stabilizer, source_url: str) -> None:
+        """Register a listener on the browser context that captures new pages
+        (popups, new tabs) opened by JavaScript (window.open, target=_blank links).
+        For each sub-page that opens, we wait for it to load, flush its intel,
+        and record it in the crawl graph.
+        (Enhancement 10 — Sub-page detection)"""
+        def _on_new_page(new_page):
+            try:
+                sub_stabilizer = PageStabilizer(new_page)
+                sub_stabilizer.wait_for_framework(max_ms=3000)
+                sub_url = new_page.url
+                if not sub_url or sub_url in ("about:blank", ""):
+                    return
+                logger.debug("Sub-page detected: %s (from %s)", sub_url, source_url)
+                # Scope check
+                from ..safety.network import validate_url as _vurl
+                safe, _ = _vurl(sub_url)
+                if not safe or not self.scope.in_scope(sub_url):
+                    return
+                # Register URL
+                if not self.registry.register_url(sub_url):
+                    return  # already seen
+                # Add route
+                parsed_sub = urlparse(sub_url)
+                route = parsed_sub.path or "/"
+                self._add_route(route)
+                # Flush intel from the sub-page
+                try:
+                    new_routes = self._flush_page_intel(new_page, sub_url)
+                    for r in new_routes:
+                        self._add_route(r)
+                except Exception as e:
+                    logger.debug("Sub-page intel flush error %s: %s", sub_url, e)
+                # Register in CrawlGraph
+                fp = self._dom_fingerprint(new_page)
+                if fp:
+                    self.crawl_graph.add_page_state(fp[:16], sub_url, depth=1)
+                with self._lock:
+                    self.pages_visited += 1
+                # Fire on_navigation hook
+                if self.hooks.on_navigation:
+                    try:
+                        self.hooks.on_navigation(sub_url)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("Sub-page handler error: %s", e)
+            finally:
+                try:
+                    new_page.close()
+                except Exception:
+                    pass
+
+        try:
+            ctx.on("page", _on_new_page)
+            logger.debug("Sub-page detection listener registered")
+        except Exception as e:
+            logger.debug("Sub-page listener registration failed: %s", e)
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -2970,6 +3465,21 @@ class HeadlessEngine:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/146.0.0.0 Safari/537.36"
             )
+            # PageLoadStrategy passthrough — map our naming to Playwright's
+            # wait_until values. "eager" uses DOMContentLoaded for faster SPAs.
+            # (Enhancement 9 — PageLoadStrategy)
+            _strategy_map = {
+                "eager":              "domcontentloaded",
+                "domcontentloaded":   "domcontentloaded",
+                "load":               "load",
+                "networkidle":        "networkidle",
+                "none":               "commit",
+            }
+            _wait_until = _strategy_map.get(
+                (self.page_load_strategy or "domcontentloaded").lower(),
+                "domcontentloaded",
+            )
+
             kwargs = dict(
                 viewport={"width": 1280, "height": 800},
                 ignore_https_errors=True,
@@ -3019,8 +3529,53 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
+            # Sub-page detection — register popup/new-tab listener on context
+            # (Enhancement 10 — must be set up before any navigation)
+            self._detect_sub_pages(ctx, stabilizer, self.target_url)
+
             # ── Phase 1: Auth verification + root page ────────────────────────
             self.timer.start("phase1_root")
+
+            # Recorded auth flow — replay before cookie-based auth or standard load
+            # (Enhancement 1 — Recorded auth flow replay)
+            if self.auth_steps:
+                # Navigate to target first so recorded flow starts from the right page
+                try:
+                    page.goto(self.target_url, timeout=self.timeout * 1000,
+                              wait_until=_wait_until)
+                    stabilizer.wait_for_framework(max_ms=2000)
+                except Exception as e:
+                    logger.debug("Phase 1: initial navigate for recorded flow failed: %s", e)
+
+                flow_ok = self._run_recorded_auth_flow(page, stabilizer)
+                if flow_ok:
+                    self._logged_in = True
+                    logger.info("Recorded auth flow succeeded — loggedIn=True")
+                else:
+                    # Auto-login fallback — DIT-style (Enhancement 2)
+                    logger.warning(
+                        "Recorded auth flow failed — attempting auto-login fallback"
+                    )
+                    # Re-navigate to target login in case flow left us elsewhere
+                    try:
+                        page.goto(self.target_url, timeout=self.timeout * 1000,
+                                  wait_until=_wait_until)
+                        stabilizer.wait_for_framework(max_ms=2000)
+                    except Exception:
+                        pass
+                    if _is_login_page(page):
+                        # Fire on_login_detected hook (Enhancement 4)
+                        if self.hooks.on_login_detected:
+                            try:
+                                self.hooks.on_login_detected(page)
+                            except Exception:
+                                pass
+                        fallback_ok = self._try_auto_login(page, stabilizer)
+                        if fallback_ok:
+                            self._logged_in = True
+                            logger.info("Auto-login fallback succeeded — loggedIn=True")
+                        else:
+                            logger.warning("Auto-login fallback also failed — crawling unauthenticated")
 
             if self.cookies or self.extra_headers:
                 self.auth_result = self._verify_auth(page, self.target_url)
@@ -3031,6 +3586,8 @@ class HeadlessEngine:
                     self.auth_result["status"],
                     self.auth_result.get("session_delta", False),
                 )
+                if self.auth_result.get("authenticated"):
+                    self._logged_in = True
                 # Extra stability wait after auth — SPAs may still be mounting
                 # their router after the framework detect fires in _verify_auth
                 stabilizer.wait_for_framework(max_ms=2000)
@@ -3045,7 +3602,7 @@ class HeadlessEngine:
             else:
                 try:
                     page.goto(self.target_url, timeout=self.timeout * 1000,
-                              wait_until="domcontentloaded")
+                              wait_until=_wait_until)
                     with self._lock:
                         self.pages_visited += 1
                     stabilizer.wait_for_framework(max_ms=3000)
@@ -3068,6 +3625,12 @@ class HeadlessEngine:
 
             # Captcha check on root page (Enhancement 9)
             if self._is_captcha_page(page):
+                # Fire on_captcha_detected hook (Enhancement 4)
+                if self.hooks.on_captcha_detected:
+                    try:
+                        self.hooks.on_captcha_detected(page)
+                    except Exception:
+                        pass
                 self._handle_captcha(page)
 
             # MaxCrawlDuration timer starts HERE — after auth completes (Enhancement 10)
@@ -3146,15 +3709,40 @@ class HeadlessEngine:
                     # browser to an unexpected origin before we navigate here.
                     self._recover_drift(page, self.target_url, stabilizer)
 
-                    page.goto(url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
+                    page.goto(url, timeout=self.timeout * 1000, wait_until=_wait_until)
                     with self._lock:
                         self.pages_visited += 1
+
+                    # Fire on_navigation hook (Enhancement 4)
+                    if self.hooks.on_navigation:
+                        try:
+                            self.hooks.on_navigation(url)
+                        except Exception:
+                            pass
 
                     # Session state check — detect silent mid-crawl session loss.
                     # If we have credentials but land on a login page for a non-login
                     # URL, the session was lost (expired cookie, server logout event).
                     if _is_login_page(page) and not _is_login_url(url):
+                        # Fire on_login_detected hook when landing on login unexpectedly
+                        if self.hooks.on_login_detected:
+                            try:
+                                self.hooks.on_login_detected(page)
+                            except Exception:
+                                pass
                         login_loop_count += 1
+                        # loggedIn flag: only attempt re-auth once per mid-crawl loss,
+                        # and only when we were previously authenticated (Enhancement 7)
+                        if self._logged_in and login_loop_count == 1:
+                            logger.warning(
+                                "Mid-crawl session loss detected — attempting auto-login re-auth"
+                            )
+                            re_ok = self._try_auto_login(page, stabilizer)
+                            if re_ok:
+                                self._logged_in = True
+                                login_loop_count = 0
+                                logger.info("Mid-crawl re-auth succeeded")
+                                continue
                         if login_loop_count >= 2:
                             logger.warning(
                                 "Session lost mid-crawl after %d consecutive login "
@@ -3169,6 +3757,7 @@ class HeadlessEngine:
                                     "Session lost mid-crawl — "
                                     "server invalidated the session after login"
                                 )
+                            self._logged_in = False
                             break
                         continue
                     else:
@@ -3268,6 +3857,13 @@ class HeadlessEngine:
                     if self._diagnostics:
                         self._diagnostics.record(page, action, note="pre-action")
 
+                    # before_action hook (Enhancement 4)
+                    if self.hooks.before_action:
+                        try:
+                            self.hooks.before_action(page, action)
+                        except Exception:
+                            pass
+
                     # SlowMotion delay before action (Enhancement 12)
                     self._slow_mo_wait(page)
 
@@ -3288,6 +3884,12 @@ class HeadlessEngine:
                                 # Diagnostics: record post-action state (Enhancement 11)
                                 if self._diagnostics:
                                     self._diagnostics.record(page, action, note="post-fill_form")
+                                # after_action hook (Enhancement 4)
+                                if self.hooks.after_action:
+                                    try:
+                                        self.hooks.after_action(page, action)
+                                    except Exception:
+                                        pass
                         except Exception as e:
                             logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
                             phase3_consecutive_failures += 1
@@ -3296,7 +3898,8 @@ class HeadlessEngine:
                         try:
                             el = page.query_selector(action.selector)
                             if el and el.is_visible() and el.is_enabled():
-                                el.scroll_into_view_if_needed(timeout=500)
+                                # Universal ScrollIntoView before click (Enhancement 6)
+                                self._scroll_into_view(page, el)
                                 # Interactability check: verify no overlay covers
                                 # the element before clicking (Enhancement 5)
                                 if not self._check_element_interactable(page, el):
@@ -3311,7 +3914,44 @@ class HeadlessEngine:
                                     continue
                                 # SlowMotion delay before click (Enhancement 12)
                                 self._slow_mo_wait(page)
-                                el.click(timeout=800)
+                                try:
+                                    el.click(timeout=800)
+                                except Exception as click_err:
+                                    # Typed error classification (Enhancement 3)
+                                    typed_err = self._classify_click_error(click_err, page, el)
+                                    if isinstance(typed_err, ElementCoveredError):
+                                        logger.debug(
+                                            "ElementCoveredError on %s — trying consent bypass",
+                                            action.selector,
+                                        )
+                                        if self.cookie_consent_bypass:
+                                            self._dismiss_cookie_consent(page)
+                                        # Retry once after banner dismissal
+                                        try:
+                                            el.click(timeout=600)
+                                        except Exception:
+                                            phase3_consecutive_failures += 1
+                                            continue
+                                    elif isinstance(typed_err, ElementInvisibleError):
+                                        logger.debug(
+                                            "ElementInvisibleError on %s — skipping",
+                                            action.selector,
+                                        )
+                                        phase3_consecutive_failures += 1
+                                        continue
+                                    elif isinstance(typed_err, ElementNoPointerEventsError):
+                                        logger.debug(
+                                            "ElementNoPointerEventsError on %s — JS click fallback",
+                                            action.selector,
+                                        )
+                                        # JS click bypasses pointer-events:none
+                                        try:
+                                            page.evaluate("el => el.click()", el)
+                                        except Exception:
+                                            phase3_consecutive_failures += 1
+                                            continue
+                                    else:
+                                        raise typed_err
                                 stabilizer.wait_after_interaction(max_ms=1000)
                                 new_routes = self._flush_page_intel(page, action.url)
                                 for r in new_routes:
@@ -3325,6 +3965,12 @@ class HeadlessEngine:
                                 # Diagnostics: record post-click state (Enhancement 11)
                                 if self._diagnostics:
                                     self._diagnostics.record(page, action, note="post-left_click")
+                                # after_action hook (Enhancement 4)
+                                if self.hooks.after_action:
+                                    try:
+                                        self.hooks.after_action(page, action)
+                                    except Exception:
+                                        pass
                         except Exception as e:
                             logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
                             phase3_consecutive_failures += 1
@@ -3338,6 +3984,10 @@ class HeadlessEngine:
 
             # Close DiagnosticsWriter (Enhancement 11)
             if self._diagnostics:
+                # CrawlGraph DOT export — written alongside the diagnostics output
+                # (Enhancement 8 — CrawlGraph DOT file export)
+                dot_path = _os.path.join(self._diagnostics.dir, "crawl_graph.dot")
+                self.crawl_graph.draw_dot(dot_path)
                 self._diagnostics.close()
 
             try:
@@ -3425,13 +4075,18 @@ def collect_headless_full(
     cookies:              list           = None,
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
-    # Katana enhancements (Enhancement 4, 10, 11, 12, 9, 8)
+    # Katana enhancements (session 1)
     max_failures:         int            = 10,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
     captcha_handler       = None,
     cookie_consent_bypass: bool          = True,
+    # Katana enhancements (session 2)
+    auth_steps:           Optional[List[LoginStep]] = None,
+    page_load_strategy:   str            = "domcontentloaded",
+    hooks:                Optional[CrawlHooks] = None,
+    auth_credentials:     Optional[dict] = None,
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -3444,10 +4099,14 @@ def collect_headless_full(
     seen_hashes:           content SHA-256 hashes already seen by the crawler (for dedup).
     max_failures:          halt crawl after this many consecutive page/action failures (default 10).
     max_crawl_duration:    max crawl time in seconds, 0 = unlimited; timer starts after auth (default 0).
-    enable_diagnostics:    write screenshots + action log to a temp dir (default False).
+    enable_diagnostics:    write screenshots + action log + crawl_graph.dot to a temp dir (default False).
     slow_mo:               milliseconds to pause between interactions for visual debugging (default 0).
     captcha_handler:       optional callable(page) -> bool that tries to solve detected captchas.
     cookie_consent_bypass: auto-dismiss GDPR/cookie banners before crawling (default True).
+    auth_steps:            recorded auth flow steps (LoginStep list) for multi-step SSO/MFA replay.
+    page_load_strategy:    navigation wait strategy: eager/domcontentloaded/load/networkidle/none.
+    hooks:                 CrawlHooks lifecycle callbacks (before_action, after_action, on_navigation, etc.).
+    auth_credentials:      dict with 'username' and 'password' for auto-login fallback.
     """
     engine = HeadlessEngine(
         target_url             = url,
@@ -3467,7 +4126,12 @@ def collect_headless_full(
         slow_mo                = slow_mo,
         captcha_handler        = captcha_handler,
         cookie_consent_bypass  = cookie_consent_bypass,
+        auth_steps             = auth_steps or [],
+        page_load_strategy     = page_load_strategy,
+        hooks                  = hooks,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
+    if auth_credentials:
+        engine.auth_credentials = auth_credentials
     return engine.run()
