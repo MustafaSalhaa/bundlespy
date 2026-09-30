@@ -958,18 +958,14 @@ class HeadlessEngine:
         except Exception:
             pass
 
-    def _scrape_dom_scripts(self, page, source_page: str) -> None:
+    def _collect_dom_script_urls(self, page) -> list:
         """
-        Fallback DOM scrape — extract all <script src> URLs from the rendered
-        page and fetch them directly. This catches JS files that the response
-        handler missed due to: browser cache hits (no network response fired),
-        service worker interception, or timing gaps between route() and on().
-
-        Also extracts dynamically-inserted scripts added after initial load
-        (React lazy(), Vue async components, Angular loadChildren).
+        Extract all <script src> URLs from the rendered DOM.
+        Must be called from the Playwright thread — returns a plain list
+        of URL strings so the actual HTTP fetching can happen off-thread.
         """
         try:
-            script_urls = page.evaluate("""
+            return page.evaluate("""
                 (function() {
                     var seen = new Set();
                     var results = [];
@@ -982,13 +978,19 @@ class HeadlessEngine:
                     });
                     return results;
                 })()
-            """)
+            """) or []
         except Exception:
-            return
+            return []
 
-        if not script_urls:
-            return
+    def _fetch_dom_scripts(self, script_urls: list, source_page: str) -> None:
+        """
+        Fetch JS URLs collected from the DOM via plain HTTP (no Playwright).
+        Safe to call from a background thread — never touches page/context objects.
 
+        Catches JS files the response handler missed: browser cache hits
+        (cached responses fire no network event), service worker intercepts,
+        and any timing gaps between ctx.route() and ctx.on("response").
+        """
         import requests as _req
         for js_url in script_urls:
             try:
@@ -999,7 +1001,7 @@ class HeadlessEngine:
                     continue
                 norm = self.registry._normalize(js_url)
                 if not self.registry.register_url(norm):
-                    continue  # already captured by response handler
+                    continue  # already captured by response handler — skip
 
                 resp = _req.get(
                     js_url,
@@ -1314,15 +1316,17 @@ class HeadlessEngine:
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
 
-            # DOM scrape fallback — catches anything the response handler missed
-            # (cache hits, service worker intercepts, timing gaps). Runs in a
-            # background thread so it doesn't delay page navigation.
-            import threading as _t
-            _t.Thread(
-                target=self._scrape_dom_scripts,
-                args=(page, source_url),
-                daemon=True,
-            ).start()
+            # DOM scrape fallback — collect script URLs in the Playwright thread
+            # (page.evaluate must run here), then fetch them off-thread so we
+            # don't block page navigation. Never pass page/context to the thread.
+            _dom_script_urls = self._collect_dom_script_urls(page)
+            if _dom_script_urls:
+                import threading as _t
+                _t.Thread(
+                    target=self._fetch_dom_scripts,
+                    args=(_dom_script_urls, source_url),
+                    daemon=True,
+                ).start()
 
             # Reset interceptor buffers for next page
             try:
