@@ -167,10 +167,12 @@ window.__bspy_stable = function(quietMs) {
 # ── Main intercept JS ─────────────────────────────────────────────────────────
 
 INTERCEPT_JS = """
-window.__bundlespy_requests = [];
-window.__bundlespy_ws       = [];
-window.__bundlespy_workers  = [];
-window.__bundlespy_iframes  = [];
+window.__bundlespy_requests   = [];
+window.__bundlespy_ws         = [];
+window.__bundlespy_ws_messages = [];
+window.__bundlespy_workers    = [];
+window.__bundlespy_sw         = [];
+window.__bundlespy_iframes    = [];
 
 // Fetch interception
 const _origFetch = window.fetch;
@@ -203,15 +205,45 @@ window.XMLHttpRequest = function() {
     return xhr;
 };
 
-// WebSocket
+// WebSocket — capture URL + message payloads (send and receive)
 const _origWS = window.WebSocket;
 if (_origWS) {
     window.WebSocket = function(url, ...a) {
-        try { window.__bundlespy_ws.push({url: String(url)}); } catch(e) {}
+        var wsUrl = String(url);
+        try { window.__bundlespy_ws.push({url: wsUrl}); } catch(e) {}
         const ws = new _origWS(url, ...a);
+        // Capture outbound messages
+        var _origSend = ws.send.bind(ws);
+        ws.send = function(data) {
+            try {
+                var d = typeof data === 'string' ? data.substring(0, 1000) : '[binary]';
+                window.__bundlespy_ws_messages.push({url: wsUrl, data: d, dir: 'send'});
+            } catch(e2) {}
+            return _origSend(data);
+        };
+        // Capture inbound messages
+        ws.addEventListener('message', function(e) {
+            try {
+                var d = typeof e.data === 'string' ? e.data.substring(0, 1000) : '[binary]';
+                window.__bundlespy_ws_messages.push({url: wsUrl, data: d, dir: 'recv'});
+            } catch(e2) {}
+        });
         return ws;
     };
+    // Copy static properties (CONNECTING, OPEN, CLOSING, CLOSED)
+    Object.assign(window.WebSocket, _origWS);
     window.WebSocket.prototype = _origWS.prototype;
+}
+
+// Service Worker registration — capture SW script URL before browser fetches it
+if (navigator.serviceWorker) {
+    try {
+        var _origSwReg = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+        navigator.serviceWorker.register = function(scriptURL, opts) {
+            try { window.__bundlespy_sw.push({url: String(scriptURL)}); } catch(e) {}
+            return _origSwReg(scriptURL, opts);
+        };
+    } catch(e) {}
 }
 
 // WebWorker
@@ -224,11 +256,11 @@ if (_origWorker) {
 }
 
 // SharedWorker
-const _origSW = window.SharedWorker;
-if (_origSW) {
+const _origSharedWorker = window.SharedWorker;
+if (_origSharedWorker) {
     window.SharedWorker = function(url, ...a) {
         try { window.__bundlespy_workers.push({url: String(url), shared: true}); } catch(e) {}
-        return new _origSW(url, ...a);
+        return new _origSharedWorker(url, ...a);
     };
 }
 
@@ -704,6 +736,7 @@ class HeadlessEngine:
         self.endpoints:  List[Endpoint] = []
         self.api_calls:  List[dict]    = []
         self.ws_urls:    List[str]     = []
+        self.ws_messages: List[dict]   = []   # WS payload capture (item 9)
         self.routes:     Set[str]      = set()
         self.pages_visited: int        = 0
         self.auth_result: Optional[dict] = None  # populated during run()
@@ -866,6 +899,30 @@ class HeadlessEngine:
         except Exception:
             return []
 
+    def _extract_ws_messages(self, page) -> List[dict]:
+        """
+        Extract WebSocket message payloads captured by the INTERCEPT_JS patch.
+        Returns list of {url, data, dir} dicts.
+        Message payloads frequently contain API endpoint paths, auth tokens,
+        and data structures not visible anywhere in static JS.
+        """
+        try:
+            r = page.evaluate("window.__bundlespy_ws_messages || []")
+            return r if isinstance(r, list) else []
+        except Exception:
+            return []
+
+    def _extract_sw_urls(self, page) -> List[str]:
+        """
+        Extract service worker script URLs intercepted from navigator.serviceWorker.register().
+        Returns a list of absolute or relative SW script URLs.
+        """
+        try:
+            r = page.evaluate("window.__bundlespy_sw || []")
+            return [x["url"] for x in r if isinstance(x, dict) and "url" in x]
+        except Exception:
+            return []
+
     def _extract_worker_urls(self, page) -> List[str]:
         try:
             r = page.evaluate("window.__bundlespy_workers || []")
@@ -952,20 +1009,116 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("Worker fetch failed %s: %s", worker_url, e)
 
+    def _fetch_service_worker(self, sw_url: str, source_page: str) -> None:
+        """
+        Fetch a service worker script, register it as a JSFile, and then
+        extract any importScripts() or static import paths it references so
+        those secondary scripts are also captured and analyzed.
+
+        Service workers intercept all network traffic for a scope — they're
+        prime targets for hidden API endpoints, auth bypass logic, and cache
+        poisoning primitives. They never show up in response events because
+        the browser registers them via the SW API, not a normal fetch.
+        """
+        try:
+            # Resolve relative URLs against the target origin
+            if sw_url.startswith("/"):
+                parsed = urlparse(self.target_url)
+                sw_url = f"{parsed.scheme}://{parsed.netloc}{sw_url}"
+            elif not sw_url.startswith(("http://", "https://")):
+                sw_url = urljoin(source_page, sw_url)
+
+            if not self.registry.register_url(sw_url):
+                return  # already captured
+
+            safe, _ = validate_url(sw_url)
+            if not safe or not self.scope.in_scope(sw_url):
+                return
+
+            import requests as _req
+            resp = _req.get(
+                sw_url,
+                timeout=8,
+                verify=False,
+                headers=self._auth_headers(referer=source_page),
+            )
+            if resp.status_code != 200 or not resp.content:
+                logger.debug("Service worker fetch failed: %s (%d)", sw_url, resp.status_code)
+                return
+
+            h = hashlib.sha256(resp.content).hexdigest()
+            if self.registry.register_hash(h):
+                js_file = self._make_js_file(sw_url, resp.content, source_page, "service-worker")
+                if self._add_js_file(js_file):
+                    logger.info("Service worker captured: %s (%d bytes)", sw_url, len(resp.content))
+
+            # Extract importScripts() and static import paths from the SW body
+            # so any sub-scripts are also fetched and analyzed.
+            sw_text = resp.content.decode("utf-8", errors="replace")
+            self._fetch_sw_imports(sw_text, sw_url, source_page)
+
+        except Exception as e:
+            logger.debug("Service worker fetch error %s: %s", sw_url, e)
+
+    def _fetch_sw_imports(self, sw_text: str, sw_url: str, source_page: str) -> None:
+        """
+        Parse importScripts() calls and static ES import paths from a service
+        worker script body and fetch each referenced file.
+
+        importScripts('a.js', 'b.js') is the classic SW pattern.
+        Modern SWs (Workbox etc.) may also use ES module syntax.
+        """
+        imported: List[str] = []
+
+        # importScripts('a.js', 'b.js', ...)
+        for m in re.finditer(r'importScripts\s*\(([^)]+)\)', sw_text):
+            for arg in re.finditer(r'["\']([^"\']+)["\']', m.group(1)):
+                imported.append(arg.group(1))
+
+        # static: import '...' / import "..." / import ... from '...'
+        for m in re.finditer(
+            r'import\s+(?:[^"\']*\s+from\s+)?["\']([^"\']+)["\']', sw_text
+        ):
+            imported.append(m.group(1))
+
+        for path in imported:
+            if not path or path.startswith("data:"):
+                continue
+            abs_url = urljoin(sw_url, path)
+            safe, _ = validate_url(abs_url)
+            if not safe or not self.scope.in_scope(abs_url):
+                continue
+            if not self.registry.register_url(abs_url):
+                continue
+            try:
+                import requests as _req
+                resp = _req.get(abs_url, timeout=8, verify=False,
+                                headers=self._auth_headers(referer=sw_url))
+                if resp.status_code == 200 and resp.content:
+                    h = hashlib.sha256(resp.content).hexdigest()
+                    if self.registry.register_hash(h):
+                        js_file = self._make_js_file(abs_url, resp.content, sw_url, "service-worker-import")
+                        self._add_js_file(js_file)
+                        logger.debug("SW import captured: %s", abs_url)
+            except Exception as e:
+                logger.debug("SW import fetch failed %s: %s", abs_url, e)
+
     def _interact(self, page, stabilizer: PageStabilizer) -> None:
         """
-        Safe interaction engine. Adaptive waits after each action.
+        Interaction engine — scroll, tabs, dropdowns, nav hovers.
+        Safe: never clicks destructive actions, never submits forms.
+        Adaptive waits after each action so JS-driven UI settles before the
+        next step fires.
         """
-        # Phase 1: Adaptive scroll
+        # Phase 1: Adaptive scroll — triggers lazy-load and infinite-scroll JS
         try:
-            heights = [0.25, 0.5, 0.75, 1.0, 0]
-            for frac in heights:
+            for frac in [0.25, 0.5, 0.75, 1.0, 0]:
                 page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {frac});")
                 stabilizer.wait_after_interaction(max_ms=500)
         except Exception:
             pass
 
-        # Phase 2: Tabs, accordions, toggles
+        # Phase 2: Tabs, accordions, toggles — reveal hidden panels
         tab_selectors = [
             "[role='tab']", "[role='menuitem']",
             "[data-toggle='tab']", "[data-bs-toggle='tab']",
@@ -987,7 +1140,7 @@ class HeadlessEngine:
             except Exception:
                 pass
 
-        # Phase 3: Dropdown toggles
+        # Phase 3: Dropdown and menu toggles
         try:
             for el in page.query_selector_all(
                 "button[data-toggle],button[data-bs-toggle],"
@@ -1005,7 +1158,7 @@ class HeadlessEngine:
         except Exception:
             pass
 
-        # Phase 4: Hover over nav items
+        # Phase 4: Nav hover — reveals mega-menus and sub-nav JS
         try:
             for el in page.query_selector_all(
                 ".dropdown,.has-submenu,nav > ul > li"
@@ -1019,79 +1172,273 @@ class HeadlessEngine:
         except Exception:
             pass
 
-    def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
-        """
-        Safe read-only form observation.
-        NEVER submits. Only types in search boxes then clears.
-        """
-        try:
-            for form in page.query_selector_all("form")[:8]:
-                try:
-                    ctx = (
-                        (form.get_attribute("id") or "") +
-                        (form.get_attribute("class") or "") +
-                        (form.get_attribute("action") or "")
-                    ).lower()
-                    if any(kw in ctx for kw in SKIP_FORM_CONTEXTS):
-                        continue
+        # Phase 5: Multi-step form engine — drives conditional field reveal
+        # and modal appearance without ever submitting or touching payment flows.
+        self._interact_forms(page, stabilizer)
 
-                    for inp in form.query_selector_all("input,textarea")[:5]:
+    def _interact_forms(self, page, stabilizer: PageStabilizer) -> None:
+        """
+        Multi-step form interaction engine.
+
+        Goals:
+        - Fill safe text/search/email fields to trigger JS-driven validation
+          and conditional field reveal (e.g. "if email entered → show password").
+        - Click Next/Continue buttons to advance multi-step wizards and expose
+          new API calls made on each step transition.
+        - Detect modals that open after a step (aria-modal, [role=dialog]) and
+          interact with their content so any extra JS they load is captured.
+
+        Safety rules (never violated):
+        - Skip any form whose context touches payment/checkout keywords.
+        - Never click Submit / Place Order / Pay / Confirm Order buttons.
+        - Never click buttons whose text is in DESTRUCTIVE_KEYWORDS.
+        - At most MAX_STEPS steps per form so we can't loop forever.
+        - Clear every input field after interacting so state is not persisted.
+        """
+        MAX_STEPS       = 4   # max wizard steps per form
+        MAX_FORMS       = 6   # max forms to interact with per page
+        NEXT_SELECTORS  = [
+            "button[type='button']",          # generic next buttons
+            "button:not([type='submit'])",     # non-submit buttons in a form
+            "[data-action='next']",
+            "[data-step='next']",
+            "button.next", "button.continue",
+            "a.next", "a.continue",
+        ]
+        MODAL_SELECTORS = [
+            "[role='dialog']:not([hidden])",
+            "[aria-modal='true']:not([hidden])",
+            ".modal:not(.hidden):not(.d-none)",
+            ".dialog:not(.hidden)",
+        ]
+
+        try:
+            forms = page.query_selector_all("form")[:MAX_FORMS]
+        except Exception:
+            return
+
+        for form in forms:
+            try:
+                # Skip payment / destructive form contexts
+                ctx = " ".join(filter(None, [
+                    form.get_attribute("id"),
+                    form.get_attribute("class"),
+                    form.get_attribute("action"),
+                    form.get_attribute("data-form-type"),
+                ])).lower()
+                if any(kw in ctx for kw in SKIP_FORM_CONTEXTS):
+                    continue
+
+                for _step in range(MAX_STEPS):
+                    # --- Fill visible safe inputs in current step ---
+                    try:
+                        inputs = form.query_selector_all(
+                            "input:not([type='hidden']):not([type='submit'])"
+                            ":not([type='radio']):not([type='checkbox']),"
+                            "textarea"
+                        )[:8]
+                    except Exception:
+                        inputs = []
+
+                    filled_any = False
+                    for inp in inputs:
                         try:
-                            itype = (inp.get_attribute("type") or "text").lower()
-                            iname = (
-                                inp.get_attribute("name") or
-                                inp.get_attribute("id") or
-                                inp.get_attribute("placeholder") or ""
-                            ).lower()
-                            if itype not in ("text", "search", "email"):
-                                continue
-                            if not any(s in iname for s in SAFE_INPUT_NAMES):
-                                continue
                             if not inp.is_visible() or not inp.is_enabled():
                                 continue
-                            inp.click(timeout=800)
-                            inp.type("test", delay=20)
-                            stabilizer.wait_after_interaction(max_ms=400)
-                            inp.clear()
+                            itype = (inp.get_attribute("type") or "text").lower()
+                            iname = " ".join(filter(None, [
+                                inp.get_attribute("name"),
+                                inp.get_attribute("id"),
+                                inp.get_attribute("placeholder"),
+                                inp.get_attribute("autocomplete"),
+                            ])).lower()
+
+                            # Only fill safe field types
+                            if itype not in ("text", "search", "email", "tel", "url", ""):
+                                continue
+                            # Only interact with recognisably safe field names
+                            if not any(s in iname for s in SAFE_INPUT_NAMES):
+                                continue
+
+                            fill_val = FORM_FILL_VALUES.get(
+                                next((k for k in FORM_FILL_VALUES if k in iname), None),
+                                "test",
+                            )
+                            inp.click(timeout=600)
+                            inp.fill(fill_val)
+                            stabilizer.wait_after_interaction(max_ms=300)
+                            filled_any = True
+                        except Exception:
+                            pass
+
+                    if not filled_any and _step > 0:
+                        break  # nothing new appeared — wizard is done
+
+                    # --- Conditional field trigger: Tab through inputs ---
+                    try:
+                        page.keyboard.press("Tab")
+                        stabilizer.wait_after_interaction(max_ms=300)
+                    except Exception:
+                        pass
+
+                    # --- Look for a Next/Continue button (NOT submit) ---
+                    advanced = False
+                    for sel in NEXT_SELECTORS:
+                        if advanced:
+                            break
+                        try:
+                            for btn in form.query_selector_all(sel)[:4]:
+                                try:
+                                    if not btn.is_visible() or not btn.is_enabled():
+                                        continue
+                                    btn_text = (btn.inner_text() or "").lower().strip()
+                                    # Skip destructive and submit-like buttons
+                                    if self._is_destructive(btn_text):
+                                        continue
+                                    if any(w in btn_text for w in ("submit", "place order", "pay", "confirm order", "checkout")):
+                                        continue
+                                    # Only click Next/Continue/Continue-style buttons
+                                    if not any(w in btn_text for w in ("next", "continue", "proceed", "forward", "step", "go →", "→", ">")):
+                                        continue
+                                    btn.click(timeout=800)
+                                    stabilizer.wait_after_interaction(max_ms=1000)
+                                    advanced = True
+                                    break
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    # --- Check for modals that appeared after the step ---
+                    for modal_sel in MODAL_SELECTORS:
+                        try:
+                            modal = page.query_selector(modal_sel)
+                            if not modal or not modal.is_visible():
+                                continue
+                            # Interact with visible inputs inside the modal
+                            for inp in modal.query_selector_all(
+                                "input:not([type='hidden']):not([type='submit']),textarea"
+                            )[:4]:
+                                try:
+                                    itype = (inp.get_attribute("type") or "text").lower()
+                                    iname = " ".join(filter(None, [
+                                        inp.get_attribute("name"),
+                                        inp.get_attribute("id"),
+                                        inp.get_attribute("placeholder"),
+                                    ])).lower()
+                                    if itype not in ("text", "search", "email") or \
+                                       not any(s in iname for s in SAFE_INPUT_NAMES):
+                                        continue
+                                    if not inp.is_visible() or not inp.is_enabled():
+                                        continue
+                                    inp.fill("test")
+                                    stabilizer.wait_after_interaction(max_ms=300)
+                                    inp.fill("")  # clear
+                                except Exception:
+                                    pass
+                            # Close the modal so it doesn't block the next step
+                            for close_sel in [
+                                "[aria-label='Close']", "[data-dismiss='modal']",
+                                "[data-bs-dismiss='modal']", "button.close",
+                                ".modal-header button",
+                            ]:
+                                try:
+                                    close_btn = modal.query_selector(close_sel)
+                                    if close_btn and close_btn.is_visible():
+                                        close_btn.click(timeout=600)
+                                        stabilizer.wait_after_interaction(max_ms=500)
+                                        break
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    if not advanced:
+                        break  # no Next button found — form exploration done
+
+                # Clear all inputs we touched before moving to next form
+                try:
+                    for inp in form.query_selector_all(
+                        "input:not([type='hidden']):not([type='radio']):not([type='checkbox'])"
+                    )[:10]:
+                        try:
+                            if inp.is_visible():
+                                inp.fill("")
                         except Exception:
                             pass
                 except Exception:
                     pass
-        except Exception:
-            pass
+
+            except Exception:
+                pass
+
+    def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
+        """
+        Legacy shim — kept for backward compatibility with call sites that
+        invoke _observe_forms directly. The new _interact_forms (called from
+        _interact Phase 5) now handles all form observation. This is a no-op.
+        """
+        pass
 
     def _collect_inline_scripts(self, page, source_page: str) -> None:
         """
-        Extract and register all inline <script> blocks from the rendered DOM.
+        Extract and register all inline <script> blocks from the rendered DOM,
+        including scripts inside Shadow DOM trees (web components).
 
         Inline scripts are never a network response — they're embedded in the
-        HTML — so _handle_response never fires for them and the response handler
-        captures 0 of them. This method reads them directly from the DOM via
-        page.evaluate() (must run in the Playwright thread) and registers each
-        unique block as a JSFile immediately.
+        HTML — so _handle_response never fires for them. This method reads them
+        directly from the DOM via page.evaluate() and registers each unique
+        block as a JSFile immediately.
+
+        Shadow DOM piercing: document.querySelectorAll() cannot cross shadow
+        root boundaries. We walk the entire element tree recursively via
+        el.shadowRoot, collecting inline scripts from every shadow host found.
+        Depth limit of 10 prevents infinite loops in pathological cases.
 
         Skips:
         - Empty / whitespace-only blocks
         - type="text/template", type="text/html", type="application/ld+json", etc.
-          (non-executable script tags used as data containers)
-        - Content already seen by the crawler (hash dedup via registry)
-        - Blocks smaller than 20 bytes (noise)
+        - Content already seen by crawler (hash dedup)
+        - Blocks < 20 bytes (noise)
         """
         try:
             blocks = page.evaluate("""
                 (function() {
                     var results = [];
-                    document.querySelectorAll('script:not([src])').forEach(function(s, idx) {
-                        var t = (s.getAttribute('type') || '').toLowerCase();
-                        // Skip non-JS script types used as data containers
-                        if (t && t !== 'text/javascript' && t !== 'module' &&
-                            t !== 'application/javascript' && t !== '') {
-                            return;
-                        }
-                        var content = s.textContent || '';
-                        if (content.trim().length < 20) return;
-                        results.push({idx: idx, content: content});
-                    });
+                    var globalIdx = 0;
+
+                    function isExecutable(tag) {
+                        var t = (tag.getAttribute('type') || '').toLowerCase().trim();
+                        return !t || t === 'text/javascript' || t === 'module' ||
+                               t === 'application/javascript';
+                    }
+
+                    function collectFromRoot(root, depth) {
+                        if (depth > 10) return;
+
+                        // Collect inline scripts at this root level
+                        root.querySelectorAll('script:not([src])').forEach(function(s) {
+                            if (!isExecutable(s)) return;
+                            var content = s.textContent || '';
+                            if (content.trim().length < 20) return;
+                            var isModule = (s.getAttribute('type') || '').toLowerCase() === 'module';
+                            results.push({
+                                idx:      globalIdx++,
+                                content:  content,
+                                isModule: isModule,
+                                inShadow: depth > 0,
+                            });
+                        });
+
+                        // Recurse into all shadow roots at this level
+                        root.querySelectorAll('*').forEach(function(el) {
+                            if (el.shadowRoot) {
+                                collectFromRoot(el.shadowRoot, depth + 1);
+                            }
+                        });
+                    }
+
+                    collectFromRoot(document, 0);
                     return results;
                 })()
             """) or []
@@ -1112,9 +1459,21 @@ class HeadlessEngine:
                 if not self.registry.register_hash(h):
                     continue
 
-                idx = block.get("idx", 0)
-                # Synthetic URL that matches the format used by the static
-                # crawler's inline script URL scheme so reporting is consistent
+                idx       = block.get("idx", 0)
+                in_shadow = block.get("inShadow", False)
+                is_module = block.get("isModule", False)
+
+                # Technology label for reporting
+                if in_shadow and is_module:
+                    tech = "shadow-dom-module"
+                elif in_shadow:
+                    tech = "shadow-dom-inline"
+                elif is_module:
+                    tech = "headless-module-inline"
+                else:
+                    tech = "headless-inline"
+
+                # Synthetic URL consistent with static crawler's inline scheme
                 inline_url = f"inline:{source_page}#script-{idx + 1}-{h[:12]}"
 
                 js_file = JSFile(
@@ -1126,10 +1485,12 @@ class HeadlessEngine:
                     sha256=h,
                     content=content,
                     discovered_at=datetime.utcnow(),
-                    technology="headless-inline",
+                    technology=tech,
                 )
                 if self._add_js_file(js_file):
-                    logger.debug("Inline script captured [%d bytes] from %s", len(body), source_page)
+                    shadow_note = " [shadow-dom]" if in_shadow else ""
+                    logger.debug("Inline script captured [%d bytes]%s from %s",
+                                 len(body), shadow_note, source_page)
             except Exception as e:
                 logger.debug("Inline script registration error: %s", e)
 
@@ -1156,6 +1517,122 @@ class HeadlessEngine:
             """) or []
         except Exception:
             return []
+
+    def _collect_module_script_urls(self, page) -> list:
+        """
+        Collect ES module entry points: <script type="module" src="..."> URLs
+        from the rendered DOM. Must run in the Playwright thread.
+
+        The response handler should already capture these via network events,
+        but modules loaded with `type="module"` are sometimes served from
+        a different path or cached, so we also collect them explicitly here
+        as a fallback — same pattern as _collect_dom_script_urls.
+        """
+        try:
+            return page.evaluate("""
+                (function() {
+                    var seen = new Set();
+                    var results = [];
+                    document.querySelectorAll('script[type="module"][src]').forEach(function(s) {
+                        var src = s.src;
+                        if (src && !seen.has(src)) {
+                            seen.add(src);
+                            results.push(src);
+                        }
+                    });
+                    return results;
+                })()
+            """) or []
+        except Exception:
+            return []
+
+    def _extract_es_imports(self, js_content: str, base_url: str) -> List[str]:
+        """
+        Parse static and dynamic ES module import paths from a JS file body
+        and resolve them to absolute URLs against base_url.
+
+        Patterns handled:
+        - Static:  import X from './mod.js'
+        - Static:  import { a } from '../lib/utils.js'
+        - Static:  export { b } from './other.js'
+        - Dynamic: import('./lazy.js')
+        - Re-export: export * from './all.js'
+
+        CDN / absolute URLs (http/https) are excluded — they're out of scope
+        for same-origin analysis and already captured by the response handler.
+        """
+        # Match the module specifier string in import/export statements and
+        # dynamic import() calls. We intentionally only handle string literals
+        # (not computed import expressions) — those can't be statically resolved.
+        _IMPORT_RE = re.compile(
+            r"""(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.{1,2}/[^'"]+)['"]\s*[;,)]?"""
+            r"""|import\s*\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""",
+            re.MULTILINE,
+        )
+        urls = []
+        for m in _IMPORT_RE.finditer(js_content):
+            path = m.group(1) or m.group(2)
+            if not path:
+                continue
+            abs_url = urljoin(base_url, path)
+            safe, _ = validate_url(abs_url)
+            if safe and self.scope.in_scope(abs_url):
+                urls.append(abs_url)
+        return urls
+
+    def _fetch_es_module(self, mod_url: str, source_url: str, depth: int = 0) -> None:
+        """
+        Fetch an ES module JS file, register it, then recursively follow its
+        static import graph up to a fixed depth so transitive dependencies are
+        all captured and analyzed.
+
+        depth limit prevents runaway recursion on circular import graphs.
+        """
+        MAX_DEPTH = 3
+        if depth > MAX_DEPTH:
+            return
+        try:
+            if not mod_url.startswith(("http://", "https://")):
+                mod_url = urljoin(source_url, mod_url)
+
+            safe, _ = validate_url(mod_url)
+            if not safe or not self.scope.in_scope(mod_url):
+                return
+
+            if not self.registry.register_url(mod_url):
+                return  # already fetched
+
+            import requests as _req
+            resp = _req.get(
+                mod_url,
+                timeout=8,
+                verify=False,
+                headers=self._auth_headers(referer=source_url),
+            )
+            if resp.status_code != 200 or not resp.content:
+                return
+
+            # Reject HTML error pages at JS URLs
+            snippet = resp.content[:256].lstrip()
+            if snippet.startswith((b"<!DOCTYPE", b"<!doctype", b"<html")):
+                return
+
+            h = hashlib.sha256(resp.content).hexdigest()
+            if not self.registry.register_hash(h):
+                return
+
+            js_file = self._make_js_file(mod_url, resp.content, source_url, "es-module")
+            if self._add_js_file(js_file):
+                logger.debug("ES module captured: %s (depth=%d)", mod_url, depth)
+
+            # Recurse — follow transitive static imports
+            body_text = resp.content.decode("utf-8", errors="replace")
+            child_urls = self._extract_es_imports(body_text, mod_url)
+            for child_url in child_urls:
+                self._fetch_es_module(child_url, mod_url, depth + 1)
+
+        except Exception as e:
+            logger.debug("ES module fetch failed %s: %s", mod_url, e)
 
     def _fetch_dom_scripts(self, script_urls: list, source_page: str) -> None:
         """
@@ -1340,6 +1817,50 @@ class HeadlessEngine:
                     source_file="headless://websocket",
                     line_number=0, confidence=0.99,
                 ))
+
+        # Mine WebSocket message payloads for embedded API paths (item 9).
+        # WS messages frequently contain action types, resource paths, and
+        # query structures that reveal hidden API endpoints.
+        ws_endpoint_seen: Set[str] = set()
+        _WS_PATH_RE = re.compile(
+            r'["\'](?:url|path|endpoint|resource|action|route|href|api)'
+            r'["\']\s*:\s*["\'](/[A-Za-z0-9/_\-\.]+)["\']',
+            re.IGNORECASE,
+        )
+        for msg in self.ws_messages:
+            data = msg.get("data", "")
+            if not data or not isinstance(data, str):
+                continue
+            for m in _WS_PATH_RE.finditer(data):
+                path = m.group(1)
+                key  = f"WS-MSG:{path}"
+                if key in ws_endpoint_seen:
+                    continue
+                ws_endpoint_seen.add(key)
+                # Reconstruct a full URL from the WS connection URL
+                ws_conn_url = msg.get("url", "")
+                try:
+                    parsed_ws = urlparse(ws_conn_url)
+                    scheme    = "https" if parsed_ws.scheme in ("wss", "https") else "http"
+                    full_url  = f"{scheme}://{parsed_ws.netloc}{path}"
+                except Exception:
+                    full_url = path
+                lower = path.lower()
+                if any(k in lower for k in ["/auth", "/login", "/token", "/session"]):
+                    cat = "AUTH"
+                elif any(k in lower for k in ["/admin", "/management"]):
+                    cat = "ADMIN"
+                elif "/graphql" in lower:
+                    cat = "GRAPHQL"
+                else:
+                    cat = "API"
+                endpoints.append(Endpoint(
+                    url=full_url, path=path,
+                    method="WS-MSG", category=cat,
+                    source_file="headless://ws-message-payload",
+                    line_number=0, confidence=0.75,
+                ))
+
         return endpoints
 
     def _verify_auth(self, page, initial_url: str) -> dict:
@@ -1530,22 +2051,27 @@ class HeadlessEngine:
 
         # API / WS intercepts
         try:
-            api_calls = self._extract_api_calls(page)
-            ws_urls   = self._extract_ws_urls(page)
+            api_calls   = self._extract_api_calls(page)
+            ws_urls     = self._extract_ws_urls(page)
+            ws_messages = self._extract_ws_messages(page)   # item 9
             with self._lock:
                 self.api_calls.extend(api_calls)
                 self.ws_urls.extend(ws_urls)
+                self.ws_messages.extend(ws_messages)
         except Exception as e:
             logger.debug("API/WS extraction error %s: %s", source_url, e)
 
-        # WebWorkers
+        # WebWorkers + Service Workers (item 6)
         try:
             worker_urls = self._extract_worker_urls(page)
+            sw_urls     = self._extract_sw_urls(page)
             import threading as _t
             for w_url in worker_urls:
                 _t.Thread(target=self._fetch_worker_js, args=(w_url, source_url), daemon=True).start()
+            for sw_url in sw_urls:
+                _t.Thread(target=self._fetch_service_worker, args=(sw_url, source_url), daemon=True).start()
         except Exception as e:
-            logger.debug("Worker extraction error %s: %s", source_url, e)
+            logger.debug("Worker/SW extraction error %s: %s", source_url, e)
 
         # Iframes — add same-origin ones as routes
         try:
@@ -1584,16 +2110,33 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("DOM scrape error %s: %s", source_url, e)
 
+        # ES module entry points — collect <script type="module" src> URLs
+        # in the Playwright thread, then fetch + recurse off-thread (item 8).
+        try:
+            _module_urls = self._collect_module_script_urls(page)
+            if _module_urls:
+                import threading as _t
+                for _murl in _module_urls:
+                    _t.Thread(
+                        target=self._fetch_es_module,
+                        args=(_murl, source_url, 0),
+                        daemon=True,
+                    ).start()
+        except Exception as e:
+            logger.debug("ES module collection error %s: %s", source_url, e)
+
         # Reset interceptor buffers for next page
         try:
             page.evaluate("""
-                window.__bundlespy_requests = [];
-                window.__bundlespy_ws = [];
-                window.__bundlespy_workers = [];
-                window.__bundlespy_iframes = [];
-                window.__bspy_mutations = 0;
-                window.__bspy_requests = 0;
-                window.__bspy_last_active = Date.now();
+                window.__bundlespy_requests   = [];
+                window.__bundlespy_ws         = [];
+                window.__bundlespy_ws_messages = [];
+                window.__bundlespy_workers    = [];
+                window.__bundlespy_sw         = [];
+                window.__bundlespy_iframes    = [];
+                window.__bspy_mutations       = 0;
+                window.__bspy_requests        = 0;
+                window.__bspy_last_active     = Date.now();
             """)
         except Exception:
             pass
@@ -1828,16 +2371,24 @@ class HeadlessEngine:
         timings = self.timer.summary()
         workers_found = [js for js in self.js_files if js.technology == "webworker"]
 
+        sw_found      = [js for js in self.js_files if js.technology in ("service-worker", "service-worker-import")]
+        es_mod_found  = [js for js in self.js_files if js.technology in ("es-module",)]
+        shadow_found  = [js for js in self.js_files if "shadow-dom" in (js.technology or "")]
+
         stats = {
-            "pages":     self.pages_visited,
-            "js":        len(self.js_files),
-            "xhr":       sum(1 for c in self.api_calls if c.get("type") == "xhr"),
-            "fetch":     sum(1 for c in self.api_calls if c.get("type") == "fetch"),
-            "ws":        len(self.ws_urls),
-            "routes":    len(self.routes),
-            "endpoints": len(self.endpoints),
-            "workers":   len(workers_found),
-            "timings":   timings,
+            "pages":      self.pages_visited,
+            "js":         len(self.js_files),
+            "xhr":        sum(1 for c in self.api_calls if c.get("type") == "xhr"),
+            "fetch":      sum(1 for c in self.api_calls if c.get("type") == "fetch"),
+            "ws":         len(self.ws_urls),
+            "ws_messages":len(self.ws_messages),
+            "routes":     len(self.routes),
+            "endpoints":  len(self.endpoints),
+            "workers":    len(workers_found),
+            "sw":         len(sw_found),
+            "es_modules": len(es_mod_found),
+            "shadow_dom": len(shadow_found),
+            "timings":    timings,
         }
 
         logger.info(
@@ -1846,12 +2397,13 @@ class HeadlessEngine:
             len(self.routes), timings.get("total", 0),
         )
         return {
-            "js_files":   self.js_files,
-            "endpoints":  self.endpoints,
-            "routes":     list(self.routes),
-            "api_calls":  self.api_calls,
-            "stats":      stats,
-            "timings":    timings,
+            "js_files":    self.js_files,
+            "endpoints":   self.endpoints,
+            "routes":      list(self.routes),
+            "api_calls":   self.api_calls,
+            "ws_messages": self.ws_messages,
+            "stats":       stats,
+            "timings":     timings,
             "auth_result": self.auth_result,
         }
 
