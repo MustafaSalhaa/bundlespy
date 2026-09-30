@@ -1060,6 +1060,79 @@ class HeadlessEngine:
         except Exception:
             pass
 
+    def _collect_inline_scripts(self, page, source_page: str) -> None:
+        """
+        Extract and register all inline <script> blocks from the rendered DOM.
+
+        Inline scripts are never a network response — they're embedded in the
+        HTML — so _handle_response never fires for them and the response handler
+        captures 0 of them. This method reads them directly from the DOM via
+        page.evaluate() (must run in the Playwright thread) and registers each
+        unique block as a JSFile immediately.
+
+        Skips:
+        - Empty / whitespace-only blocks
+        - type="text/template", type="text/html", type="application/ld+json", etc.
+          (non-executable script tags used as data containers)
+        - Content already seen by the crawler (hash dedup via registry)
+        - Blocks smaller than 20 bytes (noise)
+        """
+        try:
+            blocks = page.evaluate("""
+                (function() {
+                    var results = [];
+                    document.querySelectorAll('script:not([src])').forEach(function(s, idx) {
+                        var t = (s.getAttribute('type') || '').toLowerCase();
+                        // Skip non-JS script types used as data containers
+                        if (t && t !== 'text/javascript' && t !== 'module' &&
+                            t !== 'application/javascript' && t !== '') {
+                            return;
+                        }
+                        var content = s.textContent || '';
+                        if (content.trim().length < 20) return;
+                        results.push({idx: idx, content: content});
+                    });
+                    return results;
+                })()
+            """) or []
+        except Exception:
+            return
+
+        for block in blocks:
+            try:
+                content = block.get("content", "")
+                if not content or len(content.strip()) < 20:
+                    continue
+
+                body = content.encode("utf-8", errors="replace")
+                h = hashlib.sha256(body).hexdigest()
+
+                # Hash-level dedup — skip if crawler or a previous headless
+                # page already registered this exact content
+                if not self.registry.register_hash(h):
+                    continue
+
+                idx = block.get("idx", 0)
+                # Synthetic URL that matches the format used by the static
+                # crawler's inline script URL scheme so reporting is consistent
+                inline_url = f"inline:{source_page}#script-{idx + 1}-{h[:12]}"
+
+                js_file = JSFile(
+                    url=inline_url,
+                    source_page=source_page,
+                    status_code=200,
+                    content_type="text/javascript",
+                    size_bytes=len(body),
+                    sha256=h,
+                    content=content,
+                    discovered_at=datetime.utcnow(),
+                    technology="headless-inline",
+                )
+                if self._add_js_file(js_file):
+                    logger.debug("Inline script captured [%d bytes] from %s", len(body), source_page)
+            except Exception as e:
+                logger.debug("Inline script registration error: %s", e)
+
     def _collect_dom_script_urls(self, page) -> list:
         """
         Extract all <script src> URLs from the rendered DOM.
@@ -1487,7 +1560,18 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("Iframe extraction error %s: %s", source_url, e)
 
-        # DOM scrape fallback — collect URLs in Playwright thread, fetch off-thread
+        # Inline scripts — extract content directly from DOM (no HTTP fetch needed).
+        # Must run in the Playwright thread; _collect_inline_scripts registers
+        # JSFile objects immediately using hash dedup so duplicates across pages
+        # are automatically skipped.
+        try:
+            self._collect_inline_scripts(page, source_url)
+        except Exception as e:
+            logger.debug("Inline script capture error %s: %s", source_url, e)
+
+        # DOM scrape fallback — collect <script src> URLs in Playwright thread,
+        # fetch the actual JS files off-thread (catches cache hits the response
+        # handler missed).
         try:
             _dom_script_urls = self._collect_dom_script_urls(page)
             if _dom_script_urls:
