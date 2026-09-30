@@ -1094,7 +1094,7 @@ def _is_login_page(page) -> bool:
         # password-related name/id/placeholder attributes (handles obfuscated
         # React/Vue forms where type="password" may be absent or minified).
         try:
-            found = page.evaluate("""
+            found = page.evaluate(r"""
                 (function() {
                     var inputs = document.querySelectorAll('input, [role="textbox"]');
                     for (var i = 0; i < inputs.length; i++) {
