@@ -55,8 +55,30 @@ def _route_priority(url: str) -> int:
 
 BLOCK_RESOURCE_TYPES = {
     "image", "media", "font", "texttrack",
-    "eventsource", "manifest",
+    "eventsource",
+    # NOTE: "manifest" intentionally removed — some servers serve JS chunk
+    # manifests (webpack, Vite) with resource type "manifest". Blocking it
+    # causes those files to never fire a response event and be missed entirely.
 }
+
+# Content-type fragments that indicate JavaScript — intentionally broad.
+# Servers use wildly inconsistent values: text/javascript, application/javascript,
+# application/x-javascript, text/plain (for CDN-served bundles), even
+# application/octet-stream. We catch all of them and fall back to URL pattern.
+_JS_CT_FRAGMENTS = (
+    "javascript",
+    "ecmascript",
+    "text/plain",         # CDN bundles, S3-hosted files
+    "application/octet-stream",  # misconfigured servers
+    "x-javascript",
+)
+
+# JS file extensions — includes compiled/transpiled variants
+_JS_EXTENSIONS = (
+    ".js", ".mjs", ".cjs", ".jsx",
+    ".ts", ".tsx",        # transpiled — server may serve compiled output at .ts URL
+    ".es", ".es6",
+)
 
 # Analytics/ad domains to block
 BLOCK_DOMAINS = {
@@ -660,39 +682,97 @@ class HeadlessEngine:
         lower = url.lower()
         return any(domain in lower for domain in BLOCK_DOMAINS)
 
+    def _is_js_response(self, url: str, ct: str, resource_type: str) -> bool:
+        """
+        Determine if a response is JavaScript using multiple signals.
+
+        Playwright's resource_type is the most reliable signal when available
+        ("script" covers all JS regardless of Content-Type). We then fall back
+        to content-type fragments and URL extension. This three-layer check
+        ensures we never miss a JS file regardless of how the server labels it.
+        """
+        # Layer 1: Playwright resource type — most reliable, set by browser
+        if resource_type in ("script", "worker"):
+            return True
+
+        ct_lower = ct.lower()
+
+        # Layer 2: Content-Type header — catch all known JS MIME types
+        if any(frag in ct_lower for frag in _JS_CT_FRAGMENTS):
+            # Sanity-check: text/plain and octet-stream are also used for CSS,
+            # images etc — only accept them if the URL also looks like JS.
+            if ct_lower.startswith("text/plain") or "octet-stream" in ct_lower:
+                path = url.split("?")[0].split("#")[0].lower()
+                return path.endswith(_JS_EXTENSIONS)
+            return True
+
+        # Layer 3: URL extension fallback — catches misconfigured servers that
+        # return an empty or wrong Content-Type for JS files.
+        path = url.split("?")[0].split("#")[0].lower()
+        return path.endswith(_JS_EXTENSIONS)
+
     def _handle_response(self, response, source_page: str) -> None:
-        """Capture JS files from network responses. Non-blocking."""
+        """
+        Capture JS files from network responses.
+
+        Called from the context-level response handler (fires for every
+        request across all pages). Uses three-layer JS detection to handle
+        servers with missing, wrong, or non-standard Content-Type headers.
+        """
         try:
-            url = response.url
-            ct  = response.headers.get("content-type", "")
-            is_js = (
-                any(t in ct.lower() for t in ["javascript", "text/plain"])
-                or url.split("?")[0].endswith((".js", ".mjs", ".cjs"))
-            )
-            if not is_js:
+            url           = response.url
+            ct            = response.headers.get("content-type", "")
+            resource_type = response.request.resource_type
+
+            if not self._is_js_response(url, ct, resource_type):
                 return
 
-            norm = self.registry._normalize(url)
-            if not self.registry.register_url(norm):
-                return
-
+            # Skip cross-origin JS that's outside our scope
             safe, _ = validate_url(url)
             if not safe or not self.scope.in_scope(url):
                 return
 
+            # URL-level dedup — normalize strips query/fragment for comparison
+            norm = self.registry._normalize(url)
+            if not self.registry.register_url(norm):
+                return
+
+            # Read the response body — body() can throw if the response was
+            # already consumed (e.g. aborted, or a streaming response that
+            # completed before we got here). Always handle it explicitly.
             try:
                 body = response.body()
-                if not body:
+            except Exception as e:
+                logger.debug("Could not read response body for %s: %s", url, e)
+                return
+
+            if not body:
+                return
+
+            # Content-level dedup — same file served at multiple URLs
+            h = hashlib.sha256(body).hexdigest()
+            if self.registry.seen_hash(h):
+                return
+
+            # Verify it actually looks like JS (not an HTML error page served
+            # with a JS content-type — common on misconfigured servers)
+            try:
+                snippet = body[:512].decode("utf-8", errors="replace").lstrip()
+                # HTML error pages returned with JS content-type
+                if snippet.startswith(("<!DOCTYPE", "<!doctype", "<html", "<HTML")):
+                    logger.debug("Skipping HTML-disguised-as-JS: %s", url)
                     return
-                h = hashlib.sha256(body).hexdigest()
-                if self.registry.seen_hash(h):
-                    return
-                js_file = self._make_js_file(url, body, source_page)
-                self._add_js_file(js_file)
             except Exception:
                 pass
-        except Exception:
-            pass
+
+            js_file = self._make_js_file(url, body, source_page)
+            added = self._add_js_file(js_file)
+            if added:
+                logger.debug("Captured JS [%s] %s (%d bytes)", resource_type, url, len(body))
+
+        except Exception as e:
+            logger.debug("_handle_response error for %s: %s",
+                         getattr(response, "url", "?"), e)
 
     def _is_destructive(self, text: str) -> bool:
         lower = (text or "").lower().strip()
@@ -877,6 +957,78 @@ class HeadlessEngine:
                     pass
         except Exception:
             pass
+
+    def _scrape_dom_scripts(self, page, source_page: str) -> None:
+        """
+        Fallback DOM scrape — extract all <script src> URLs from the rendered
+        page and fetch them directly. This catches JS files that the response
+        handler missed due to: browser cache hits (no network response fired),
+        service worker interception, or timing gaps between route() and on().
+
+        Also extracts dynamically-inserted scripts added after initial load
+        (React lazy(), Vue async components, Angular loadChildren).
+        """
+        try:
+            script_urls = page.evaluate("""
+                (function() {
+                    var seen = new Set();
+                    var results = [];
+                    document.querySelectorAll('script[src]').forEach(function(s) {
+                        var src = s.src;
+                        if (src && !seen.has(src)) {
+                            seen.add(src);
+                            results.push(src);
+                        }
+                    });
+                    return results;
+                })()
+            """)
+        except Exception:
+            return
+
+        if not script_urls:
+            return
+
+        import requests as _req
+        for js_url in script_urls:
+            try:
+                if not js_url or not js_url.startswith(("http://", "https://")):
+                    continue
+                safe, _ = validate_url(js_url)
+                if not safe or not self.scope.in_scope(js_url):
+                    continue
+                norm = self.registry._normalize(js_url)
+                if not self.registry.register_url(norm):
+                    continue  # already captured by response handler
+
+                resp = _req.get(
+                    js_url,
+                    timeout=8,
+                    verify=False,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/146.0.0.0 Safari/537.36"
+                        ),
+                        "Referer": source_page,
+                    },
+                )
+                if resp.status_code != 200 or not resp.content:
+                    continue
+
+                # Skip HTML error pages served at JS URLs
+                snippet = resp.content[:256].lstrip()
+                if snippet.startswith((b"<!DOCTYPE", b"<!doctype", b"<html", b"<HTML")):
+                    continue
+
+                h = hashlib.sha256(resp.content).hexdigest()
+                if self.registry.register_hash(h):
+                    js_file = self._make_js_file(js_url, resp.content, source_page, "dom-scrape-fallback")
+                    if self._add_js_file(js_file):
+                        logger.debug("DOM-scrape fallback captured: %s", js_url)
+            except Exception as e:
+                logger.debug("DOM-scrape fetch failed %s: %s", js_url, e)
 
     def _visit_page(self, page, url: str, context_page: str) -> Set[str]:
         """Visit a single page and extract all intelligence."""
@@ -1162,6 +1314,16 @@ class HeadlessEngine:
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
 
+            # DOM scrape fallback — catches anything the response handler missed
+            # (cache hits, service worker intercepts, timing gaps). Runs in a
+            # background thread so it doesn't delay page navigation.
+            import threading as _t
+            _t.Thread(
+                target=self._scrape_dom_scripts,
+                args=(page, source_url),
+                daemon=True,
+            ).start()
+
             # Reset interceptor buffers for next page
             try:
                 page.evaluate("""
@@ -1209,17 +1371,24 @@ class HeadlessEngine:
             self.timer.stop("browser_start")
 
             # ── Single context — created once, cookies injected once ──────────
+            # Always set a realistic Chrome UA — Playwright's default headless
+            # UA ("HeadlessChrome/...") is fingerprinted and blocked by most
+            # WAFs and CDNs (Cloudflare, Akamai, Imperva all check this).
+            _chrome_ua = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/146.0.0.0 Safari/537.36"
+            )
             kwargs = dict(
                 viewport={"width": 1280, "height": 800},
                 ignore_https_errors=True,
                 java_script_enabled=True,
+                user_agent=_chrome_ua,
             )
             if self.stealth:
-                kwargs["user_agent"] = (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/146.0.0.0 Safari/537.36"
-                )
+                # stealth mode: same UA (already set above) — additional
+                # evasion comes from the --disable-blink-features flag above
+                pass
             if self.extra_headers:
                 kwargs["extra_http_headers"] = self.extra_headers
 
@@ -1234,8 +1403,19 @@ class HeadlessEngine:
 
             ctx.add_init_script(INTERCEPT_JS)
 
-            # Central response handler on context — fires for every page, attached once
-            ctx.on("response", lambda r: self._handle_response(r, r.url))
+            # Central response handler on context — fires for every request
+            # across all pages in this context. We use the request's frame URL
+            # as the source_page so attribution is accurate (r.url is the asset
+            # URL, not the page that loaded it — a common confusion).
+            def _on_response(r):
+                try:
+                    # frame.url is the page that triggered this request
+                    source = r.frame.url if r.frame else r.url
+                except Exception:
+                    source = r.url
+                self._handle_response(r, source)
+
+            ctx.on("response", _on_response)
 
             ctx.route(
                 "**/*",
