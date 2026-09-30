@@ -3,21 +3,25 @@ BundleSpy crawler - built for 100% JS discovery accuracy.
 
 Discovery pipeline (in order):
   1.  robots.txt           - passive JS path hints
-  2.  sitemap.xml          - full page inventory
-  3.  Asset manifests      - CRA, Vite, Next.js, Laravel Mix, Gulp Rev
-  4.  Common paths probe   - well-known JS/page paths
+  2.  sitemap.xml          - full page inventory (all sitemaps, no early return)
+  3.  Asset manifests      - CRA, Vite, Next.js, Laravel Mix, Gulp Rev, Nuxt
+  4.  Common JS paths      - always probed (small core set + more with --common-paths)
   5.  HTML crawl           - BFS over every reachable page
   6.  JS-in-JS scanning    - chunk refs, dynamic imports, worker URLs inside fetched JS
-  7.  Webpack chunk engine - reconstruct full chunk map from runtime
+  7.  Webpack chunk engine - reconstruct full chunk map from runtime (webpack 4 + 5)
   8.  Next.js full mode    - __NEXT_DATA__ buildId -> _buildManifest.js -> every chunk
-  9.  Vite manifest        - file + imports array for complete Vite coverage
+  9.  Vite manifest        - file + imports array + content scan for hashed chunks
   10. Source maps          - fetch .map files, recover original source
-  11. Service workers      - extract precache lists
+  11. Service workers      - extract precache lists (Workbox + sw-precache)
   12. Import maps          - ES module specifier resolution
-  13. Link headers         - preload/prefetch response headers
+  13. Link headers         - preload/prefetch response headers (X-Link, Link)
   14. Protocol-relative    - //cdn.example.com/app.js
   15. data-src lazy loads  - intersection-observer lazy loaders
   16. Worker constructors  - new Worker() / new SharedWorker() inside JS
+  17. Module Federation    - remote entry discovery (remoteEntry.js probing)
+  18. SvelteKit / Remix    - framework-specific chunk patterns
+  19. Angular lazy routes  - loadChildren() chunk extraction
+  20. base href            - correct URL resolution on sites using <base>
 
 Design rules:
   - No duplicate fetches: dedup by (normalized URL + content hash)
@@ -69,16 +73,26 @@ COMMON_PAGE_PATHS = [
     "/.well-known/security.txt", "/robots.txt", "/sitemap.xml",
 ]
 
-COMMON_JS_PATHS = [
-    "/app.js", "/main.js", "/bundle.js", "/runtime.js", "/vendor.js",
-    "/index.js", "/application.js", "/app.min.js", "/main.min.js",
-    "/assets/app.js", "/assets/main.js", "/assets/index.js",
-    "/static/js/app.js", "/static/js/main.js", "/static/js/bundle.js",
-    "/static/js/runtime.js", "/static/js/vendor.js",
-    "/js/app.js", "/js/main.js", "/js/bundle.js",
+# Always probed — small, high-value core set
+CORE_JS_PATHS = [
+    "/app.js", "/main.js", "/bundle.js", "/runtime.js",
+    "/index.js", "/app.min.js", "/main.min.js",
+    "/static/js/main.js", "/static/js/bundle.js", "/static/js/runtime.js",
+    "/assets/app.js", "/assets/index.js",
+    "/js/app.js", "/js/main.js",
+]
+
+# Extended probing when --common-paths is set
+EXTENDED_JS_PATHS = [
+    "/vendor.js", "/application.js",
+    "/assets/main.js", "/assets/vendor.js",
+    "/static/js/app.js", "/static/js/vendor.js",
+    "/js/bundle.js", "/js/vendor.js",
     "/dist/app.js", "/dist/main.js", "/dist/bundle.js",
     "/build/app.js", "/build/main.js",
     "/public/js/app.js", "/public/js/main.js",
+    "/chunk-vendors.js", "/precache-manifest.js",
+    "/service-worker.js", "/sw.js",
 ]
 
 ASSET_MANIFEST_PATHS = [
@@ -98,6 +112,9 @@ ASSET_MANIFEST_PATHS = [
     "/webpack-stats.json",             # webpack-bundle-analyzer output
     "/.nuxt/manifest.json",            # Nuxt.js
     "/__nuxt/manifest.json",
+    "/__remix_manifest",               # Remix
+    "/__manifest",                     # Remix (alternate)
+    "/_app/version.json",              # SvelteKit
 ]
 
 SITEMAP_PATHS = [
@@ -109,19 +126,33 @@ SITEMAP_PATHS = [
     "/sitemap/sitemap.xml",
 ]
 
+# Module Federation remote entry filenames to probe
+MODULE_FEDERATION_PROBES = [
+    "/remoteEntry.js",
+    "/remote-entry.js",
+    "/remoteentry.js",
+    "/mf-manifest.json",
+    "/federation-manifest.json",
+    "/static/remoteEntry.js",
+    "/assets/remoteEntry.js",
+    "/dist/remoteEntry.js",
+]
+
 
 # ── Technology fingerprints ───────────────────────────────────────────────────
 
 TECH_PATTERNS: Dict[str, List[str]] = {
-    "React":   ["react.development.js", "__REACT_DEVTOOLS", "React.createElement", "_jsx("],
-    "Vue":     ["Vue.config", "__vue_router__", "createApp(", "__VUE__"],
-    "Angular": ["ng-version", "platformBrowserDynamic", "NgModule", "definitComponent"],
-    "Next.js": ["__NEXT_DATA__", "/_next/static", "__NEXT_ROUTER"],
-    "Nuxt.js": ["__NUXT__", "/_nuxt/", "__nuxt"],
-    "Webpack": ["__webpack_require__", "webpackBootstrap", "__webpack_modules__"],
-    "Vite":    ["/@vite/", "import.meta.hot", "/@fs/", "vite/preload"],
-    "Svelte":  ["SvelteComponent", "__svelte", "svelte/internal"],
-    "Ember":   ["Ember.Application", "define('ember", "EmberENV"],
+    "React":     ["react.development.js", "__REACT_DEVTOOLS", "React.createElement", "_jsx("],
+    "Vue":       ["Vue.config", "__vue_router__", "createApp(", "__VUE__"],
+    "Angular":   ["ng-version", "platformBrowserDynamic", "NgModule", "definitComponent"],
+    "Next.js":   ["__NEXT_DATA__", "/_next/static", "__NEXT_ROUTER"],
+    "Nuxt.js":   ["__NUXT__", "/_nuxt/", "__nuxt"],
+    "Webpack":   ["__webpack_require__", "webpackBootstrap", "__webpack_modules__"],
+    "Vite":      ["/@vite/", "import.meta.hot", "/@fs/", "vite/preload"],
+    "Svelte":    ["SvelteComponent", "__svelte", "svelte/internal", "/_app/immutable/"],
+    "Ember":     ["Ember.Application", "define('ember", "EmberENV"],
+    "Remix":     ["__remixContext", "__remix_manifest", "RemixBrowser"],
+    "Astro":     ["astro:scripts/", "_astro/", "astro-island"],
 }
 
 # ── Regexes compiled once at import time ─────────────────────────────────────
@@ -210,6 +241,12 @@ RE_VITE_CHUNK_STR = re.compile(
     re.IGNORECASE,
 )
 
+# SvelteKit immutable chunks: /_app/immutable/chunks/Foo-AbCdEfGh.js
+RE_SVELTE_CHUNK_STR = re.compile(
+    r'["\']([^"\']*/_app/immutable/[^"\']+\.js)["\']',
+    re.IGNORECASE,
+)
+
 # Import map inside <script type="importmap">
 RE_IMPORT_MAP_BLOCK = re.compile(
     r'<script[^>]+type=["\']importmap["\'][^>]*>(.*?)</script>',
@@ -222,6 +259,42 @@ RE_LINK_HEADER = re.compile(r'<([^>]+)>')
 # Workbox precache list in service workers
 RE_SW_PRECACHE = re.compile(
     r'["\']([^"\']*\.(?:js|mjs)(?:\?[^"\']*)?)["\']'
+)
+
+# <base href="..."> for URL resolution
+RE_BASE_HREF = re.compile(
+    r'<base[^>]+href=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+# integrity attribute on <script> tags - links to CDN-hosted files
+RE_SCRIPT_INTEGRITY = re.compile(
+    r'<script[^>]+src=["\']([^"\']+)["\'][^>]+integrity=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+# Angular loadChildren lazy routes: loadChildren: () => import('./module').then(...)
+RE_ANGULAR_LAZY = re.compile(
+    r"""loadChildren\s*:\s*\(\s*\)\s*=>\s*import\s*\(\s*['"`]([^'"`]+)['"`]\s*\)""",
+    re.IGNORECASE,
+)
+
+# Module Federation: exposes/remotes config in webpack
+RE_MF_REMOTE = re.compile(
+    r"""(?:remote|remotes)\s*:\s*\{([^}]{0,2000})\}""",
+    re.DOTALL,
+)
+
+# Remix asset manifest: imports array
+RE_REMIX_IMPORTS = re.compile(
+    r'"imports"\s*:\s*\[([^\]]+)\]',
+    re.IGNORECASE,
+)
+
+# Astro chunk patterns: _astro/Foo.AbCd1234.js
+RE_ASTRO_CHUNK = re.compile(
+    r'["\']([^"\']*/_astro/[^"\']+\.js)["\']',
+    re.IGNORECASE,
 )
 
 
@@ -250,6 +323,21 @@ def fingerprint_tech(content: str) -> str:
         if any(p in content for p in patterns):
             return tech
     return ""
+
+
+def _extract_base_href(html: str) -> Optional[str]:
+    """Extract <base href='...'> from HTML for correct relative URL resolution."""
+    m = RE_BASE_HREF.search(html)
+    return m.group(1).strip() if m else None
+
+
+def _resolve_with_base(url: str, base_href: Optional[str], page_url: str) -> str:
+    """Resolve a URL using <base href> if present, otherwise use the page URL."""
+    if not base_href:
+        return urljoin(page_url, url)
+    # base_href itself may be relative to the page
+    absolute_base = urljoin(page_url, base_href)
+    return urljoin(absolute_base, url)
 
 
 def _extract_js_from_manifest(content: str, base_url: str) -> List[str]:
@@ -312,14 +400,23 @@ def _parse_robots_for_js(content: str, base_url: str) -> List[str]:
 
 
 def _extract_js_from_link_header(headers: dict, base_url: str) -> List[str]:
-    link_hdr = headers.get("link") or headers.get("Link") or ""
+    """Parse Link response header for preloaded/prefetched JS files."""
+    # Try both capitalizations; some servers send X-Link
+    link_hdr = (
+        headers.get("link")
+        or headers.get("Link")
+        or headers.get("x-link")
+        or headers.get("X-Link")
+        or ""
+    )
     urls: List[str] = []
     for part in link_hdr.split(","):
         part = part.strip()
         m = RE_LINK_HEADER.match(part)
         if not m:
             continue
-        url = m.group(1)
+        url = m.group(1).strip()
+        # Include if explicitly as=script, or if path looks like JS
         if "as=script" in part or _is_js_url(url):
             urls.append(urljoin(base_url, url))
     return urls
@@ -380,12 +477,64 @@ def _extract_next_data(html: str) -> Optional[dict]:
         return None
 
 
+def _extract_remix_chunks(content: str, base_url: str) -> List[str]:
+    """Parse Remix asset manifest JSON for JS chunk URLs."""
+    urls: List[str] = []
+    try:
+        data = json.loads(content)
+    except Exception:
+        return urls
+    # Remix manifest: { routes: { "route-id": { module: "...", imports: [...] } } }
+    routes = data.get("routes", {})
+    for route in routes.values():
+        if not isinstance(route, dict):
+            continue
+        module = route.get("module", "")
+        if module and _is_js_url(module):
+            urls.append(urljoin(base_url, module))
+        for imp in route.get("imports", []):
+            if isinstance(imp, str) and _is_js_url(imp):
+                urls.append(urljoin(base_url, imp))
+    return list(dict.fromkeys(urls))
+
+
+def _extract_sveltekit_chunks(content: str, base_url: str) -> List[str]:
+    """
+    Parse SvelteKit version manifest + extract chunk URLs.
+    SvelteKit puts chunks at /_app/immutable/chunks/ with content hashes.
+    """
+    urls: List[str] = []
+    # Try JSON first (_app/version.json or manifest.json)
+    try:
+        data = json.loads(content)
+        # SvelteKit manifest.json has nested route entries
+        def _walk(obj: object, depth: int = 0) -> None:
+            if depth > 6:
+                return
+            if isinstance(obj, str) and _is_js_url(obj):
+                urls.append(urljoin(base_url, obj))
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    _walk(v, depth + 1)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _walk(item, depth + 1)
+        _walk(data)
+    except Exception:
+        pass
+    # Also scan raw content for /_app/immutable/ patterns
+    for m in RE_SVELTE_CHUNK_STR.finditer(content):
+        urls.append(urljoin(base_url, m.group(1)))
+    return list(dict.fromkeys(urls))
+
+
 # ── JS-in-JS scanner ─────────────────────────────────────────────────────────
 
 def _scan_js_for_urls(content: str, js_url: str, origin: str) -> List[str]:
     """
     Scan JS content for more JS URLs: dynamic imports, workers,
-    chunk URL strings, Vite hashed chunks, protocol-relative, etc.
+    chunk URL strings, Vite hashed chunks, protocol-relative, Astro chunks,
+    SvelteKit chunks, and Angular lazy routes.
     Returns absolute URLs only.
     """
     urls: Set[str] = set()
@@ -435,6 +584,28 @@ def _scan_js_for_urls(content: str, js_url: str, origin: str) -> List[str]:
     # Vite hashed chunks: "assets/Foo-Ab12Cd34.js"
     for m in RE_VITE_CHUNK_STR.finditer(content):
         abs_url = _abs("/" + m.group(1).lstrip("/"))
+        if abs_url:
+            urls.add(abs_url)
+
+    # SvelteKit immutable chunks: "/_app/immutable/chunks/Foo-Ab12Cd34.js"
+    for m in RE_SVELTE_CHUNK_STR.finditer(content):
+        abs_url = _abs(m.group(1))
+        if abs_url:
+            urls.add(abs_url)
+
+    # Astro chunks: "/_astro/Foo.Ab12Cd34.js"
+    for m in RE_ASTRO_CHUNK.finditer(content):
+        abs_url = _abs(m.group(1))
+        if abs_url:
+            urls.add(abs_url)
+
+    # Angular lazy routes: loadChildren: () => import('./some.module')
+    for m in RE_ANGULAR_LAZY.finditer(content):
+        raw = m.group(1)
+        # Convert module path to JS file if not already
+        if not raw.endswith(".js"):
+            raw = raw + ".js"
+        abs_url = _abs(raw)
         if abs_url:
             urls.add(abs_url)
 
@@ -664,9 +835,12 @@ class Crawler:
         self.pages_crawled:  int = 0
         self.page_access_states: Dict[str, int] = {}  # url -> http_status
 
-        # Internal: Next.js detection per-run
+        # Internal: framework detection per-run
         self._nextjs_detected = False
         self._nextjs_html: Optional[str] = None
+        self._svelte_detected = False
+        self._remix_detected = False
+        self._astro_detected = False
 
     @property
     def _origin(self) -> str:
@@ -674,27 +848,32 @@ class Crawler:
         return f"{p.scheme}://{p.netloc}"
 
     def crawl(self) -> None:
-        """Full crawl pipeline - runs all 16 discovery methods."""
+        """Full crawl pipeline - runs all discovery methods."""
         origin = self._origin
 
         # Phase 1: robots.txt
         self._discover_from_robots(origin)
 
-        # Phase 2: asset manifests (CRA, Vite, Next.js runtime, Laravel Mix, etc.)
+        # Phase 2: asset manifests (CRA, Vite, Next.js runtime, Laravel Mix, Remix, SvelteKit, etc.)
         self._discover_from_manifests(origin)
 
-        # Phase 3: common JS paths (optional)
+        # Phase 3: core JS paths always probed; extended set with --common-paths
+        for path in CORE_JS_PATHS:
+            self._fetch_js(origin + path, self.target_url)
         if self.common_paths:
-            for path in COMMON_JS_PATHS:
+            for path in EXTENDED_JS_PATHS:
                 self._fetch_js(origin + path, self.target_url)
 
-        # Phase 4: sitemap -> page queue
+        # Phase 4: Module Federation remote entry probing (always)
+        self._discover_module_federation(origin)
+
+        # Phase 5: sitemap -> page queue
         queue: deque = deque()
         queue.append((self.target_url, 0))
         self.visited_pages.add(self.target_url)
         self._feed_sitemap_to_queue(origin, queue)
 
-        # Phase 5: common page probes -> add live ones to queue
+        # Phase 6: common page probes -> add live ones to queue
         for path in COMMON_PAGE_PATHS:
             probe_url = origin + path
             if probe_url in self.visited_pages:
@@ -706,14 +885,20 @@ class Crawler:
                 self.visited_pages.add(probe_url)
                 queue.append((probe_url, 1))
 
-        # Phase 6: BFS HTML crawl
+        # Phase 7: BFS HTML crawl
         while queue and self.pages_crawled < self.max_pages:
             url, depth = queue.popleft()
             self._crawl_page(url, depth, queue)
 
-        # Phase 7: JS-in-JS pass + webpack/Vite/Next.js deep chunk pull
-        # (runs against every JS file collected during HTML crawl)
+        # Phase 8: JS-in-JS pass + webpack/Vite/Next.js deep chunk pull
+        # (runs against every JS file collected during HTML crawl; iterative)
         self._deep_js_pass()
+
+        # Phase 9: framework-specific post-crawl passes
+        if self._svelte_detected:
+            self._discover_sveltekit_chunks(origin)
+        if self._astro_detected:
+            self._discover_astro_chunks(origin)
 
         logger.info(
             "Crawl complete: %d pages, %d JS files",
@@ -724,7 +909,7 @@ class Crawler:
 
     def _crawl_page(self, url: str, depth: int, queue: deque) -> None:
         logger.debug("Crawling page: %s (depth %d)", url, depth)
-        content, status, content_type, _ = self.fetcher.get(url)
+        content, status, content_type, _sha256, headers = self.fetcher.get_with_headers(url)
 
         if status and status > 0:
             self.page_access_states[url] = status
@@ -749,22 +934,43 @@ class Crawler:
 
         self.pages_crawled += 1
 
-        # Next.js detection: save first HTML with __NEXT_DATA__ for later
+        # Framework detection
         if not self._nextjs_detected and "__NEXT_DATA__" in content:
             self._nextjs_detected = True
             self._nextjs_html = content
             logger.info("Next.js detected on %s", url)
+
+        if not self._svelte_detected and ("/_app/immutable/" in content or "__svelte" in content or "SvelteComponent" in content):
+            self._svelte_detected = True
+            logger.info("SvelteKit detected on %s", url)
+
+        if not self._remix_detected and ("__remixContext" in content or "__remix_manifest" in content):
+            self._remix_detected = True
+            logger.info("Remix detected on %s", url)
+
+        if not self._astro_detected and ("astro-island" in content or "_astro/" in content):
+            self._astro_detected = True
+            logger.info("Astro detected on %s", url)
 
         # Scan HTML attributes/comments for secrets
         html_findings = scan_html(content, url)
         if html_findings:
             self.html_findings.extend(html_findings)
 
+        # Extract base href for correct URL resolution
+        base_href = _extract_base_href(content)
+
         # Extract all JS from this page
-        for js_url in self._extract_all_js_from_html(content, url):
+        for js_url in self._extract_all_js_from_html(content, url, base_href=base_href):
             if len(self.js_files) >= self.max_js_files:
                 break
             self._fetch_js(js_url, url)
+
+        # Link response headers from the page itself
+        if headers and isinstance(headers, dict):
+            for js_url in _extract_js_from_link_header(headers, url):
+                if self.scope.in_scope(js_url):
+                    self._fetch_js(js_url, url)
 
         # Inline scripts
         for script in extract_inline_scripts(content):
@@ -784,42 +990,53 @@ class Crawler:
                     self.visited_pages.add(link_norm)
                     queue.append((link, depth + 1))
 
-    def _extract_all_js_from_html(self, html: str, base_url: str) -> List[str]:
+    def _extract_all_js_from_html(
+        self,
+        html: str,
+        base_url: str,
+        base_href: Optional[str] = None,
+    ) -> List[str]:
         """
         Extract JS URLs from every possible location in an HTML page.
+        Respects <base href> for correct URL resolution.
         """
         urls: Set[str] = set()
+        # Effective base for URL resolution
+        effective_base = urljoin(base_url, base_href) if base_href else base_url
 
         # Standard <script src> and <link rel=preload>
-        for url in extract_js_urls(html, base_url):
+        for url in extract_js_urls(html, effective_base):
             urls.add(url)
 
         # ES module import maps
-        for url in _extract_import_map(html, base_url):
+        for url in _extract_import_map(html, effective_base):
             urls.add(url)
 
         # data-src / data-lazy lazy loaders
         for m in RE_DATA_SRC_JS.finditer(html):
-            urls.add(urljoin(base_url, m.group(1)))
+            urls.add(urljoin(effective_base, m.group(1)))
 
         # Protocol-relative: "//cdn.example.com/app.js"
         for m in RE_PROTO_RELATIVE.finditer(html):
             parsed = urlparse(base_url)
             urls.add(f"{parsed.scheme}://{m.group(1)}")
 
+        # <script src="..." integrity="..."> - CDN-hosted scripts with SRI
+        for m in RE_SCRIPT_INTEGRITY.finditer(html):
+            src = m.group(1)
+            js_url = urljoin(effective_base, src)
+            if _is_js_url(js_url):
+                urls.add(js_url)
+
         # Service worker registration
         sw_m = RE_SW_REGISTER.search(html)
         if sw_m:
-            sw_url = urljoin(base_url, sw_m.group(1))
+            sw_url = urljoin(effective_base, sw_m.group(1))
             sw_content, sw_status, _, _ = self.fetcher.get(sw_url)
             if sw_content and sw_status == 200:
                 for u in _extract_js_from_service_worker(sw_content, sw_url):
                     if self.scope.in_scope(u):
                         urls.add(u)
-
-        # Link response headers on the page itself
-        # (fetcher doesn't expose headers right now so we skip here;
-        #  link-header extraction is done in _fetch_js for JS responses)
 
         return [
             u for u in urls
@@ -832,6 +1049,7 @@ class Crawler:
         """
         Fetch and store a single JavaScript file.
         Returns the JSFile if newly fetched, None if deduped or failed.
+        Also processes Link headers from the JS response.
         """
         norm = _normalize_url(url)
         if norm in self.visited_js:
@@ -841,13 +1059,13 @@ class Crawler:
         if len(self.js_files) >= self.max_js_files:
             return None
 
-        content, status, content_type, sha256 = self.fetcher.get(url)
+        content, status, content_type, sha256, resp_headers = self.fetcher.get_with_headers(url)
 
         # One retry on transient server errors
         if status in (500, 502, 503, 504) and retry:
             import time
             time.sleep(1)
-            content, status, content_type, sha256 = self.fetcher.get(url)
+            content, status, content_type, sha256, resp_headers = self.fetcher.get_with_headers(url)
 
         if not content or status not in range(200, 300):
             if status not in (404, 403, 0):
@@ -870,6 +1088,13 @@ class Crawler:
             return None
         self.seen_js_hashes.add(content_h)
 
+        # Process Link headers from the JS response itself
+        if resp_headers and isinstance(resp_headers, dict):
+            for linked_url in _extract_js_from_link_header(resp_headers, url):
+                if self.scope.in_scope(linked_url) and linked_url not in self.visited_js:
+                    # Queue for processing; _deep_js_pass will pick it up
+                    self._fetch_js(linked_url, url)
+
         tech = fingerprint_tech(content)
         has_map = "sourceMappingURL=" in content
         map_url_str = ""
@@ -884,7 +1109,7 @@ class Crawler:
             status_code    = status,
             content_type   = content_type,
             size_bytes     = len(content.encode("utf-8", errors="replace")),
-            sha256         = sha256,
+            sha256         = content_h,
             content        = content,
             discovered_at  = datetime.utcnow(),
             has_source_map = has_map,
@@ -902,16 +1127,16 @@ class Crawler:
         After the HTML crawl, scan every fetched JS file for:
         - More JS URLs (dynamic imports, workers, chunk strings)
         - Webpack chunk reconstruction
-        - Vite chunk reconstruction (via manifest + content scan)
+        - Vite chunk content scanning (hashed chunks found inline)
         - Next.js full build manifest
-        - Source map fetching
+        - Angular lazy route extraction
+        - SvelteKit/Astro chunk patterns
 
         Iterative: newly discovered chunks are added to the work queue
         so transitive chunk chains are fully resolved.
         """
         origin = self._origin
 
-        # Start with all JS files from the HTML crawl
         # Use an index to process newly added files during iteration
         i = 0
         while i < len(self.js_files):
@@ -921,7 +1146,7 @@ class Crawler:
             if not js_file.content:
                 continue
 
-            # 1. JS-in-JS URL scan
+            # 1. JS-in-JS URL scan (includes Angular lazy routes, Svelte, Astro)
             for url in _scan_js_for_urls(js_file.content, js_file.url, origin):
                 if self.scope.in_scope(url):
                     self._fetch_js(url, js_file.url)
@@ -941,7 +1166,23 @@ class Crawler:
                 if self.scope.in_scope(abs_url) and _is_js_url(abs_url):
                     self._fetch_js(abs_url, js_file.url)
 
-        # 4. Next.js full coverage (run once after crawl)
+            # 4. Vite chunk content scan: hashed assets referenced inline
+            # (catches chunks not listed in vite manifest if manifest wasn't found)
+            for m in RE_VITE_CHUNK_STR.finditer(js_file.content):
+                raw = "/" + m.group(1).lstrip("/")
+                abs_url = origin + raw
+                if self.scope.in_scope(abs_url):
+                    self._fetch_js(abs_url, js_file.url)
+
+            # 5. Framework detection updates from JS content
+            if not self._svelte_detected and "/_app/immutable/" in js_file.content:
+                self._svelte_detected = True
+            if not self._astro_detected and "/_astro/" in js_file.content:
+                self._astro_detected = True
+            if not self._remix_detected and "__remixContext" in js_file.content:
+                self._remix_detected = True
+
+        # 6. Next.js full coverage (run once after crawl)
         if self._nextjs_detected and self._nextjs_html:
             logger.info("Running Next.js full chunk discovery")
             for url in _discover_nextjs_chunks(self._nextjs_html, self.target_url, self.fetcher):
@@ -962,6 +1203,8 @@ class Crawler:
         """
         Try all known asset manifest paths.
         For Vite manifests, also runs the dedicated Vite chunk extractor.
+        For Remix manifests, runs the Remix chunk extractor.
+        For SvelteKit manifests, runs the SvelteKit extractor.
         """
         for path in ASSET_MANIFEST_PATHS:
             url = origin + path
@@ -973,8 +1216,21 @@ class Crawler:
                 continue
 
             # Vite manifest gets dedicated handling
-            if "vite" in path or (content and '"imports"' in content):
+            if "vite" in path or (content and '"imports"' in content and '"file"' in content):
                 for js_url in _extract_vite_chunks(content, origin):
+                    if self.scope.in_scope(js_url):
+                        self._fetch_js(js_url, url)
+                self._svelte_detected = False  # don't double-flag vite as svelte
+
+            # Remix manifests
+            if "remix" in path or "remix" in (ct_lower):
+                for js_url in _extract_remix_chunks(content, origin):
+                    if self.scope.in_scope(js_url):
+                        self._fetch_js(js_url, url)
+
+            # SvelteKit version.json or manifest.json under /_app/
+            if "_app" in path or "svelte" in path.lower():
+                for js_url in _extract_sveltekit_chunks(content, origin):
                     if self.scope.in_scope(js_url):
                         self._fetch_js(js_url, url)
 
@@ -984,7 +1240,14 @@ class Crawler:
                     self._fetch_js(js_url, url)
 
     def _feed_sitemap_to_queue(self, origin: str, queue: deque) -> None:
+        """
+        Process ALL sitemap paths - no early return after first valid sitemap.
+        Handles sitemap indexes recursively and regular sitemaps.
+        Queues all discovered pages across every sitemap found.
+        """
         ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+        total_queued = 0
+
         for path in SITEMAP_PATHS:
             url = origin + path
             content, status, _, _ = self.fetcher.get(url)
@@ -992,31 +1255,141 @@ class Crawler:
                 continue
             try:
                 root = ET.fromstring(content)
+
                 # sitemap index: recurse into child sitemaps
-                for sitemap in root.findall(".//sm:sitemap/sm:loc", ns):
-                    if sitemap.text:
-                        child_url = sitemap.text.strip()
+                child_sitemaps = root.findall(".//sm:sitemap/sm:loc", ns)
+                if child_sitemaps:
+                    for sitemap_elem in child_sitemaps:
+                        if not sitemap_elem.text:
+                            continue
+                        child_url = sitemap_elem.text.strip()
                         child_content, child_status, _, _ = self.fetcher.get(child_url)
-                        if child_content and child_status == 200:
-                            try:
-                                child_root = ET.fromstring(child_content)
-                                for loc in child_root.findall(".//sm:url/sm:loc", ns):
-                                    if loc.text:
-                                        page = loc.text.strip()
-                                        if page not in self.visited_pages and self.scope.in_scope(page):
-                                            self.visited_pages.add(page)
-                                            queue.append((page, 1))
-                            except Exception:
-                                pass
-                # regular sitemap
+                        if not child_content or child_status != 200:
+                            continue
+                        try:
+                            child_root = ET.fromstring(child_content)
+                            for loc in child_root.findall(".//sm:url/sm:loc", ns):
+                                if loc.text:
+                                    page = loc.text.strip()
+                                    if page not in self.visited_pages and self.scope.in_scope(page):
+                                        self.visited_pages.add(page)
+                                        queue.append((page, 1))
+                                        total_queued += 1
+                        except Exception:
+                            pass
+
+                # regular sitemap: direct <url><loc> entries
                 for loc in root.findall(".//sm:url/sm:loc", ns):
                     if loc.text:
                         page = loc.text.strip()
                         if page not in self.visited_pages and self.scope.in_scope(page):
                             self.visited_pages.add(page)
                             queue.append((page, 1))
-                if queue:
-                    logger.info("Sitemap %s: queued %d URLs", path, len(queue))
-                    return
+                            total_queued += 1
+
+                if total_queued > 0:
+                    logger.info("Sitemap %s: queued %d URLs total", path, total_queued)
+
+            except Exception:
+                pass
+
+    def _discover_module_federation(self, origin: str) -> None:
+        """
+        Probe well-known Module Federation remote entry paths.
+        remoteEntry.js exposes federation config and often contains
+        paths to all other federation chunks.
+        """
+        for path in MODULE_FEDERATION_PROBES:
+            url = origin + path
+            if url in self.visited_js:
+                continue
+            content, status, ct, _ = self.fetcher.get(url)
+            if not content or status != 200:
+                continue
+            ct_lower = (ct or "").lower()
+
+            # remoteEntry.js: fetch and scan for more chunk refs
+            if path.endswith(".js"):
+                if self.scope.in_scope(url):
+                    self._fetch_js(url, origin)
+                    logger.info("Module Federation remote entry found: %s", url)
+
+            # mf-manifest.json or federation-manifest.json
+            elif path.endswith(".json") and any(t in ct_lower for t in ["json", "text"]):
+                try:
+                    data = json.loads(content)
+                    # Common MF manifest shapes
+                    for key in ("exposes", "remotes", "chunks", "files"):
+                        section = data.get(key, {})
+                        if isinstance(section, dict):
+                            for v in section.values():
+                                if isinstance(v, str) and _is_js_url(v):
+                                    abs_url = urljoin(origin, v)
+                                    if self.scope.in_scope(abs_url):
+                                        self._fetch_js(abs_url, url)
+                        elif isinstance(section, list):
+                            for item in section:
+                                if isinstance(item, str) and _is_js_url(item):
+                                    abs_url = urljoin(origin, item)
+                                    if self.scope.in_scope(abs_url):
+                                        self._fetch_js(abs_url, url)
+                except Exception:
+                    pass
+
+    def _discover_sveltekit_chunks(self, origin: str) -> None:
+        """
+        SvelteKit-specific chunk discovery after crawl.
+        Probes /_app/immutable/ paths and parses SvelteKit manifest.
+        """
+        svelte_paths = [
+            "/_app/immutable/entry/start.js",
+            "/_app/immutable/entry/app.js",
+            "/_app/manifest.json",
+            "/_app/version.json",
+        ]
+        for path in svelte_paths:
+            url = origin + path
+            content, status, ct, _ = self.fetcher.get(url)
+            if not content or status != 200:
+                continue
+            if path.endswith(".js") and self.scope.in_scope(url):
+                self._fetch_js(url, origin)
+            elif path.endswith(".json"):
+                for js_url in _extract_sveltekit_chunks(content, origin):
+                    if self.scope.in_scope(js_url):
+                        self._fetch_js(js_url, url)
+
+    def _discover_astro_chunks(self, origin: str) -> None:
+        """
+        Astro-specific chunk discovery.
+        Astro puts page chunks at /_astro/<name>.<hash>.js.
+        Scans already-fetched JS for cross-references to other Astro chunks.
+        """
+        # Already handled in _deep_js_pass via RE_ASTRO_CHUNK
+        # This post-pass probes the Astro manifest if it exists
+        astro_manifest_paths = [
+            "/_astro/manifest.json",
+            "/dist/client/_astro/manifest.json",
+        ]
+        for path in astro_manifest_paths:
+            url = origin + path
+            content, status, ct, _ = self.fetcher.get(url)
+            if not content or status != 200:
+                continue
+            try:
+                data = json.loads(content)
+                # Walk JSON for .js references
+                def _walk_astro(obj: object, depth: int = 0) -> None:
+                    if depth > 5:
+                        return
+                    if isinstance(obj, str) and _is_js_url(obj):
+                        abs_url = urljoin(origin, obj)
+                        if self.scope.in_scope(abs_url):
+                            self._fetch_js(abs_url, url)
+                    elif isinstance(obj, (dict, list)):
+                        items = obj.values() if isinstance(obj, dict) else obj
+                        for item in items:
+                            _walk_astro(item, depth + 1)
+                _walk_astro(data)
             except Exception:
                 pass
