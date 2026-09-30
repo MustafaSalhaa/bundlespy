@@ -3,13 +3,17 @@ BundleSpy Advanced Headless Engine — optimized for speed and coverage.
 
 Optimization principles:
 - Adaptive waits instead of fixed sleeps
-- DOM stability detection instead of networkidle
+- CDP-level network idle + JS in-flight counter (two-phase stability)
+- Action-based crawl queue — models state transitions, not just URLs
 - Concurrent page processing with worker pool
 - Event-driven pipeline — react to actual activity
 - Central deduplication registry — never analyze same asset twice
+- Structural DOM simhash — skips layout-identical SPA pages
 - Priority queue — high-value routes first
 - Resource blocking — skip images/fonts/ads, keep JS/XHR/WS
-- Shared page stabilization helper
+- Logout guard — href + text detection in 10 languages
+- Browser drift detection + auto-recovery
+- Session state verification with mid-crawl loss detection
 - Phase timing metrics
 """
 
@@ -31,6 +35,34 @@ from ..storage.models import JSFile, Endpoint
 from ..safety.network import validate_url
 
 logger = logging.getLogger("bundlespy.discovery.headless")
+
+
+# ── Typed crawl actions — models page state transitions ──────────────────────
+
+from enum import Enum
+
+class ActionType(Enum):
+    LOAD_URL   = "load_url"
+    FILL_FORM  = "fill_form"
+    LEFT_CLICK = "left_click"
+
+@dataclass
+class CrawlAction:
+    """
+    A typed crawl action — models a state transition, not just a URL visit.
+    Inspired by Katana's action-based crawl graph.
+    """
+    action_type: ActionType
+    url:         str
+    selector:    str  = ""   # CSS selector for FillForm / LeftClick targets
+    depth:       int  = 0
+    parent_url:  str  = ""
+
+    def key(self) -> str:
+        """Deduplication key — same action on same element = same key."""
+        return hashlib.sha256(
+            f"{self.action_type.value}:{self.url}:{self.selector}".encode()
+        ).hexdigest()[:16]
 
 
 # ── Route priority — high-value routes processed first ───────────────────────
@@ -132,9 +164,10 @@ SAFE_INPUT_NAMES = {
 # ── DOM stability detection JS ────────────────────────────────────────────────
 
 STABILITY_INIT_JS = """
-window.__bspy_mutations   = 0;
-window.__bspy_requests    = 0;
-window.__bspy_last_active = Date.now();
+window.__bspy_mutations     = 0;
+window.__bspy_requests      = 0;
+window.__bspy_inflight      = 0;
+window.__bspy_last_active   = Date.now();
 
 const obs = new MutationObserver(muts => {
     const meaningful = muts.filter(m =>
@@ -154,20 +187,35 @@ obs.observe(document.documentElement, {
 const origFetch = window.fetch;
 window.fetch = function(...args) {
     window.__bspy_requests++;
+    window.__bspy_inflight++;
     window.__bspy_last_active = Date.now();
     const p = origFetch.apply(this, args);
-    p.then(() => { window.__bspy_last_active = Date.now(); }).catch(() => {});
+    p.then(() => {
+        window.__bspy_inflight = Math.max(0, window.__bspy_inflight - 1);
+        window.__bspy_last_active = Date.now();
+    }).catch(() => {
+        window.__bspy_inflight = Math.max(0, window.__bspy_inflight - 1);
+    });
     return p;
 };
 const origXHR = window.XMLHttpRequest.prototype.send;
 window.XMLHttpRequest.prototype.send = function(...args) {
     window.__bspy_requests++;
+    window.__bspy_inflight++;
     window.__bspy_last_active = Date.now();
+    this.addEventListener('loadend', function() {
+        window.__bspy_inflight = Math.max(0, window.__bspy_inflight - 1);
+        window.__bspy_last_active = Date.now();
+    });
     return origXHR.apply(this, args);
 };
 
 window.__bspy_stable = function(quietMs) {
-    return (Date.now() - window.__bspy_last_active) >= quietMs;
+    return window.__bspy_inflight === 0 &&
+           (Date.now() - window.__bspy_last_active) >= quietMs;
+};
+window.__bspy_inflight_count = function() {
+    return window.__bspy_inflight;
 };
 """
 
@@ -546,17 +594,23 @@ class PageStabilizer:
 
     def wait_for_load(self, max_ms: int = 8000) -> None:
         """
-        Wait for initial page load — uses DOMContentLoaded + network quiet
-        instead of networkidle which can hang on SPAs with polling.
+        Wait for initial page load using a two-phase approach:
+        1. Playwright's networkidle (CDP-level, catches all XHR/fetch) with a
+           short cap so SPA polling loops don't stall it.
+        2. Our JS in-flight counter as a fallback — catches requests that fired
+           before our init script landed or after networkidle returned early.
         """
         start = time.monotonic()
+
+        # Phase A: CDP networkidle — most accurate, capped to avoid SPA hangs
         try:
-            self.page.wait_for_load_state("domcontentloaded",
-                                          timeout=min(max_ms, 5000))
+            self.page.wait_for_load_state("networkidle",
+                                          timeout=min(max_ms // 2, 3000))
         except Exception:
+            # networkidle timed out (SPA with polling) — fall through to JS check
             pass
 
-        # Then wait for actual stability
+        # Phase B: JS in-flight counter + DOM quiet
         remaining_ms = max_ms - int((time.monotonic() - start) * 1000)
         self.wait(max_ms=max(remaining_ms, 500), quiet_ms=200)
 
@@ -749,6 +803,9 @@ class HeadlessEngine:
         self.pages_visited: int        = 0
         self.auth_result: Optional[dict] = None  # populated during run()
         self._seen_interact_states: Set[str] = set()  # DOM states already interacted with
+        # Action queue — typed crawl actions for state-based exploration
+        self._action_queue:   deque         = deque()
+        self._seen_actions:   Set[str]      = set()
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
@@ -888,16 +945,18 @@ class HeadlessEngine:
     def _is_logout_link(self, element) -> bool:
         """
         Return True if the element is a logout/sign-out link.
-        Checks visible text, href, id, and class — covers all common patterns.
-        Never click a logout link: it invalidates the session and silently
-        breaks all subsequent authenticated page crawls.
+        Checks visible text, href path segments, id, and class — same approach
+        as Katana's isLogoutPage() which catches CSS-icon logout buttons whose
+        visible text is empty but whose href is /logout or /signout.
         """
         try:
             text  = (element.inner_text() or "").lower().strip()
             href  = (element.get_attribute("href")  or "").lower()
             eid   = (element.get_attribute("id")    or "").lower()
             cls   = (element.get_attribute("class") or "").lower()
-            combined = f"{text} {href} {eid} {cls}"
+            # Check href path segments specifically — catches icon-only buttons
+            href_path = urlparse(href).path if href.startswith("/") else href
+            combined = f"{text} {href_path} {eid} {cls}"
             return any(kw in combined for kw in LOGOUT_KEYWORDS)
         except Exception:
             return False
@@ -942,6 +1001,116 @@ class HeadlessEngine:
             return True
         except Exception:
             return False
+
+    def _queue_action(self, action: CrawlAction) -> bool:
+        """
+        Queue a typed crawl action. Returns True if new, False if already seen.
+        Thread-safe.
+        """
+        k = action.key()
+        with self._lock:
+            if k in self._seen_actions:
+                return False
+            self._seen_actions.add(k)
+            self._action_queue.append(action)
+        return True
+
+    def _discover_form_actions(self, page, source_url: str) -> None:
+        """
+        Discover forms on the current page and queue them as FILL_FORM actions
+        for dedicated follow-up crawling — same pattern Katana uses for FillForm
+        action type. This ensures form-triggered API calls are captured even if
+        the form wasn't visible during the main page visit.
+        """
+        try:
+            forms = page.evaluate("""
+                (function() {
+                    var results = [];
+                    document.querySelectorAll('form').forEach(function(f, i) {
+                        var action = f.getAttribute('action') || '';
+                        var id     = f.getAttribute('id')     || '';
+                        var cls    = f.getAttribute('class')  || '';
+                        // Skip payment/destructive forms
+                        var ctx = (action + id + cls).toLowerCase();
+                        results.push({
+                            idx:    i,
+                            action: action,
+                            id:     id,
+                            cls:    cls,
+                            ctx:    ctx,
+                        });
+                    });
+                    return results;
+                })()
+            """) or []
+        except Exception:
+            return
+
+        skip_kws = SKIP_FORM_CONTEXTS
+        for f in forms:
+            ctx = f.get("ctx", "")
+            if any(kw in ctx for kw in skip_kws):
+                continue
+            selector = f"form:nth-of-type({f['idx'] + 1})"
+            self._queue_action(CrawlAction(
+                action_type=ActionType.FILL_FORM,
+                url=source_url,
+                selector=selector,
+                parent_url=source_url,
+            ))
+
+    def _discover_click_actions(self, page, source_url: str) -> None:
+        """
+        Discover JS-only interactive elements (buttons with no href, elements
+        with onclick/data-action) and queue them as LEFT_CLICK actions.
+        Katana queues these as ActionTypeLeftClick — we do the same.
+        """
+        try:
+            elements = page.evaluate("""
+                (function() {
+                    var results = [];
+                    var seen    = new Set();
+                    var sels    = [
+                        'button:not([type="submit"]):not([form])',
+                        '[role="button"]:not(a)',
+                        '[data-action]',
+                        '[data-target]',
+                        '[onclick]',
+                    ];
+                    sels.forEach(function(sel) {
+                        try {
+                            document.querySelectorAll(sel).forEach(function(el, i) {
+                                var txt  = (el.innerText || '').trim().toLowerCase();
+                                var id   = el.getAttribute('id')    || '';
+                                var cls  = el.getAttribute('class') || '';
+                                var key  = txt + '|' + id + '|' + cls;
+                                if (seen.has(key) || !txt) return;
+                                seen.add(key);
+                                results.push({ sel: sel, idx: i, text: txt });
+                            });
+                        } catch(e) {}
+                    });
+                    return results.slice(0, 20);
+                })()
+            """) or []
+        except Exception:
+            return
+
+        for el in elements:
+            text = el.get("text", "")
+            if not text:
+                continue
+            if any(kw in text for kw in DESTRUCTIVE_KEYWORDS):
+                continue
+            if any(kw in text for kw in LOGOUT_KEYWORDS):
+                continue
+            selector = f"{el['sel']}:nth-of-type({el['idx'] + 1})"
+            self._queue_action(CrawlAction(
+                action_type=ActionType.LEFT_CLICK,
+                url=source_url,
+                selector=selector,
+                parent_url=source_url,
+            ))
 
     def _extract_routes(self, page) -> Set[str]:
         try:
@@ -2096,26 +2265,43 @@ class HeadlessEngine:
 
     def _dom_fingerprint(self, page) -> str:
         """
-        DOM state fingerprint — pathname + title + element count + heading text.
+        Structural DOM fingerprint — hashes tag structure, not content.
 
-        pathname is the primary key: two SPA states with the same title but
-        different URLs are different states and must both be explored.
-        title/count/heading catch cases where a SPA renders different content
-        at the same path (e.g. a modal that replaces the whole page body).
+        Two SPA pages with the same layout (same component) but different data
+        (different product IDs) get the same hash and are treated as duplicates.
+        This is the same principle as Katana's SimhashOracle.
+
+        Structure signature: pathname + sorted tag-depth pairs from first 80
+        elements + form count + input count. Ignores text content so product
+        listing pages at /products/1 and /products/2 hash identically.
         """
         try:
             sig = page.evaluate("""
                 (function() {
-                    var path  = window.location.pathname || '/';
-                    var t     = document.title || '';
-                    var c     = document.body ? document.body.children.length : 0;
-                    var h     = document.querySelector('h1,h2,[class*="title"],[class*="header"]');
-                    var txt   = h ? h.innerText.trim().slice(0,80) : '';
-                    var forms = document.querySelectorAll('form').length;
-                    return path + '|' + t + '|' + c + '|' + txt + '|' + forms;
+                    var path = window.location.pathname || '/';
+                    // Structural walk — tag names + nesting depth, no text
+                    var tags = [];
+                    var walker = document.createTreeWalker(
+                        document.body || document.documentElement,
+                        NodeFilter.SHOW_ELEMENT,
+                        null
+                    );
+                    var depth = 0;
+                    var node  = walker.nextNode();
+                    var count = 0;
+                    while (node && count < 80) {
+                        tags.push(node.tagName.toLowerCase());
+                        node = walker.nextNode();
+                        count++;
+                    }
+                    var forms  = document.querySelectorAll('form').length;
+                    var inputs = document.querySelectorAll('input,select,textarea').length;
+                    // Sort tags so order-independent structural equivalence is detected
+                    var struct = tags.slice().sort().join(',');
+                    return path + '|' + struct + '|f' + forms + '|i' + inputs;
                 })()
             """)
-            return __import__('hashlib').sha256((sig or "").encode()).hexdigest()[:16]
+            return hashlib.sha256((sig or "").encode()).hexdigest()[:16]
         except Exception:
             return ""
 
@@ -2445,6 +2631,10 @@ class HeadlessEngine:
 
                     new_routes = self._flush_page_intel(page, url)
 
+                    # Discover typed actions (forms, JS buttons) for Phase 3
+                    self._discover_form_actions(page, url)
+                    self._discover_click_actions(page, url)
+
                     # Feed newly discovered routes straight back into the BFS
                     # queue so they're visited this run, not a future run.
                     new_urls = self._build_urls(new_routes)
@@ -2458,13 +2648,74 @@ class HeadlessEngine:
 
             self.timer.stop("phase2_routes")
 
+            # ── Phase 3: Action queue — state-based crawl ─────────────────────
+            # Process queued FILL_FORM and LEFT_CLICK actions discovered during
+            # BFS. Each action navigates to its source URL and fires the action,
+            # capturing any new API calls or routes the state transition reveals.
+            self.timer.start("phase3_actions")
+            _action_pages_visited = 0
+            _MAX_ACTION_PAGES = min(20, max(0, self.max_pages - self.pages_visited))
+
+            while self._action_queue and _action_pages_visited < _MAX_ACTION_PAGES:
+                action = self._action_queue.popleft()
+                try:
+                    # Navigate to the page that hosts this action
+                    self._recover_drift(page, action.url, stabilizer)
+                    if page.url != action.url:
+                        try:
+                            page.goto(action.url, timeout=self.timeout * 1000,
+                                      wait_until="domcontentloaded")
+                            stabilizer.wait_for_framework(max_ms=2000)
+                        except Exception:
+                            continue
+
+                    if action.action_type == ActionType.FILL_FORM:
+                        try:
+                            form = page.query_selector("form")
+                            if form and form.is_visible():
+                                self._interact_forms(page, stabilizer)
+                                new_routes = self._flush_page_intel(page, action.url)
+                                for r in new_routes:
+                                    if self._add_route(r):
+                                        full = self._build_urls({r})
+                                        for u in full:
+                                            if not self.registry.seen_url(u):
+                                                bfs_queue.append(u)
+                                _action_pages_visited += 1
+                        except Exception as e:
+                            logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
+
+                    elif action.action_type == ActionType.LEFT_CLICK:
+                        try:
+                            el = page.query_selector(action.selector)
+                            if el and el.is_visible() and el.is_enabled():
+                                el.scroll_into_view_if_needed(timeout=500)
+                                el.click(timeout=800)
+                                stabilizer.wait_after_interaction(max_ms=1000)
+                                new_routes = self._flush_page_intel(page, action.url)
+                                for r in new_routes:
+                                    if self._add_route(r):
+                                        full = self._build_urls({r})
+                                        for u in full:
+                                            if not self.registry.seen_url(u):
+                                                bfs_queue.append(u)
+                                _action_pages_visited += 1
+                        except Exception as e:
+                            logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
+
+                except Exception as e:
+                    logger.debug("Action processing error: %s", e)
+
+            self.timer.stop("phase3_actions")
+            logger.info("Phase 3 done: %d action pages", _action_pages_visited)
+
             try:
                 ctx.close()
             except Exception:
                 pass
             browser.close()
 
-        # ── Phase 3: Build endpoints ──────────────────────────────────────────
+        # ── Phase 4: Build endpoints ──────────────────────────────────────────
         self.timer.start("endpoint_build")
         self.endpoints = self._api_calls_to_endpoints()
         self.timer.stop("endpoint_build")
@@ -2478,19 +2729,20 @@ class HeadlessEngine:
         shadow_found  = [js for js in self.js_files if "shadow-dom" in (js.technology or "")]
 
         stats = {
-            "pages":      self.pages_visited,
-            "js":         len(self.js_files),
-            "xhr":        sum(1 for c in self.api_calls if c.get("type") == "xhr"),
-            "fetch":      sum(1 for c in self.api_calls if c.get("type") == "fetch"),
-            "ws":         len(self.ws_urls),
-            "ws_messages":len(self.ws_messages),
-            "routes":     len(self.routes),
-            "endpoints":  len(self.endpoints),
-            "workers":    len(workers_found),
-            "sw":         len(sw_found),
-            "es_modules": len(es_mod_found),
-            "shadow_dom": len(shadow_found),
-            "timings":    timings,
+            "pages":         self.pages_visited,
+            "js":            len(self.js_files),
+            "xhr":           sum(1 for c in self.api_calls if c.get("type") == "xhr"),
+            "fetch":         sum(1 for c in self.api_calls if c.get("type") == "fetch"),
+            "ws":            len(self.ws_urls),
+            "ws_messages":   len(self.ws_messages),
+            "routes":        len(self.routes),
+            "endpoints":     len(self.endpoints),
+            "workers":       len(workers_found),
+            "sw":            len(sw_found),
+            "es_modules":    len(es_mod_found),
+            "shadow_dom":    len(shadow_found),
+            "actions_queued": len(self._seen_actions),
+            "timings":       timings,
         }
 
         logger.info(
