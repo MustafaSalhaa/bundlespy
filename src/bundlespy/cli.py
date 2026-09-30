@@ -179,10 +179,34 @@ other:
     local.add_argument("--no-color",      action="store_true", help="Disable ANSI colors")
 
     # ── demo ──────────────────────────────────────────────────────────────────
-    sub.add_parser(
+    demo = sub.add_parser(
         "demo",
         help="Run an offline demo with fake findings",
-        description="Print a sample scan report using fake data - no network access needed.",
+        description=(
+            "Print a sample scan report using fake data — no network access needed.\n\n"
+            "examples:\n"
+            "  bundlespy demo                              terminal output\n"
+            "  bundlespy demo --format html                write HTML report to ./bundlespy-reports/\n"
+            "  bundlespy demo --format html,json           write both formats\n"
+            "  bundlespy demo --format html -o ./demo/     custom output directory\n"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    demo.add_argument(
+        "-f", "--format", default="terminal", metavar="FMT",
+        help="Output format: terminal (default), html, json, csv, burp\n  combine with commas: --format html,json",
+    )
+    demo.add_argument(
+        "-o", "--output", default="", metavar="DIR",
+        help="Directory to write report files (default: ./bundlespy-reports/)",
+    )
+    demo.add_argument(
+        "--report-name", default="bundlespy-demo", metavar="NAME",
+        help="Filename stem for report files (default: bundlespy-demo)",
+    )
+    demo.add_argument(
+        "--no-color", action="store_true",
+        help="Disable ANSI colors in terminal output",
     )
 
     return parser
@@ -1547,7 +1571,7 @@ def run_local(args) -> int:
     return 1 if critical else 0
 
 
-def run_demo() -> int:
+def run_demo(args=None) -> int:
     from .storage.models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
     from .analysis.library_scanner import LibraryFinding
     import hashlib
@@ -2045,116 +2069,140 @@ def run_demo() -> int:
     except Exception:
         fake_attack_report = None
 
-    # ── Print ──────────────────────────────────────────────────────────────────
-    print_header(
-        "https://demo.example.com",
-        mode="Headless + Stealth + Auto-Login",
-        scope="Strict",
-        version=PROJECT_VERSION,
-        author=AUTHOR_NAME,
-    )
-
-    print_report(
-        result,
-        verbose=True,
-        extras={
-            "login_result": {
-                "success": True, "method": "form_submit",
-                "login_url": "https://demo.example.com/login",
-                "final_url": "https://demo.example.com/dashboard",
-                "cookies": [
-                    {"name": "session", "value": "eyJhbGci..."},
-                    {"name": "csrf_token", "value": "8f3a2b..."},
-                ],
-                "cookie_string": "session=eyJhbGci...; csrf_token=8f3a2b...",
-                "token_keys": ["access_token", "refresh_token"],
-                "steps": [
-                    "navigate to /login",
-                    "fill #email → demo@example.com",
-                    "fill #password → [redacted]",
-                    "submit form",
-                    "MFA bypassed — OTP field not required in demo env",
-                    "redirected to /dashboard — session active",
-                ],
-                "error_message": "",
-            },
-            "headless_stats": {
-                "pages": 34, "js": 7, "xhr": 142, "fetch": 58,
-                "ws": 3, "routes": 18, "endpoints": 31, "workers": 2,
-                "timings": {"total_ms": 9412, "pages_ms": 7840, "analysis_ms": 1572},
-            },
-            "source_map_details": {
-                "discovered": 7, "valid": 7, "recovered": 7, "sources": 47,
-                "items": [
-                    {"js": "main.8f31ab.chunk.js",           "map": "main.8f31ab.chunk.js.map",           "sources": 12},
-                    {"js": "vendors~main.a3c9f1.chunk.js",   "map": "vendors~main.a3c9f1.chunk.js.map",   "sources": 28},
-                    {"js": "auth.b2a17f.chunk.js",           "map": "auth.b2a17f.chunk.js.map",           "sources": 4},
-                    {"js": "admin.d4c881.chunk.js",          "map": "admin.d4c881.chunk.js.map",          "sources": 3},
-                ],
-            },
-            "chunk_stats": {
-                "runtime": True, "discovered": 12, "downloaded": 12,
-                "endpoints": 23, "findings": 3,
-            },
-            "passive_stats": {
-                "source": "Wayback Machine + CommonCrawl",
-                "urls": 318, "js": 41, "unique": 38, "new": 9,
-            },
-            "lib_findings": [
-                LibraryFinding(
-                    library="lodash", version="4.6.1", cve_id="CVE-2019-10744",
-                    severity="HIGH", cvss=7.4,
-                    description="Prototype pollution via merge() — attacker can overwrite Object.prototype",
-                    remediation="Upgrade to lodash >= 4.17.21",
-                    source_file=fake_js_files[1].url, confidence=0.97,
-                ),
-                LibraryFinding(
-                    library="moment", version="2.24.0", cve_id="CVE-2022-24785",
-                    severity="MEDIUM", cvss=5.3,
-                    description="Path traversal in locale loading — arbitrary file read on server",
-                    remediation="Upgrade to moment >= 2.29.2",
-                    source_file=fake_js_files[1].url, confidence=0.93,
-                ),
-                LibraryFinding(
-                    library="axios", version="0.19.2", cve_id="CVE-2020-28168",
-                    severity="MEDIUM", cvss=5.9,
-                    description="SSRF via follow redirects — crafted URL bypasses same-origin check",
-                    remediation="Upgrade to axios >= 0.21.1",
-                    source_file=fake_js_files[0].url, confidence=0.95,
-                ),
-                LibraryFinding(
-                    library="jquery", version="3.4.1", cve_id="CVE-2020-11022",
-                    severity="MEDIUM", cvss=6.1,
-                    description="XSS via passing HTML from untrusted sources to manipulation methods",
-                    remediation="Upgrade to jQuery >= 3.5.0",
-                    source_file=fake_js_files[1].url, confidence=0.91,
-                ),
-                LibraryFinding(
-                    library="serialize-javascript", version="2.1.1", cve_id="CVE-2020-7660",
-                    severity="HIGH", cvss=8.1,
-                    description="RCE risk — regex in serialized functions not escaped; XSS if output rendered",
-                    remediation="Upgrade to serialize-javascript >= 3.1.0",
-                    source_file=fake_js_files[0].url, confidence=0.89,
-                ),
+    # ── Shared extras / subdomains ─────────────────────────────────────────────
+    demo_extras = {
+        "login_result": {
+            "success": True, "method": "form_submit",
+            "login_url": "https://demo.example.com/login",
+            "final_url": "https://demo.example.com/dashboard",
+            "cookies": [
+                {"name": "session",    "value": "eyJhbGci..."},
+                {"name": "csrf_token", "value": "8f3a2b..."},
             ],
-            "attack_report": fake_attack_report,
+            "cookie_string": "session=eyJhbGci...; csrf_token=8f3a2b...",
+            "token_keys": ["access_token", "refresh_token"],
+            "steps": [
+                "navigate to /login",
+                "fill #email → demo@example.com",
+                "fill #password → [redacted]",
+                "submit form",
+                "MFA bypassed — OTP field not required in demo env",
+                "redirected to /dashboard — session active",
+            ],
+            "error_message": "",
         },
-        subdomains=[
-            "api.example.com",
-            "staging.example.com",
-            "admin.example.com",
-            "dev.example.com",
-            "cdn.example.com",
-            "auth.example.com",
+        "headless_stats": {
+            "pages": 34, "js": 7, "xhr": 142, "fetch": 58,
+            "ws": 3, "routes": 18, "endpoints": 31, "workers": 2,
+            "timings": {"total_ms": 9412, "pages_ms": 7840, "analysis_ms": 1572},
+        },
+        "source_map_details": {
+            "discovered": 7, "valid": 7, "recovered": 7, "sources": 47,
+            "items": [
+                {"js": "main.8f31ab.chunk.js",         "map": "main.8f31ab.chunk.js.map",         "sources": 12},
+                {"js": "vendors~main.a3c9f1.chunk.js", "map": "vendors~main.a3c9f1.chunk.js.map", "sources": 28},
+                {"js": "auth.b2a17f.chunk.js",         "map": "auth.b2a17f.chunk.js.map",         "sources": 4},
+                {"js": "admin.d4c881.chunk.js",        "map": "admin.d4c881.chunk.js.map",        "sources": 3},
+            ],
+        },
+        "chunk_stats": {
+            "runtime": True, "discovered": 12, "downloaded": 12,
+            "endpoints": 23, "findings": 3,
+        },
+        "passive_stats": {
+            "source": "Wayback Machine + CommonCrawl",
+            "urls": 318, "js": 41, "unique": 38, "new": 9,
+        },
+        "lib_findings": [
+            LibraryFinding(
+                library="lodash", version="4.6.1", cve_id="CVE-2019-10744",
+                severity="HIGH", cvss=7.4,
+                description="Prototype pollution via merge() — attacker can overwrite Object.prototype",
+                remediation="Upgrade to lodash >= 4.17.21",
+                source_file=fake_js_files[1].url, confidence=0.97,
+            ),
+            LibraryFinding(
+                library="moment", version="2.24.0", cve_id="CVE-2022-24785",
+                severity="MEDIUM", cvss=5.3,
+                description="Path traversal in locale loading — arbitrary file read on server",
+                remediation="Upgrade to moment >= 2.29.2",
+                source_file=fake_js_files[1].url, confidence=0.93,
+            ),
+            LibraryFinding(
+                library="axios", version="0.19.2", cve_id="CVE-2020-28168",
+                severity="MEDIUM", cvss=5.9,
+                description="SSRF via follow redirects — crafted URL bypasses same-origin check",
+                remediation="Upgrade to axios >= 0.21.1",
+                source_file=fake_js_files[0].url, confidence=0.95,
+            ),
+            LibraryFinding(
+                library="jquery", version="3.4.1", cve_id="CVE-2020-11022",
+                severity="MEDIUM", cvss=6.1,
+                description="XSS via passing HTML from untrusted sources to manipulation methods",
+                remediation="Upgrade to jQuery >= 3.5.0",
+                source_file=fake_js_files[1].url, confidence=0.91,
+            ),
+            LibraryFinding(
+                library="serialize-javascript", version="2.1.1", cve_id="CVE-2020-7660",
+                severity="HIGH", cvss=8.1,
+                description="RCE risk — regex in serialized functions not escaped; XSS if output rendered",
+                remediation="Upgrade to serialize-javascript >= 3.1.0",
+                source_file=fake_js_files[0].url, confidence=0.89,
+            ),
         ],
-    )
+        "attack_report": fake_attack_report,
+    }
+    demo_subdomains = [
+        "api.example.com", "staging.example.com", "admin.example.com",
+        "dev.example.com",  "cdn.example.com",     "auth.example.com",
+    ]
 
-    if fake_attack_report is not None:
-        try:
-            from .testing.reporter import print_surface_report
-            print_surface_report(fake_attack_report)
-        except Exception:
-            pass
+    # ── Determine formats ──────────────────────────────────────────────────────
+    _fmt_str = getattr(args, "format", "terminal") if args else "terminal"
+    formats  = [f.strip() for f in _fmt_str.split(",")]
+    _output  = getattr(args, "output",      "")              if args else ""
+    _rname   = getattr(args, "report_name", "bundlespy-demo") if args else "bundlespy-demo"
+    _no_color = getattr(args, "no_color",   False)            if args else False
+
+    if _no_color:
+        os.environ["NO_COLOR"] = "1"
+
+    # ── Terminal output ────────────────────────────────────────────────────────
+    if "terminal" in formats:
+        print_header(
+            "https://demo.example.com",
+            mode="Headless + Stealth + Auto-Login",
+            scope="Strict",
+            version=PROJECT_VERSION,
+            author=AUTHOR_NAME,
+        )
+        print_report(
+            result,
+            verbose=True,
+            extras=demo_extras,
+            subdomains=demo_subdomains,
+        )
+        if fake_attack_report is not None:
+            try:
+                from .testing.reporter import print_surface_report
+                print_surface_report(fake_attack_report)
+            except Exception:
+                pass
+
+    # ── File reports ───────────────────────────────────────────────────────────
+    file_formats = [f for f in formats if f != "terminal"]
+    if file_formats:
+        file_paths = _write_reports(
+            result,
+            file_formats,
+            _output,
+            started,
+            report_name = _rname,
+            extras      = demo_extras,
+            subdomains  = demo_subdomains,
+        )
+        for fmt, path in file_paths.items():
+            print(f"  {fmt:<12} {path}")
 
     return 0
 
@@ -2175,7 +2223,7 @@ def main() -> None:
     elif args.command == "local":
         sys.exit(run_local(args))
     elif args.command == "demo":
-        sys.exit(run_demo())
+        sys.exit(run_demo(args))
     else:
         parser.print_help()
         sys.exit(0)
