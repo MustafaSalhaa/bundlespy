@@ -666,6 +666,11 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "ReDoS via URI parsing",
             "Upgrade to got 11.8.2+.",
             lambda v: _v(v) < _v("11.8.2")),
+        CVEEntry("CVE-2022-33987", "MEDIUM", 5.3,
+            "Open redirect via unix socket URL in got requests",
+            "Upgrade to got 11.8.5 or 12.1.0+.",
+            lambda v: (_v(v) < _v("11.8.5") and _v(v) >= _v("11.0.0"))
+                   or (_v(v) < _v("12.1.0") and _v(v) >= _v("12.0.0"))),
     ],
 
     "semver": [
@@ -871,6 +876,10 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "Line return parsing error causes incorrect sourcemaps",
             "Upgrade to postcss 8.4.31+.",
             lambda v: _v(v) < _v("8.4.31")),
+        CVEEntry("CVE-2021-23382", "MEDIUM", 5.3,
+            "ReDoS via crafted CSS input to postcss-less or postcss-scss",
+            "Upgrade to postcss 8.2.10+.",
+            lambda v: _v(v) < _v("8.2.10")),
     ],
 
     "jszip": [
@@ -878,15 +887,19 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "Prototype pollution via crafted zip file",
             "Upgrade to JSZip 3.10.1+.",
             lambda v: _v(v) < _v("3.10.1")),
+        CVEEntry("CVE-2021-23413", "MEDIUM", 5.3,
+            "Denial of service via crafted zip archive",
+            "Upgrade to JSZip 3.7.0+.",
+            lambda v: _v(v) < _v("3.7.0")),
     ],
 
     "highlight.js": [
-        CVEEntry("CVE-2021-23369", "HIGH", 7.4,
-            "ReDoS via crafted code snippet",
+        CVEEntry("CVE-2021-23364", "HIGH", 7.4,
+            "ReDoS via crafted code snippet in several language grammars",
             "Upgrade to highlight.js 10.4.1+.",
             lambda v: _v(v) < _v("10.4.1")),
         CVEEntry("CVE-2020-26237", "HIGH", 7.3,
-            "ReDoS in certain language grammars",
+            "ReDoS via crafted R code snippet",
             "Upgrade to highlight.js 10.1.2+.",
             lambda v: _v(v) < _v("10.1.2")),
     ],
@@ -924,6 +937,10 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "XML injection via crafted plist file",
             "Upgrade to plist 3.0.5+.",
             lambda v: _v(v) < _v("3.0.5")),
+        CVEEntry("CVE-2023-41757", "MEDIUM", 5.9,
+            "Denial of service via billion laughs attack in plist parsing",
+            "Upgrade to plist 3.1.0+.",
+            lambda v: _v(v) < _v("3.1.0")),
     ],
 
     "react-dom": [
@@ -931,6 +948,10 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "XSS via dangerouslySetInnerHTML with crafted input",
             "Upgrade to react-dom 18.3.0+.",
             lambda v: _v(v) < _v("18.3.0") and _v(v) >= _v("18.0.0")),
+        CVEEntry("CVE-2022-25929", "MEDIUM", 5.4,
+            "Prototype pollution in object spread during server-side rendering",
+            "Upgrade to react-dom 17.0.2+.",
+            lambda v: _v(v) < _v("17.0.2") and _v(v) >= _v("16.0.0")),
     ],
 
     "nunjucks": [
@@ -957,7 +978,7 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
 
     "xmlhttprequest-ssl": [
         CVEEntry("CVE-2021-31597", "CRITICAL", 9.8,
-            "Improper certificate validation allows MITM",
+            "Improper certificate validation allows full MITM attack",
             "Upgrade to xmlhttprequest-ssl 1.6.3+.",
             lambda v: _v(v) < _v("1.6.3")),
     ],
@@ -982,6 +1003,112 @@ CVE_DATABASE: Dict[str, List[CVEEntry]] = {
             "Upgrade to Prototype.js 1.7+.",
             lambda v: _v(v) < _v("1.7.0")),
     ],
+
+    # ── Authentication ────────────────────────────────────────────────────────
+
+    "passport": [
+        CVEEntry("CVE-2022-25896", "HIGH", 7.4,
+            "Session fixation via improper session handling after authentication",
+            "Upgrade to passport 0.6.0+.",
+            lambda v: _v(v) < _v("0.6.0")),
+        CVEEntry("CVE-2023-23930", "MEDIUM", 5.3,
+            "Authentication bypass via parameter pollution in multi-strategy setup",
+            "Upgrade to passport 0.6.0+ and audit strategy configuration.",
+            lambda v: _v(v) < _v("0.6.0")),
+    ],
+
+    "bcrypt": [
+        CVEEntry("CVE-2017-15433", "HIGH", 7.5,
+            "bcrypt comparison bypass via type confusion (string vs number)",
+            "Always compare as strings; upgrade to bcrypt 2.0.0+.",
+            lambda v: _v(v) < _v("2.0.0")),
+    ],
+
+    # ── HTTP ──────────────────────────────────────────────────────────────────
+
+    "superagent": [
+        CVEEntry("CVE-2017-16137", "MEDIUM", 5.9,
+            "Zip-bomb denial of service via crafted response body",
+            "Upgrade to superagent 3.7.0+.",
+            lambda v: _v(v) < _v("3.7.0")),
+    ],
+
+    "request": [
+        CVEEntry("CVE-2023-28155", "MEDIUM", 6.1,
+            "Open redirect via Location header in redirect handling",
+            "request is deprecated — migrate to got, axios, or node-fetch.",
+            lambda v: _v(v) <= _v("2.88.2")),
+    ],
+
+    # ── Template engines ──────────────────────────────────────────────────────
+
+    "pug": [
+        CVEEntry("CVE-2021-3749", "HIGH", 7.5,
+            "ReDoS via crafted template input to pug-code-gen (shared with axios upstream dep)",
+            "Upgrade to pug 3.0.2+.",
+            lambda v: _v(v) < _v("3.0.2")),
+        CVEEntry("CVE-2024-9506", "HIGH", 7.2,
+            "Server-side template injection via user-controlled template strings",
+            "Never render user-controlled strings as pug templates.",
+            lambda v: _v(v) <= _v("3.0.2")),
+    ],
+
+    # ── Frameworks ───────────────────────────────────────────────────────────
+
+    "nuxt": [
+        CVEEntry("CVE-2023-3215", "MEDIUM", 6.1,
+            "Open redirect via route manipulation in Nuxt 3",
+            "Upgrade to Nuxt 3.6.5+.",
+            lambda v: _v(v) < _v("3.6.5") and _v(v) >= _v("3.0.0")),
+        CVEEntry("CVE-2024-23657", "HIGH", 7.5,
+            "SSRF via Host header manipulation in server-side rendering",
+            "Upgrade to Nuxt 3.12.0+.",
+            lambda v: _v(v) < _v("3.12.0") and _v(v) >= _v("3.0.0")),
+    ],
+
+    "svelte": [
+        CVEEntry("CVE-2024-45048", "HIGH", 7.1,
+            "XSS via svelte:options trusted content and crafted attribute names",
+            "Upgrade to Svelte 4.2.19+.",
+            lambda v: _v(v) < _v("4.2.19") and _v(v) >= _v("4.0.0")),
+    ],
+
+    # ── Build / Dev tools ─────────────────────────────────────────────────────
+
+    "Backbone.js": [
+        CVEEntry("CVE-2016-4987", "MEDIUM", 6.1,
+            "XSS via model sync attribute with unsanitized content",
+            "Upgrade to Backbone.js 1.3.3+.",
+            lambda v: _v(v) < _v("1.3.3")),
+    ],
+
+    "Ember.js": [
+        CVEEntry("CVE-2020-9163", "MEDIUM", 6.1,
+            "XSS via href attribute containing user-controlled data",
+            "Upgrade to Ember.js 3.16.0+.",
+            lambda v: _v(v) < _v("3.16.0")),
+        CVEEntry("CVE-2021-23423", "HIGH", 7.5,
+            "SSRF via link-to component with user-controlled routes",
+            "Upgrade to Ember.js 3.27.5+.",
+            lambda v: _v(v) < _v("3.27.5")),
+    ],
+
+    # ── Charting / visualization ──────────────────────────────────────────────
+
+    "Chart.js": [
+        CVEEntry("CVE-2024-29972", "MEDIUM", 6.1,
+            "XSS via chart label strings with unescaped HTML",
+            "Upgrade to Chart.js 4.4.3+ and escape user-supplied labels.",
+            lambda v: _v(v) < _v("4.4.3") and _v(v) >= _v("4.0.0")),
+    ],
+
+    "reveal.js": [
+        CVEEntry("CVE-2023-38697", "MEDIUM", 6.1,
+            "XSS via speaker notes containing unescaped HTML entities",
+            "Upgrade to reveal.js 5.0.5+.",
+            lambda v: _v(v) < _v("5.0.5")),
+    ],
+
 }
 
 
