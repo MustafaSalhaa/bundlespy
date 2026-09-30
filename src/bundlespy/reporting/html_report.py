@@ -1,6 +1,7 @@
 """
 BundleSpy HTML Report - complete professional intelligence report.
-Single self-contained file, no external dependencies except D3 (cdnjs).
+Single self-contained file. D3 is inlined at generation time; falls back
+to cdnjs if not bundled locally.
 Covers every data source BundleSpy produces.
 """
 
@@ -8,8 +9,34 @@ import html
 import json
 import re as _re
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 from ..storage.models import ScanResult, Finding, Endpoint, InfrastructureItem
+
+
+def _d3_script_tag() -> str:
+    """Return an inline <script> with D3, or a CDN <script src> as fallback."""
+    # Search for D3 bundled alongside common Node tooling in the environment
+    candidates = [
+        # mermaid-cli ships its own D3 — check both /root and /home/claude
+        Path.home() / ".npm-global/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/d3/dist/d3.min.js",
+        Path("/home/claude/.npm-global/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/d3/dist/d3.min.js"),
+        # Local node_modules in the project or repo root
+        Path(__file__).parent.parent.parent.parent / "node_modules/d3/dist/d3.min.js",
+        Path(__file__).parent.parent.parent.parent / "node_modules/@observablehq/plot/node_modules/d3/dist/d3.min.js",
+        # System npm global
+        Path("/usr/lib/node_modules/d3/dist/d3.min.js"),
+        Path("/usr/local/lib/node_modules/d3/dist/d3.min.js"),
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                src = p.read_text(encoding="utf-8")
+                return f"<script>{src}</script>"
+        except Exception:
+            continue
+    # Fallback: CDN (works when internet is available)
+    return '<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>'
 
 
 def _e(s) -> str:
@@ -1366,7 +1393,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+{_d3_script_tag()}
 <script>
 const GRAPH_DATA = {graph_json};
 const NC = {_j(NODE_COLOR)};
