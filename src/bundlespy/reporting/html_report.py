@@ -1503,15 +1503,46 @@ function _buildGraph() {{
   gZoom = d3.zoom().scaleExtent([.05, 8]).on('zoom', e => g.attr('transform', e.transform));
   svg.call(gZoom);
 
-  // Link distance / strength by relationship type
-  const LD = {{LOADS:70,IMPORTS:60,CALLS:80,EXPOSES:65,ACCEPTS:50,OBSERVED_ON:85,RELATED_TO:75,HOSTS:90,RECOVERS:65,REFERENCES:70}};
+  // Relationship-driven link distance: structural links pull tight, contextual ones sit loose
+  function _ld(e) {{
+    if(e.kind==='LOADS')       return 90;
+    if(e.kind==='CALLS')       return 70;
+    if(e.kind==='EXPOSES')     return 60;
+    if(e.kind==='IMPORTS')     return 80;
+    if(e.kind==='HOSTS')       return 75;
+    if(e.kind==='ACCEPTS')     return 65;
+    if(e.kind==='RECOVERS')    return 65;
+    if(e.kind==='REFERENCES')  return 85;
+    if(e.kind==='OBSERVED_ON') return 95;
+    if(e.kind==='RELATED_TO')  return 110;
+    return 80;
+  }}
+
+  // Weak edges (context/audit) get loose strength so topology dominates over type
+  function _ls(e) {{
+    if(e.kind==='RELATED_TO')  return 0.07;
+    if(e.kind==='OBSERVED_ON') return 0.12;
+    if(e.kind==='REFERENCES')  return 0.18;
+    return 0.5;
+  }}
+
+  // Semantic gravity: soft per-type Y pull so reading flows top → bottom
+  // PAGE → JS → ENDPOINT/WORKER → SECRET/PARAMETER, without forcing columns
+  const SEM_Y = {{
+    PAGE:0.18, HOST:0.22,
+    JS:0.38, CHUNK:0.42, SOURCEMAP:0.52, CONFIG:0.48,
+    ENDPOINT:0.62, WORKER:0.65,
+    PARAMETER:0.78, SECRET:0.82
+  }};
+  const SEM_STR = 0.06; // very soft — topology via edges wins over type gravity
 
   gSim = d3.forceSimulation(gNodes)
-    .force('link',   d3.forceLink(gEdges).id(d=>d.id).distance(e=>LD[e.kind]||70).strength(.4))
-    .force('charge', d3.forceManyBody().strength(-600).distanceMax(500))
-    .force('center', d3.forceCenter(W/2, H/2))
-    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+18).strength(.8))
-    .alphaDecay(.015).velocityDecay(.35);
+    .force('link',    d3.forceLink(gEdges).id(d=>d.id).distance(_ld).strength(_ls))
+    .force('charge',  d3.forceManyBody().strength(-280).distanceMax(700))
+    .force('center',  d3.forceCenter(W/2, H/2).strength(0.04))
+    .force('col',     d3.forceCollide().radius(d=>(R[d.kind]||9)+7).strength(0.5))
+    .force('semY',    d3.forceY(d=>(SEM_Y[d.kind]||0.5)*H).strength(SEM_STR))
+    .alphaDecay(.022).velocityDecay(.42);
 
   // ── Link layer
   const linkG = g.append('g').attr('class','link-layer');
@@ -1624,10 +1655,15 @@ function _buildNodes(container, data) {{
 
 function _autoFit(W,H,pad) {{
   if(!gNodes.length) return;
-  const xs=gNodes.map(d=>d.x), ys=gNodes.map(d=>d.y);
-  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  // Use 5th–95th percentile bounding box so outlier nodes don't shrink the whole graph
+  const xs=[...gNodes.map(d=>d.x)].sort((a,b)=>a-b);
+  const ys=[...gNodes.map(d=>d.y)].sort((a,b)=>a-b);
+  const p = n => Math.max(0, Math.min(n-1, Math.round(n*0.05)));
+  const q = n => Math.max(0, Math.min(n-1, Math.round(n*0.95)));
+  const x0=xs[p(xs.length)], x1=xs[q(xs.length)];
+  const y0=ys[p(ys.length)], y1=ys[q(ys.length)];
   const gW=x1-x0||1, gH=y1-y0||1;
-  const scale=Math.min(.88,Math.min((W-2*pad)/gW,(H-2*pad)/gH));
+  const scale=Math.min(.9,Math.min((W-2*pad)/gW,(H-2*pad)/gH));
   const tx=W/2-scale*(x0+x1)/2, ty=H/2-scale*(y0+y1)/2;
   gSvg.transition().duration(700)
     .call(gZoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
