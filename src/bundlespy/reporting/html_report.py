@@ -1390,79 +1390,135 @@ function filterF(sev, btn) {{
 }}
 
 // ── Graph ─────────────────────────────────────────────────────────────────────
-let gInit = false, gSvg, gZoom;
+let gInit = false, gSvg, gZoom, gG;
 
 function initGraph() {{
   if (gInit || !GRAPH_DATA) return;
   gInit = true;
-  const box = document.getElementById('graph-container');
-  const W = box.clientWidth, H = box.clientHeight;
+  const box  = document.getElementById('graph-container');
+  const W    = box.clientWidth  || 900;
+  const H    = box.clientHeight || 600;
+  const pad  = 40;
+
   const nodes = (GRAPH_DATA.nodes || []).map(n => ({{...n}}));
   const edges = (GRAPH_DATA.edges || []).map(e => ({{...e}}));
+  if (!nodes.length) return;
+
   const byId = {{}};
   nodes.forEach(n => byId[n.id] = n);
 
   const svg = d3.select('#graph-svg');
   svg.selectAll('*').remove();
 
+  // Arrow markers
   const defs = svg.append('defs');
   Object.entries(NC).forEach(([k, c]) => {{
-    defs.append('marker').attr('id','arr-'+k).attr('viewBox','0 -4 8 8')
-      .attr('refX',18).attr('refY',0).attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
-      .append('path').attr('d','M0,-4L8,0L0,4').attr('fill',c).attr('opacity',.5);
+    defs.append('marker').attr('id','arr-'+k)
+      .attr('viewBox','0 -4 8 8').attr('refX',20).attr('refY',0)
+      .attr('markerWidth',5).attr('markerHeight',5).attr('orient','auto')
+      .append('path').attr('d','M0,-4L8,0L0,4').attr('fill',c).attr('opacity',.6);
   }});
 
   const g = svg.append('g');
-  gZoom = d3.zoom().scaleExtent([.15,5]).on('zoom', e => g.attr('transform', e.transform));
+  gG    = g;
+  gZoom = d3.zoom().scaleExtent([.1, 6]).on('zoom', e => g.attr('transform', e.transform));
   svg.call(gZoom);
 
-  const R = {{PAGE:14,JS:12,ENDPOINT:10,SECRET:12,WORKER:10,PARAMETER:6,HOST:11,CHUNK:9,SOURCEMAP:8,CONFIG:8}};
-  const LD = {{LOADS:90,IMPORTS:70,CALLS:110,EXPOSES:90,ACCEPTS:50,OBSERVED_ON:120,RELATED_TO:100,HOSTS:130}};
+  // Node radii — kept compact
+  const R = {{PAGE:13,JS:11,ENDPOINT:10,SECRET:11,WORKER:9,PARAMETER:5,HOST:10,CHUNK:8,SOURCEMAP:7,CONFIG:7}};
+
+  // Link distances — tight so the graph stays compact
+  const LD = {{LOADS:55,IMPORTS:45,CALLS:65,EXPOSES:55,ACCEPTS:35,OBSERVED_ON:70,RELATED_TO:60,HOSTS:75,RECOVERS:50,REFERENCES:60}};
 
   const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||100).strength(.4))
-    .force('charge', d3.forceManyBody().strength(-200))
-    .force('center', d3.forceCenter(W/2, H/2))
-    .force('col', d3.forceCollide(d=>(R[d.kind]||10)+6));
+    .force('link',   d3.forceLink(edges).id(d=>d.id).distance(e=>LD[e.kind]||55).strength(.7))
+    .force('charge', d3.forceManyBody().strength(-280).distanceMax(250))
+    .force('center', d3.forceCenter(W/2, H/2).strength(.08))
+    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+5).strength(.85))
+    .force('boundX', d3.forceX(W/2).strength(.06))
+    .force('boundY', d3.forceY(H/2).strength(.06))
+    .alphaDecay(.02);
 
+  // Links
   const link = g.append('g').selectAll('line').data(edges).join('line')
-    .attr('stroke', e => {{ const s = byId[e.source.id||e.source]; return s ? (NC[s.kind]||'#475569') : '#475569'; }})
-    .attr('stroke-opacity',.3).attr('stroke-width',1.2)
-    .attr('marker-end', e => {{ const s = byId[e.source.id||e.source]; return s ? 'url(#arr-'+s.kind+')' : ''; }});
+    .attr('stroke', e => {{
+      const s = byId[typeof e.source==='object'?e.source.id:e.source];
+      return s ? (NC[s.kind]||'#475569') : '#475569';
+    }})
+    .attr('stroke-opacity',.35).attr('stroke-width',1.1)
+    .attr('marker-end', e => {{
+      const s = byId[typeof e.source==='object'?e.source.id:e.source];
+      return s ? 'url(#arr-'+s.kind+')' : '';
+    }});
 
+  // Edge labels (only the most useful ones)
   const SHOW = new Set(['CALLS','EXPOSES','RELATED_TO']);
-  const eLabel = g.append('g').selectAll('text').data(edges.filter(e=>SHOW.has(e.kind))).join('text')
-    .attr('font-size',9).attr('fill','#475569').attr('text-anchor','middle').attr('dy',-3)
-    .text(e => e.kind.toLowerCase().replace('_',' '));
+  const eLabel = g.append('g').selectAll('text')
+    .data(edges.filter(e=>SHOW.has(e.kind))).join('text')
+    .attr('font-size',8).attr('fill','#4a5568').attr('text-anchor','middle').attr('dy',-3)
+    .text(e => e.kind.toLowerCase().replace(/_/g,' '));
 
-  const node = g.append('g').selectAll('g').data(nodes).join('g').attr('cursor','pointer')
+  // Node groups
+  const node = g.append('g').selectAll('g').data(nodes).join('g')
+    .attr('cursor','pointer')
     .call(d3.drag()
       .on('start',(ev,d)=>{{ if(!ev.active) sim.alphaTarget(.3).restart(); d.fx=d.x;d.fy=d.y; }})
-      .on('drag', (ev,d)=>{{ d.fx=ev.x;d.fy=ev.y; }})
-      .on('end',  (ev,d)=>{{ if(!ev.active) sim.alphaTarget(0); d.fx=null;d.fy=null; }}))
+      .on('drag', (ev,d)=>{{ d.fx=ev.x; d.fy=ev.y; }})
+      .on('end',  (ev,d)=>{{ if(!ev.active) sim.alphaTarget(0); d.fx=d.x; d.fy=d.y; }}))
     .on('mouseenter', showTT).on('mousemove', moveTT).on('mouseleave', hideTT)
     .on('click', showDetail);
 
-  node.append('circle').attr('r', d=>R[d.kind]||10)
-    .attr('fill', d=>(NC[d.kind]||'#475569')+'22')
-    .attr('stroke', d=>NC[d.kind]||'#475569').attr('stroke-width',1.5);
+  node.append('circle')
+    .attr('r', d=>R[d.kind]||9)
+    .attr('fill', d=>(NC[d.kind]||'#475569')+'28')
+    .attr('stroke', d=>NC[d.kind]||'#475569')
+    .attr('stroke-width',1.5);
 
   const ICONS={{PAGE:'P',JS:'JS',ENDPOINT:'EP',SECRET:'S',WORKER:'W',PARAMETER:'p',HOST:'H',CHUNK:'C',SOURCEMAP:'M',CONFIG:'Cf'}};
-  node.append('text').attr('text-anchor','middle').attr('dominant-baseline','central')
-    .attr('font-size', d=>d.kind==='JS'?7:8).attr('font-weight','700')
-    .attr('fill', d=>NC[d.kind]||'#475569').text(d=>ICONS[d.kind]||'?');
+  node.append('text')
+    .attr('text-anchor','middle').attr('dominant-baseline','central')
+    .attr('font-size', d=>d.kind==='JS'?6:7).attr('font-weight','700')
+    .attr('fill', d=>NC[d.kind]||'#475569')
+    .attr('pointer-events','none')
+    .text(d=>ICONS[d.kind]||'?');
 
-  const LABELED = new Set(['PAGE','SECRET','ENDPOINT']);
+  const LABELED = new Set(['SECRET','ENDPOINT']);
   node.filter(d=>LABELED.has(d.kind)).append('text')
-    .attr('text-anchor','middle').attr('y', d=>(R[d.kind]||10)+11)
-    .attr('font-size',9).attr('fill','#6e7681')
-    .text(d=>d.label.length>24?d.label.slice(0,24)+'…':d.label);
+    .attr('text-anchor','middle')
+    .attr('y', d=>(R[d.kind]||9)+10)
+    .attr('font-size',8).attr('fill','#8b949e')
+    .attr('pointer-events','none')
+    .text(d=>d.label.length>22?d.label.slice(0,22)+'…':d.label);
+
+  // Clamp positions to viewport on every tick
+  function clamp(v, lo, hi) {{ return Math.max(lo, Math.min(hi, v)); }}
 
   sim.on('tick', ()=>{{
-    link.attr('x1',e=>e.source.x).attr('y1',e=>e.source.y).attr('x2',e=>e.target.x).attr('y2',e=>e.target.y);
-    eLabel.attr('x',e=>(e.source.x+e.target.x)/2).attr('y',e=>(e.source.y+e.target.y)/2);
+    nodes.forEach(d=>{{
+      const r = R[d.kind]||9;
+      d.x = clamp(d.x, pad+r, W-pad-r);
+      d.y = clamp(d.y, pad+r, H-pad-r);
+    }});
+    link
+      .attr('x1',e=>e.source.x).attr('y1',e=>e.source.y)
+      .attr('x2',e=>e.target.x).attr('y2',e=>e.target.y);
+    eLabel
+      .attr('x',e=>(e.source.x+e.target.x)/2)
+      .attr('y',e=>(e.source.y+e.target.y)/2);
     node.attr('transform',d=>`translate(${{d.x}},${{d.y}})`);
   }});
+
+  // Auto-fit once the simulation settles
+  sim.on('end', ()=>{{
+    const xs = nodes.map(d=>d.x), ys = nodes.map(d=>d.y);
+    const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+    const gW=x1-x0||1, gH=y1-y0||1;
+    const scale = Math.min(.92, Math.min((W-2*pad)/gW, (H-2*pad)/gH));
+    const tx = W/2 - scale*(x0+x1)/2, ty = H/2 - scale*(y0+y1)/2;
+    svg.transition().duration(600)
+       .call(gZoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
+  }});
+
   gSvg = svg;
 }}
 
