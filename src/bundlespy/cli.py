@@ -155,7 +155,6 @@ other:
     _og.add_argument("--csv",            action="store_true", help="CSV to stdout only (sets --quiet)")
     _og.add_argument("--show-fp",        action="store_true", help="Include likely false positives in output")
     _og.add_argument("--silent",         action="store_true", help="Print only findings, one per line - no headers or progress")
-    _og.add_argument("--yes",            action="store_true", help="Skip authorization confirmation prompt (for CI/automation)")
 
     # ── local ─────────────────────────────────────────────────────────────────
     local = sub.add_parser(
@@ -526,13 +525,6 @@ def run_scan(args) -> int:
     if not safe:
         phase_error(f"Target blocked by safety policy: {reason}")
         return 2
-
-    # Authorization confirmation — required unless --yes or non-interactive
-    # --yes is for CI/automation pipelines where a human already confirmed scope
-    if not getattr(args, "yes", False) and not args.quiet:
-        from .safety.authorization import require_authorization
-        if not require_authorization(target):
-            return 2
 
     formats = [f.strip() for f in args.format.split(",")]
     started = datetime.utcnow()
