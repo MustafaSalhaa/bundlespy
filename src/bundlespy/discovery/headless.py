@@ -288,19 +288,42 @@ EXTRACT_ROUTES_JS = """
         });
     } catch(e) {}
 
-    // React Router (fiber)
+    // React Router (fiber) — full BFS traversal of the fiber tree
     try {
         if (window.__reactRouterRoutes) {
             window.__reactRouterRoutes.forEach(r => r.path && add(r.path));
         }
         document.querySelectorAll('#root,#app,[data-reactroot]').forEach(el => {
             try {
-                const k = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                const k = Object.keys(el).find(k =>
+                    k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                );
                 if (!k) return;
-                let f = el[k], d = 0;
-                while (f && d++ < 80) {
-                    if (f.memoizedProps && f.memoizedProps.path) add(f.memoizedProps.path);
-                    f = f.child || f.sibling || (f.return && f.return.sibling);
+                // True BFS — never misses branches that a simple child/sibling walk skips
+                const queue = [el[k]];
+                let visited = 0;
+                while (queue.length && visited++ < 2000) {
+                    const f = queue.shift();
+                    if (!f) continue;
+                    try {
+                        const mp = f.memoizedProps;
+                        if (mp) {
+                            if (typeof mp.path   === 'string') add(mp.path);
+                            if (typeof mp.to     === 'string') add(mp.to);
+                            if (typeof mp.href   === 'string' && mp.href.startsWith('/')) add(mp.href);
+                            // React Router v6 route objects
+                            if (Array.isArray(mp.routes)) {
+                                mp.routes.forEach(function w(r) {
+                                    if (!r) return;
+                                    if (r.path) add(r.path);
+                                    if (r.children) r.children.forEach(w);
+                                });
+                            }
+                        }
+                        // Traverse: child first, then sibling
+                        if (f.child)    queue.push(f.child);
+                        if (f.sibling)  queue.push(f.sibling);
+                    } catch(e) {}
                 }
             } catch(e) {}
         });
@@ -581,15 +604,57 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
 
 # ── Login-page indicators ──────────────────────────────────────────────────────
 
+# Path segments that strongly indicate an authentication page.
+# Intentionally broad — false negatives (missing a login page) are worse than
+# false positives (pausing on a legitimate page with "auth" in the path).
 LOGIN_PATH_KEYWORDS = {
-    "/login", "/signin", "/sign-in", "/log-in", "/auth/login",
-    "/account/login", "/user/login", "/session/new",
+    "/login", "/signin", "/sign-in", "/log-in", "/logon", "/log-on",
+    "/auth/login", "/auth/signin", "/auth", "/authenticate",
+    "/account/login", "/account/signin",
+    "/user/login", "/user/signin",
+    "/session/new", "/sessions/new",
+    "/sso", "/saml", "/oauth", "/oidc",
+    "/wp-login", "/wp-admin/login",
+    "/admin/login", "/admin/signin",
+    "/portal/login", "/portal/signin",
+    "/access", "/gate",
 }
 
+# DOM text patterns that indicate a login form — used as fallback when the URL
+# doesn't match (custom auth paths like /enter, /start, /verify).
+_LOGIN_DOM_PATTERNS = (
+    'input[type="password"]',
+    'form[action*="login"]',
+    'form[action*="signin"]',
+    'form[action*="authenticate"]',
+    '[name="password"]',
+    '[id="password"]',
+    '[autocomplete="current-password"]',
+)
+
 def _is_login_url(url: str) -> bool:
-    """Return True if the URL looks like a login/auth page."""
+    """Return True if the URL path looks like a login/auth page."""
     lower = urlparse(url).path.lower().rstrip("/")
     return any(lower == kw or lower.endswith(kw) for kw in LOGIN_PATH_KEYWORDS)
+
+def _is_login_page(page) -> bool:
+    """
+    Return True if the current page looks like an auth/login wall.
+    Checks both URL and DOM — catches custom login paths that _is_login_url misses.
+    """
+    try:
+        if _is_login_url(page.url):
+            return True
+        # DOM check: any password field = login/auth page
+        for sel in _LOGIN_DOM_PATTERNS:
+            try:
+                if page.query_selector(sel):
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
 
 
 class HeadlessEngine:
@@ -824,8 +889,41 @@ class HeadlessEngine:
         except Exception:
             return []
 
+    def _auth_headers(self, referer: str = "") -> dict:
+        """
+        Build HTTP headers for off-thread fetches (worker, DOM-scrape fallback).
+        Injects auth cookies as a Cookie header + any extra_headers supplied
+        by the user. This mirrors what the browser context sends, so
+        authenticated resources are accessible even outside Playwright.
+        """
+        hdrs = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/146.0.0.0 Safari/537.36"
+            ),
+        }
+        if referer:
+            hdrs["Referer"] = referer
+
+        # Rebuild Cookie header from injected Playwright cookie dicts
+        if self.cookies:
+            cookie_str = "; ".join(
+                f"{c['name']}={c['value']}"
+                for c in self.cookies
+                if c.get("name") and c.get("value") is not None
+            )
+            if cookie_str:
+                hdrs["Cookie"] = cookie_str
+
+        # Merge any extra headers (non-Cookie ones were already filtered in __init__)
+        if self.extra_headers:
+            hdrs.update(self.extra_headers)
+
+        return hdrs
+
     def _fetch_worker_js(self, worker_url: str, source_page: str) -> None:
-        """Fetch WebWorker JS file. Thread-safe."""
+        """Fetch WebWorker JS file. Thread-safe. Sends auth cookies+headers."""
         try:
             if worker_url.startswith("/"):
                 parsed = urlparse(self.target_url)
@@ -839,8 +937,12 @@ class HeadlessEngine:
                 return
 
             import requests as _req
-            resp = _req.get(worker_url, timeout=8,
-                           headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"})
+            resp = _req.get(
+                worker_url,
+                timeout=8,
+                verify=False,
+                headers=self._auth_headers(referer=source_page),
+            )
             if resp.status_code == 200 and resp.content:
                 h = hashlib.sha256(resp.content).hexdigest()
                 if self.registry.register_hash(h):
@@ -990,8 +1092,13 @@ class HeadlessEngine:
         Catches JS files the response handler missed: browser cache hits
         (cached responses fire no network event), service worker intercepts,
         and any timing gaps between ctx.route() and ctx.on("response").
+
+        Sends the same auth cookies+headers as the browser context so
+        authenticated JS bundles (behind a CDN auth gate or session cookie
+        check) are accessible.
         """
         import requests as _req
+        hdrs = self._auth_headers(referer=source_page)
         for js_url in script_urls:
             try:
                 if not js_url or not js_url.startswith(("http://", "https://")):
@@ -1003,19 +1110,7 @@ class HeadlessEngine:
                 if not self.registry.register_url(norm):
                     continue  # already captured by response handler — skip
 
-                resp = _req.get(
-                    js_url,
-                    timeout=8,
-                    verify=False,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/146.0.0.0 Safari/537.36"
-                        ),
-                        "Referer": source_page,
-                    },
-                )
+                resp = _req.get(js_url, timeout=8, verify=False, headers=hdrs)
                 if resp.status_code != 200 or not resp.content:
                     continue
 
@@ -1099,12 +1194,30 @@ class HeadlessEngine:
             logger.debug("Error visiting %s: %s", url, e)
             return set()
 
+    @staticmethod
+    def _is_parametric_route(route: str) -> bool:
+        """
+        Return True if the route contains a framework-level parameter placeholder.
+        These are route definitions, not real URLs — passing them to page.goto
+        would make the browser request the literal string "/users/:id" or
+        "/post/{slug}" and get a 404 (or navigate to an unintended page).
+
+        Patterns caught: React Router :param, Angular :param, Vue :param,
+        Next.js [param], Express :param, OpenAPI {param}.
+        """
+        seg_re = re.compile(r'(^|/)(:\w+|\[\w+\]|\{\w+\}|\*\*?)(/|$)')
+        return bool(seg_re.search(route))
+
     def _build_urls(self, routes: Set[str]) -> List[str]:
-        """Convert routes to full URLs, sorted by priority."""
+        """Convert routes to full URLs, sorted by priority. Filters parametric routes."""
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
         urls   = []
         for route in routes:
+            # Skip framework-level route definitions — they're not real URLs
+            if self._is_parametric_route(route):
+                logger.debug("Skipping parametric route: %s", route)
+                continue
             if route.startswith("http"):
                 url = route
             else:
@@ -1160,6 +1273,14 @@ class HeadlessEngine:
         """
         Navigate to the target and verify the session is authenticated.
 
+        Listeners are always removed in a finally block — they must not persist
+        after this method returns or they fire on every future navigation in
+        the context and write to dead closures (Bug 6 fix).
+
+        If auth fails (redirected to login), we navigate back to initial_url
+        before returning so that _flush_page_intel runs on the target page,
+        not the login page (Bug 7 fix).
+
         Returns a dict with:
           credentials_supplied  bool
           cookies_injected      int
@@ -1192,95 +1313,128 @@ class HeadlessEngine:
 
         def _on_response(response):
             nonlocal final_status
-            if response.url == page.url or not redirect_chain:
-                final_status = response.status
+            try:
+                if response.url == page.url or not redirect_chain:
+                    final_status = response.status
+            except Exception:
+                pass
 
         def _on_request(request):
-            if request.is_navigation_request() and request.url != initial_url:
-                redirect_chain.append(request.url)
+            try:
+                if request.is_navigation_request() and request.url != initial_url:
+                    redirect_chain.append(request.url)
+            except Exception:
+                pass
 
-        page.on("response",  _on_response)
-        page.on("request",   _on_request)
+        page.on("response", _on_response)
+        page.on("request",  _on_request)
 
         try:
-            resp = page.goto(
-                initial_url,
-                timeout=self.timeout * 1000,
-                wait_until="domcontentloaded",
+            try:
+                resp = page.goto(
+                    initial_url,
+                    timeout=self.timeout * 1000,
+                    wait_until="domcontentloaded",
+                )
+                if resp:
+                    final_status = resp.status
+                PageStabilizer(page).wait_for_framework(max_ms=3000)
+            except Exception as e:
+                result["reason"] = f"Navigation failed: {e}"
+                return result
+
+            final_url = page.url
+
+            # Collect cookies that landed in the browser after navigation
+            try:
+                browser_cookies = page.context.cookies()
+                result["cookies_present"] = [c["name"] for c in browser_cookies]
+            except Exception:
+                pass
+
+            result["status"]         = final_status
+            result["final_url"]      = final_url
+            result["redirect_chain"] = redirect_chain
+
+            # ── Auth verification logic ────────────────────────────────────────
+            # Use _is_login_page (DOM-aware) for the post-navigation check so
+            # custom login paths (not matching keyword list) are still detected.
+            redirected_to_login = _is_login_page(page)
+
+            if redirected_to_login:
+                result["authenticated"] = False
+                result["reason"]        = "Redirected to login page — session rejected or expired"
+                # Bug 7 fix: navigate back to the target so _flush_page_intel
+                # runs on the actual target page, not the login wall.
+                try:
+                    page.goto(initial_url, timeout=self.timeout * 1000,
+                              wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                return result
+
+            if final_status in (401, 403):
+                result["authenticated"] = False
+                result["reason"]        = f"Server returned {final_status} — credentials not accepted"
+                return result
+
+            # If we stayed on the intended URL (or a sub-path of it) with 200, we're in
+            from urllib.parse import urlparse as _up
+            intended_path = _up(initial_url).path.rstrip("/") or "/"
+            actual_path   = _up(final_url).path.rstrip("/")   or "/"
+
+            if final_status == 200 and (
+                actual_path == intended_path
+                or actual_path.startswith(intended_path)
+            ):
+                result["authenticated"] = True
+                result["reason"]        = ""
+                return result
+
+            # Redirected somewhere other than login (e.g. /home, /dashboard/overview) — still authenticated
+            if final_status in (200, 302) and not redirected_to_login:
+                result["authenticated"] = True
+                result["reason"]        = ""
+                return result
+
+            result["authenticated"] = False
+            result["reason"]        = (
+                f"Ended at {final_url} with status {final_status} — "
+                "could not confirm authenticated state"
             )
-            if resp:
-                final_status = resp.status
-            PageStabilizer(page).wait_for_framework(max_ms=3000)
-        except Exception as e:
-            result["reason"] = f"Navigation failed: {e}"
             return result
 
-        final_url = page.url
-
-        # Collect cookies that landed in the browser after navigation
-        try:
-            browser_cookies = page.context.cookies()
-            result["cookies_present"] = [c["name"] for c in browser_cookies]
-        except Exception:
-            pass
-
-        result["status"]         = final_status
-        result["final_url"]      = final_url
-        result["redirect_chain"] = redirect_chain
-
-        # ── Auth verification logic ────────────────────────────────────────
-        redirected_to_login = _is_login_url(final_url)
-
-        if redirected_to_login:
-            result["authenticated"] = False
-            result["reason"]        = "Redirected to login page — session rejected or expired"
-            return result
-
-        if final_status in (401, 403):
-            result["authenticated"] = False
-            result["reason"]        = f"Server returned {final_status} — credentials not accepted"
-            return result
-
-        # If we stayed on the intended URL (or a sub-path of it) with 200, we're in
-        from urllib.parse import urlparse as _up
-        intended_path = _up(initial_url).path.rstrip("/") or "/"
-        actual_path   = _up(final_url).path.rstrip("/")   or "/"
-
-        if final_status == 200 and (
-            actual_path == intended_path
-            or actual_path.startswith(intended_path)
-        ):
-            result["authenticated"] = True
-            result["reason"]        = ""
-            return result
-
-        # Redirected somewhere other than login (e.g. /home, /dashboard/overview) — still authenticated
-        if final_status in (200, 302) and not redirected_to_login:
-            result["authenticated"] = True
-            result["reason"]        = ""
-            return result
-
-        result["authenticated"] = False
-        result["reason"]        = (
-            f"Ended at {final_url} with status {final_status} — "
-            "could not confirm authenticated state"
-        )
-        return result
+        finally:
+            # Bug 6 fix: always remove listeners — they must not persist
+            # after this method returns or they fire on all future navigations.
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
+            try:
+                page.remove_listener("request", _on_request)
+            except Exception:
+                pass
 
     def _dom_fingerprint(self, page) -> str:
         """
-        Fast DOM state fingerprint — title + element count + key heading text.
-        Detects duplicate application states so we never re-explore the same state.
+        DOM state fingerprint — pathname + title + element count + heading text.
+
+        pathname is the primary key: two SPA states with the same title but
+        different URLs are different states and must both be explored.
+        title/count/heading catch cases where a SPA renders different content
+        at the same path (e.g. a modal that replaces the whole page body).
         """
         try:
             sig = page.evaluate("""
                 (function() {
-                    var t = document.title || '';
-                    var c = document.body ? document.body.children.length : 0;
-                    var h = document.querySelector('h1,h2,[class*="title"],[class*="header"]');
-                    var txt = h ? h.innerText.trim().slice(0,80) : '';
+                    var path  = window.location.pathname || '/';
+                    var t     = document.title || '';
+                    var c     = document.body ? document.body.children.length : 0;
+                    var h     = document.querySelector('h1,h2,[class*="title"],[class*="header"]');
+                    var txt   = h ? h.innerText.trim().slice(0,80) : '';
                     var forms = document.querySelectorAll('form').length;
-                    return t + '|' + c + '|' + txt + '|' + forms;
+                    return path + '|' + t + '|' + c + '|' + txt + '|' + forms;
                 })()
             """)
             return __import__('hashlib').sha256((sig or "").encode()).hexdigest()[:16]
@@ -1290,24 +1444,39 @@ class HeadlessEngine:
     def _flush_page_intel(self, page, source_url: str) -> set:
         """
         Extract all intelligence from the current page in one pass.
+        Each step is independently guarded — one failure never kills the rest.
         Clears interceptor buffers after reading so the next page starts fresh.
         """
         new_routes = set()
-        try:
-            new_routes  = self._extract_routes(page)
-            api_calls   = self._extract_api_calls(page)
-            ws_urls     = self._extract_ws_urls(page)
-            worker_urls = self._extract_worker_urls(page)
-            iframe_urls = self._extract_iframe_urls(page)
 
+        # Route extraction — most important, runs first
+        try:
+            new_routes = self._extract_routes(page)
+        except Exception as e:
+            logger.debug("Route extraction error %s: %s", source_url, e)
+
+        # API / WS intercepts
+        try:
+            api_calls = self._extract_api_calls(page)
+            ws_urls   = self._extract_ws_urls(page)
             with self._lock:
                 self.api_calls.extend(api_calls)
                 self.ws_urls.extend(ws_urls)
+        except Exception as e:
+            logger.debug("API/WS extraction error %s: %s", source_url, e)
 
+        # WebWorkers
+        try:
+            worker_urls = self._extract_worker_urls(page)
+            import threading as _t
             for w_url in worker_urls:
-                import threading as _t
                 _t.Thread(target=self._fetch_worker_js, args=(w_url, source_url), daemon=True).start()
+        except Exception as e:
+            logger.debug("Worker extraction error %s: %s", source_url, e)
 
+        # Iframes — add same-origin ones as routes
+        try:
+            iframe_urls = self._extract_iframe_urls(page)
             parsed = urlparse(self.target_url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
             for iframe_url in iframe_urls:
@@ -1315,10 +1484,11 @@ class HeadlessEngine:
                     new_routes.add(urlparse(iframe_url).path or "/")
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
+        except Exception as e:
+            logger.debug("Iframe extraction error %s: %s", source_url, e)
 
-            # DOM scrape fallback — collect script URLs in the Playwright thread
-            # (page.evaluate must run here), then fetch them off-thread so we
-            # don't block page navigation. Never pass page/context to the thread.
+        # DOM scrape fallback — collect URLs in Playwright thread, fetch off-thread
+        try:
             _dom_script_urls = self._collect_dom_script_urls(page)
             if _dom_script_urls:
                 import threading as _t
@@ -1327,22 +1497,23 @@ class HeadlessEngine:
                     args=(_dom_script_urls, source_url),
                     daemon=True,
                 ).start()
-
-            # Reset interceptor buffers for next page
-            try:
-                page.evaluate("""
-                    window.__bundlespy_requests = [];
-                    window.__bundlespy_ws = [];
-                    window.__bundlespy_workers = [];
-                    window.__bundlespy_iframes = [];
-                    window.__bspy_mutations = 0;
-                    window.__bspy_requests = 0;
-                    window.__bspy_last_active = Date.now();
-                """)
-            except Exception:
-                pass
         except Exception as e:
-            logger.debug("Intel flush error %s: %s", source_url, e)
+            logger.debug("DOM scrape error %s: %s", source_url, e)
+
+        # Reset interceptor buffers for next page
+        try:
+            page.evaluate("""
+                window.__bundlespy_requests = [];
+                window.__bundlespy_ws = [];
+                window.__bundlespy_workers = [];
+                window.__bundlespy_iframes = [];
+                window.__bspy_mutations = 0;
+                window.__bspy_requests = 0;
+                window.__bspy_last_active = Date.now();
+            """)
+        except Exception:
+            pass
+
         return new_routes
 
     def run(self) -> dict:
@@ -1443,6 +1614,9 @@ class HeadlessEngine:
                     self.auth_result["final_url"],
                     self.auth_result["status"],
                 )
+                # Extra stability wait after auth — SPAs may still be mounting
+                # their router after the framework detect fires in _verify_auth
+                stabilizer.wait_for_framework(max_ms=2000)
                 self.registry.register_url(self.target_url)
                 with self._lock:
                     self.pages_visited += 1
@@ -1487,19 +1661,23 @@ class HeadlessEngine:
             self.timer.stop("phase1_root")
             logger.info("Phase 1 done: %d routes", len(self.routes))
 
-            # ── Phase 2: Visit routes on same page/context — no context reload ─
+            # ── Phase 2: BFS route exploration ────────────────────────────────
+            # Bug 19 fix: use a real BFS deque so routes discovered during the
+            # loop are fed back into the queue immediately and visited in the
+            # same run. The old code collected new_routes_found and only added
+            # them after the loop ended — they were never visited.
             self.timer.start("phase2_routes")
-            urls_to_visit = self._build_urls(self.routes)
-            urls_to_visit = sorted(urls_to_visit, key=_route_priority)
-            remaining     = self.max_pages - self.pages_visited
-            urls_to_visit = urls_to_visit[:max(0, remaining)]
 
-            new_routes_found: Set[str] = set()
+            initial_urls = self._build_urls(self.routes)
+            # Bug 11 fix: _build_urls already sorts by priority; don't sort again.
+            bfs_queue: deque = deque(initial_urls)
             login_loop_count = 0
 
-            for url in urls_to_visit:
+            while bfs_queue:
                 if self.pages_visited >= self.max_pages:
                     break
+
+                url = bfs_queue.popleft()
 
                 if not self.registry.register_url(url):
                     continue
@@ -1514,13 +1692,14 @@ class HeadlessEngine:
                         self.pages_visited += 1
 
                     # Login loop detection — stop wasting time on auth failures
-                    final_url = page.url
-                    if _is_login_url(final_url) and not _is_login_url(url):
+                    if _is_login_page(page) and not _is_login_url(url):
                         login_loop_count += 1
                         if login_loop_count >= 2:
                             logger.warning("Login loop — stopping route exploration")
                             break
                         continue
+                    else:
+                        login_loop_count = 0  # reset on successful non-login page
 
                     # DOM state dedup — skip identical states
                     stabilizer.wait_for_framework(max_ms=2000)
@@ -1536,13 +1715,17 @@ class HeadlessEngine:
                         self._observe_forms(page, stabilizer)
 
                     new_routes = self._flush_page_intel(page, url)
-                    new_routes_found.update(new_routes)
+
+                    # Feed newly discovered routes straight back into the BFS
+                    # queue so they're visited this run, not a future run.
+                    new_urls = self._build_urls(new_routes)
+                    for new_url in new_urls:
+                        if not self.registry.seen_url(new_url):
+                            self._add_route(urlparse(new_url).path or "/")
+                            bfs_queue.append(new_url)
 
                 except Exception as e:
                     logger.debug("Error visiting %s: %s", url, e)
-
-            for r in new_routes_found:
-                self._add_route(r)
 
             self.timer.stop("phase2_routes")
 
