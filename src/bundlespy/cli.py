@@ -155,6 +155,7 @@ other:
     _og.add_argument("--csv",            action="store_true", help="CSV to stdout only (sets --quiet)")
     _og.add_argument("--show-fp",        action="store_true", help="Include likely false positives in output")
     _og.add_argument("--silent",         action="store_true", help="Print only findings, one per line - no headers or progress")
+    _og.add_argument("--yes",            action="store_true", help="Skip authorization confirmation prompt (for CI/automation)")
 
     # ── local ─────────────────────────────────────────────────────────────────
     local = sub.add_parser(
@@ -525,6 +526,13 @@ def run_scan(args) -> int:
     if not safe:
         phase_error(f"Target blocked by safety policy: {reason}")
         return 2
+
+    # Authorization confirmation — required unless --yes or non-interactive
+    # --yes is for CI/automation pipelines where a human already confirmed scope
+    if not getattr(args, "yes", False) and not args.quiet:
+        from .safety.authorization import require_authorization
+        if not require_authorization(target):
+            return 2
 
     formats = [f.strip() for f in args.format.split(",")]
     started = datetime.utcnow()
@@ -1540,6 +1548,45 @@ def run_local(args) -> int:
     all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(js_files, scanner)
 
     started  = datetime.utcnow()
+
+    # Re-categorize UNKNOWN endpoints
+    from .analysis.endpoints import _categorize_path as _recat
+    from urllib.parse import urlparse as _uprc
+    for _ep in all_endpoints:
+        if _ep.category in ("UNKNOWN", ""):
+            _ep_path = _uprc(_ep.url).path or _ep.url
+            _ep.category = _recat(_ep_path)
+
+    # ── Vulnerable library detection ──────────────────────────────────────────
+    if not args.verbose:
+        phase("Scanning for vulnerable libraries")
+    from .analysis.library_scanner import scan_for_vulnerable_libraries
+    lib_findings = []
+    lib_seen = set()
+    for js in js_files:
+        for lf in scan_for_vulnerable_libraries(js.content, js.url):
+            key = f"{lf.library}:{lf.version}:{lf.cve_id}"
+            if key not in lib_seen:
+                lib_seen.add(key)
+                lib_findings.append(lf)
+
+    if not args.verbose:
+        if lib_findings:
+            unique_libs = len(set(f"{l.library}:{l.version}" for l in lib_findings))
+            total_cves  = len(lib_findings)
+            crit = sum(1 for l in lib_findings if l.severity == "CRITICAL")
+            high = sum(1 for l in lib_findings if l.severity == "HIGH")
+            detail = f"{total_cves} CVEs in {unique_libs} libraries"
+            if crit: detail += f"  {crit} critical"
+            if high: detail += f"  {high} high"
+            phase_done("Library scan", detail)
+        else:
+            phase_done("Library scan", "no known vulnerable libraries")
+
+    # ── Attack surface analysis ───────────────────────────────────────────────
+    from .analysis.attack_surface import analyze_attack_surface
+    attack_surface = analyze_attack_surface(all_endpoints)
+
     finished = datetime.utcnow()
 
     result = ScanResult(
@@ -1549,7 +1596,29 @@ def run_local(args) -> int:
         infrastructure=all_infra, errors=[],
     )
 
-    extras = {"local_path": path}
+    # ── Coverage metrics ──────────────────────────────────────────────────────
+    from .analysis.coverage import compute_coverage
+    coverage = compute_coverage(
+        js_files      = js_files,
+        endpoints     = all_endpoints,
+        findings      = all_findings,
+        pages_crawled = 0,
+        headless_used = False,
+        source_maps   = False,
+        chunks_used   = False,
+        passive_used  = False,
+        has_cookie    = False,
+        lib_findings  = lib_findings,
+        scan_errors   = [],
+    )
+
+    extras = {
+        "local_path":     path,
+        "lib_findings":   lib_findings,
+        "attack_surface": attack_surface,
+        "coverage":       coverage,
+    }
+
     formats = [f.strip() for f in args.format.split(",")]
     file_paths = {}
     file_formats = [f for f in formats if f != "terminal"]
@@ -1563,6 +1632,7 @@ def run_local(args) -> int:
             result,
             verbose=args.verbose,
             no_color=args.no_color,
+            extras=extras,
             report_paths=file_paths,
         )
 
