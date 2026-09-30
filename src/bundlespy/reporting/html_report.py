@@ -1504,16 +1504,14 @@ function _buildGraph() {{
   svg.call(gZoom);
 
   // Link distance / strength by relationship type
-  const LD = {{LOADS:80,IMPORTS:70,CALLS:90,EXPOSES:75,ACCEPTS:55,OBSERVED_ON:95,RELATED_TO:85,HOSTS:100,RECOVERS:70,REFERENCES:80}};
+  const LD = {{LOADS:70,IMPORTS:60,CALLS:80,EXPOSES:65,ACCEPTS:50,OBSERVED_ON:85,RELATED_TO:75,HOSTS:90,RECOVERS:65,REFERENCES:70}};
 
   gSim = d3.forceSimulation(gNodes)
-    .force('link',   d3.forceLink(gEdges).id(d=>d.id).distance(e=>LD[e.kind]||80).strength(.55))
-    .force('charge', d3.forceManyBody().strength(-420).distanceMax(350).distanceMin(20))
-    .force('center', d3.forceCenter(W/2, H/2).strength(.05))
-    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+14).strength(.9))
-    .force('boundX', d3.forceX(W/2).strength(.03))
-    .force('boundY', d3.forceY(H/2).strength(.03))
-    .alphaDecay(.018).velocityDecay(.4);
+    .force('link',   d3.forceLink(gEdges).id(d=>d.id).distance(e=>LD[e.kind]||70).strength(.4))
+    .force('charge', d3.forceManyBody().strength(-600).distanceMax(500))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('col',    d3.forceCollide(d=>(R[d.kind]||9)+18).strength(.8))
+    .alphaDecay(.015).velocityDecay(.35);
 
   // ── Link layer
   const linkG = g.append('g').attr('class','link-layer');
@@ -1536,14 +1534,8 @@ function _buildGraph() {{
   const nodeG = g.append('g').attr('class','node-layer');
   let node = _buildNodes(nodeG, gNodes);
 
-  // ── Tick
-  function clamp(v,lo,hi){{return Math.max(lo,Math.min(hi,v));}}
+  // ── Tick — no hard clamp, let D3 spread naturally, auto-fit handles framing
   gSim.on('tick', ()=>{{
-    gNodes.forEach(d=>{{
-      const r=R[d.kind]||9;
-      d.x=clamp(d.x,pad+r,W-pad-r);
-      d.y=clamp(d.y,pad+r,H-pad-r);
-    }});
     link.attr('x1',e=>e.source.x).attr('y1',e=>e.source.y)
         .attr('x2',e=>_tx(e)).attr('y2',e=>_ty(e));
     eLabel.attr('x',e=>(e.source.x+e.target.x)/2).attr('y',e=>(e.source.y+e.target.y)/2);
