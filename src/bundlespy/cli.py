@@ -1549,6 +1549,7 @@ def run_local(args) -> int:
 
 def run_demo() -> int:
     from .storage.models import JSFile, Finding, Endpoint, InfrastructureItem, ScanResult
+    from .analysis.library_scanner import LibraryFinding
     import hashlib
     from datetime import timedelta
 
@@ -2100,21 +2101,41 @@ def run_demo() -> int:
                 "urls": 318, "js": 41, "unique": 38, "new": 9,
             },
             "lib_findings": [
-                type("LF", (), {
-                    "library": "lodash", "version": "4.6.1", "cve_id": "CVE-2019-10744",
-                    "severity": "HIGH", "description": "Prototype pollution via merge()",
-                    "source_file": fake_js_files[1].url,
-                })(),
-                type("LF", (), {
-                    "library": "moment", "version": "2.24.0", "cve_id": "CVE-2022-24785",
-                    "severity": "MEDIUM", "description": "Path traversal in locale loading",
-                    "source_file": fake_js_files[1].url,
-                })(),
-                type("LF", (), {
-                    "library": "axios", "version": "0.19.2", "cve_id": "CVE-2020-28168",
-                    "severity": "MEDIUM", "description": "SSRF via crafted URL",
-                    "source_file": fake_js_files[0].url,
-                })(),
+                LibraryFinding(
+                    library="lodash", version="4.6.1", cve_id="CVE-2019-10744",
+                    severity="HIGH", cvss=7.4,
+                    description="Prototype pollution via merge() — attacker can overwrite Object.prototype",
+                    remediation="Upgrade to lodash >= 4.17.21",
+                    source_file=fake_js_files[1].url, confidence=0.97,
+                ),
+                LibraryFinding(
+                    library="moment", version="2.24.0", cve_id="CVE-2022-24785",
+                    severity="MEDIUM", cvss=5.3,
+                    description="Path traversal in locale loading — arbitrary file read on server",
+                    remediation="Upgrade to moment >= 2.29.2",
+                    source_file=fake_js_files[1].url, confidence=0.93,
+                ),
+                LibraryFinding(
+                    library="axios", version="0.19.2", cve_id="CVE-2020-28168",
+                    severity="MEDIUM", cvss=5.9,
+                    description="SSRF via follow redirects — crafted URL bypasses same-origin check",
+                    remediation="Upgrade to axios >= 0.21.1",
+                    source_file=fake_js_files[0].url, confidence=0.95,
+                ),
+                LibraryFinding(
+                    library="jquery", version="3.4.1", cve_id="CVE-2020-11022",
+                    severity="MEDIUM", cvss=6.1,
+                    description="XSS via passing HTML from untrusted sources to manipulation methods",
+                    remediation="Upgrade to jQuery >= 3.5.0",
+                    source_file=fake_js_files[1].url, confidence=0.91,
+                ),
+                LibraryFinding(
+                    library="serialize-javascript", version="2.1.1", cve_id="CVE-2020-7660",
+                    severity="HIGH", cvss=8.1,
+                    description="RCE risk — regex in serialized functions not escaped; XSS if output rendered",
+                    remediation="Upgrade to serialize-javascript >= 3.1.0",
+                    source_file=fake_js_files[0].url, confidence=0.89,
+                ),
             ],
             "attack_report": fake_attack_report,
         },
