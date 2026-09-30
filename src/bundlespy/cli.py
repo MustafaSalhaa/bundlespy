@@ -2069,6 +2069,13 @@ def run_demo(args=None) -> int:
     except Exception:
         fake_attack_report = None
 
+    # ── Build attack surface graph from demo data ──────────────────────────────
+    try:
+        from .storage.graph import AttackSurfaceGraph
+        result.graph = AttackSurfaceGraph.from_scan_result(result)
+    except Exception:
+        pass
+
     # ── Shared extras / subdomains ─────────────────────────────────────────────
     demo_extras = {
         "login_result": {
