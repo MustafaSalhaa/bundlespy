@@ -288,46 +288,157 @@ def _js_html(result, extras):
 </table>"""
 
 
+def _vuln_exploit_type(description: str) -> tuple:
+    """Classify exploit type from description text. Returns (css_class, label)."""
+    d = description.lower()
+    if any(x in d for x in ("rce", "remote code", "arbitrary code", "code execution", "command injection", "sandbox escape")):
+        return "exploit-rce", "RCE"
+    if "ssrf" in d or "server-side request" in d:
+        return "exploit-ssrf", "SSRF"
+    if "prototype pollution" in d:
+        return "exploit-proto", "Proto Pollution"
+    if "xss" in d or "cross-site script" in d:
+        return "exploit-xss", "XSS"
+    if "redos" in d or "regex denial" in d or "regular expression" in d:
+        return "exploit-redos", "ReDoS"
+    if any(x in d for x in ("bypass", "escape", "avoid", "circumvent")):
+        return "exploit-bypass", "Bypass"
+    if any(x in d for x in ("path traversal", "directory traversal", "arbitrary file")):
+        return "exploit-rce", "Path Traversal"
+    if "injection" in d:
+        return "exploit-rce", "Injection"
+    return "exploit-other", "Advisory"
+
+
+def _vuln_lib_icon(lib: str) -> tuple:
+    """Return (icon_char, css_class) for a library."""
+    name = lib.lower()
+    if any(x in name for x in ("jwt", "bcrypt", "passport", "auth", "crypto", "cookie")):
+        return "🔐", "lib-icon-auth"
+    if any(x in name for x in ("axios", "fetch", "request", "got", "superagent", "socket", "http", "follow-redirects")):
+        return "🌐", "lib-icon-net"
+    if any(x in name for x in ("webpack", "postcss", "babel", "rollup", "vite", "serialize")):
+        return "⚙️", "lib-icon-build"
+    if any(x in name for x in ("lodash", "underscore", "minimist", "semver", "moment", "validator", "marked", "dompurify", "sanitize", "vm2", "tar", "shell", "netmask", "ip", "word", "path", "glob", "braces", "trim", "nth")):
+        return "🔧", "lib-icon-util"
+    return "📦", "lib-icon-js"
+
+
 def _vulnlibs_html(lib_findings):
     if not lib_findings:
         return '<div class="empty-state"><span class="empty-icon">✓</span><p>No known vulnerable libraries detected</p></div>'
 
-    by_lib = {}
+    # --- summary bar --------------------------------------------------------
+    sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for lf in lib_findings:
+        sev_counts[lf.severity] = sev_counts.get(lf.severity, 0) + 1
+
+    summary_pills = ""
+    pill_colors = {"CRITICAL": "#f87171", "HIGH": "#fb923c", "MEDIUM": "#fbbf24", "LOW": "#60a5fa"}
+    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        n = sev_counts.get(sev, 0)
+        if n:
+            c = pill_colors[sev]
+            summary_pills += (
+                f'<span style="background:{c}18;color:{c};border:1px solid {c}33;'
+                f'font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;'
+                f'display:inline-flex;align-items:center;gap:5px">'
+                f'<span style="font-size:16px;line-height:1">{n}</span> {sev}'
+                f'</span>'
+            )
+
+    libs_found = len(set(f"{lf.library} {lf.version}" for lf in lib_findings))
+    summary_html = (
+        f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;'
+        f'padding:14px 18px;background:var(--surface);border:1px solid var(--border);'
+        f'border-radius:var(--radius);margin-bottom:20px">'
+        f'<span style="font-size:12px;color:var(--text3);margin-right:4px">'
+        f'{libs_found} librar{"ies" if libs_found!=1 else "y"} · {len(lib_findings)} CVE{"s" if len(lib_findings)!=1 else ""}</span>'
+        f'{summary_pills}</div>'
+    )
+
+    # --- group by library+version ------------------------------------------
+    by_lib: dict = {}
     for lf in lib_findings:
         key = f"{lf.library} {lf.version}"
         by_lib.setdefault(key, {"lib": lf.library, "version": lf.version,
-                                 "file": getattr(lf,"source_file",""), "cves": []})
+                                 "file": getattr(lf, "source_file", ""), "cves": []})
         by_lib[key]["cves"].append(lf)
 
-    parts = []
-    for key, data in by_lib.items():
-        cve_rows = ""
-        for cve in data["cves"]:
-            sc = SEV_COLOR.get(cve.severity, "#94a3b8")
-            cvss_color = "#f87171" if cve.cvss >= 7 else "#fbbf24" if cve.cvss >= 4 else "#94a3b8"
-            fix = getattr(cve, "fix", "") or getattr(cve, "remediation", "")
-            cve_rows += f"""<tr>
-  <td><span class="sev-pill" style="background:{sc}22;color:{sc};border:1px solid {sc}44">{_e(cve.severity)}</span></td>
-  <td><code class="cve-id">{_e(cve.cve_id)}</code></td>
-  <td><span style="color:{cvss_color};font-weight:600">{cve.cvss}</span></td>
-  <td class="cve-desc">{_e(cve.description)}</td>
-  <td class="cve-fix">{_e(fix)}</td>
-</tr>"""
+    # sort cards: highest max CVSS first
+    sorted_libs = sorted(
+        by_lib.items(),
+        key=lambda kv: max((c.cvss for c in kv[1]["cves"]), default=0),
+        reverse=True
+    )
+
+    parts = [summary_html]
+    for key, data in sorted_libs:
+        cves_sorted = sorted(data["cves"], key=lambda c: c.cvss, reverse=True)
+        max_sev = cves_sorted[0].severity if cves_sorted else "LOW"
+        icon_char, icon_cls = _vuln_lib_icon(data["lib"])
         filename = data["file"].split("/")[-1] if data["file"] else ""
-        parts.append(f"""<div class="vuln-lib-card">
-  <div class="vuln-lib-header">
-    <div class="vuln-lib-name">{_e(data["lib"])}</div>
-    <div class="vuln-lib-meta">
-      <span class="version-badge">{_e(data["version"])}</span>
-      {f'<code class="lib-file">{_e(filename)}</code>' if filename else ""}
-      <span class="cve-count">{len(data["cves"])} CVE{"s" if len(data["cves"])!=1 else ""}</span>
+        header_border = SEV_COLOR.get(max_sev, "#94a3b8")
+
+        cve_cards = ""
+        for cve in cves_sorted:
+            sc = SEV_COLOR.get(cve.severity, "#94a3b8")
+            cvss_color = (
+                "#f87171" if cve.cvss >= 9 else
+                "#fb923c" if cve.cvss >= 7 else
+                "#fbbf24" if cve.cvss >= 4 else
+                "#60a5fa"
+            )
+            cvss_pct = min(100, int(cve.cvss / 10 * 100))
+            exploit_cls, exploit_label = _vuln_exploit_type(cve.description)
+            fix = getattr(cve, "fix", "") or getattr(cve, "remediation", "")
+
+            # short title = first clause of description before any comma/period
+            import re as _re
+            desc_parts = _re.split(r'[,.]', cve.description, maxsplit=1)
+            short_title = desc_parts[0].strip() if desc_parts else cve.description[:60]
+            long_desc = cve.description if len(cve.description) > len(short_title) + 2 else ""
+
+            cve_cards += f"""<div class="cve-card sev-{_e(cve.severity)}">
+  <div class="cve-card-left">
+    <code class="cve-id-badge">{_e(cve.cve_id)}</code>
+    <span class="sev-pill" style="background:{sc}1a;color:{sc};border:1px solid {sc}44;font-size:10px">{_e(cve.severity)}</span>
+    <span class="exploit-badge {exploit_cls}">{_e(exploit_label)}</span>
+  </div>
+  <div class="cve-card-body">
+    <div class="cve-title">{_e(short_title)}</div>
+    {f'<div class="cve-desc">{_e(long_desc)}</div>' if long_desc else ""}
+    {f'''<div class="cve-fix-row">
+      <span class="cve-fix-label">Fix</span>
+      <span class="cve-fix-text">{_e(fix)}</span>
+    </div>''' if fix else ""}
+  </div>
+  <div class="cve-card-right">
+    <div class="cvss-score" style="color:{cvss_color}">{cve.cvss}</div>
+    <div class="cvss-label">CVSS</div>
+    <div class="cvss-bar-wrap">
+      <div class="cvss-bar-fill" style="width:{cvss_pct}%;background:{cvss_color}"></div>
     </div>
   </div>
-  <table class="vuln-table">
-    <thead><tr><th>Severity</th><th>CVE</th><th>CVSS</th><th>Description</th><th>Fix</th></tr></thead>
-    <tbody>{cve_rows}</tbody>
-  </table>
+</div>"""
+
+        parts.append(f"""<div class="vuln-lib-card" style="border-top:3px solid {header_border}">
+  <div class="vuln-lib-header">
+    <div class="vuln-lib-header-left">
+      <div class="vuln-lib-icon {icon_cls}">{icon_char}</div>
+      <div>
+        <div class="vuln-lib-name">{_e(data["lib"])}</div>
+        {f'<code class="lib-file">{_e(filename)}</code>' if filename else ""}
+      </div>
+    </div>
+    <div class="vuln-lib-meta">
+      <span class="version-badge">v{_e(data["version"])}</span>
+      <span class="cve-count-badge">{len(data["cves"])} CVE{"s" if len(data["cves"])!=1 else ""}</span>
+    </div>
+  </div>
+  <div>{cve_cards}</div>
 </div>""")
+
     return "\n".join(parts)
 
 
@@ -1078,20 +1189,53 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .hash{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:10px;color:var(--text3)}}
 .size-cell{{color:var(--text3);font-size:11px;white-space:nowrap}}
 /* ── Vulnerable libraries ── */
-.vuln-lib-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}}
-.vuln-lib-header{{padding:11px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}}
-.vuln-lib-name{{font-weight:700;font-size:14px}}
-.vuln-lib-meta{{display:flex;align-items:center;gap:8px}}
-.version-badge{{background:rgba(227,179,65,.1);color:#e3b341;border:1px solid rgba(227,179,65,.3);font-size:11px;padding:2px 7px;border-radius:10px;font-weight:600}}
-.lib-file{{font-size:11px;color:var(--text3)}}
-.cve-count{{font-size:11px;color:var(--text3)}}
-.vuln-table{{width:100%;border-collapse:collapse;font-size:12px}}
-.vuln-table th{{background:#0a0d13;padding:7px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}}
-.vuln-table td{{padding:9px 14px;border-bottom:1px solid var(--border);vertical-align:top}}
-.vuln-table tr:last-child td{{border-bottom:none}}
-.cve-id{{font-size:11px}}
-.cve-desc{{color:var(--text2)}}
-.cve-fix{{color:var(--text3);font-size:11px}}
+.vuln-lib-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:18px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.18)}}
+.vuln-lib-header{{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}}
+.vuln-lib-header-left{{display:flex;align-items:center;gap:10px}}
+.vuln-lib-icon{{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}}
+.vuln-lib-name{{font-weight:700;font-size:15px;letter-spacing:-.2px}}
+.vuln-lib-meta{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+.version-badge{{background:rgba(227,179,65,.12);color:#e3b341;border:1px solid rgba(227,179,65,.35);font-size:11px;padding:3px 8px;border-radius:10px;font-weight:700;font-family:'SF Mono','Fira Code',Consolas,monospace}}
+.lib-file{{font-size:11px;color:var(--text3);font-family:'SF Mono','Fira Code',Consolas,monospace}}
+.cve-count-badge{{font-size:11px;background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.3);padding:2px 8px;border-radius:10px;font-weight:600}}
+/* severity left-border stripe */
+.cve-card{{border-left:4px solid;border-radius:0;margin:0;padding:14px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:start}}
+.cve-card:last-child{{border-bottom:none}}
+.cve-card-left{{display:flex;flex-direction:column;gap:6px;min-width:130px}}
+.cve-card-body{{min-width:0}}
+.cve-card-right{{display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:80px}}
+.cve-id-badge{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:.3px;color:var(--text1);background:var(--surface2);border:1px solid var(--border);padding:3px 7px;border-radius:5px;white-space:nowrap}}
+.cve-title{{font-size:12.5px;font-weight:600;color:var(--text1);line-height:1.4;margin-bottom:4px}}
+.cve-desc{{font-size:12px;color:var(--text2);line-height:1.5}}
+.cve-fix-row{{display:flex;align-items:flex-start;gap:6px;margin-top:8px}}
+.cve-fix-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--green);white-space:nowrap;padding-top:1px}}
+.cve-fix-text{{font-size:11px;color:var(--text3);line-height:1.4}}
+.cvss-gauge{{width:72px}}
+.cvss-score{{font-size:22px;font-weight:800;text-align:center;line-height:1;letter-spacing:-1px}}
+.cvss-label{{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;text-align:center;color:var(--text3);margin-top:2px}}
+.cvss-bar-wrap{{width:72px;height:5px;background:var(--border);border-radius:3px;margin-top:5px;overflow:hidden}}
+.cvss-bar-fill{{height:5px;border-radius:3px}}
+.exploit-badge{{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 6px;border-radius:4px;white-space:nowrap;display:inline-block}}
+/* sev left-border colors */
+.cve-card.sev-CRITICAL{{border-left-color:#f87171}}
+.cve-card.sev-HIGH{{border-left-color:#fb923c}}
+.cve-card.sev-MEDIUM{{border-left-color:#fbbf24}}
+.cve-card.sev-LOW{{border-left-color:#60a5fa}}
+/* exploit type colors */
+.exploit-rce{{background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.3)}}
+.exploit-xss{{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}}
+.exploit-proto{{background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)}}
+.exploit-ssrf{{background:rgba(52,211,153,.15);color:#34d399;border:1px solid rgba(52,211,153,.3)}}
+.exploit-redos{{background:rgba(96,165,250,.15);color:#60a5fa;border:1px solid rgba(96,165,250,.3)}}
+.exploit-bypass{{background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.3)}}
+.exploit-escape{{background:rgba(248,113,113,.2);color:#f87171;border:1px solid rgba(248,113,113,.4)}}
+.exploit-other{{background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.25)}}
+/* lib icon colors per category */
+.lib-icon-js{{background:rgba(227,179,65,.15)}}
+.lib-icon-auth{{background:rgba(52,211,153,.12)}}
+.lib-icon-net{{background:rgba(96,165,250,.12)}}
+.lib-icon-util{{background:rgba(167,139,250,.12)}}
+.lib-icon-build{{background:rgba(148,163,184,.10)}}
 /* ── Infrastructure ── */
 .cls-badge{{font-size:11px;font-weight:600}}
 .action-report_only{{color:var(--yellow)}}
