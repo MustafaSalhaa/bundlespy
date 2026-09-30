@@ -16,8 +16,10 @@ from ..storage.models import ScanResult, Finding, Endpoint, InfrastructureItem
 
 def _d3_script_tag() -> str:
     """Return an inline <script> with D3, or a CDN <script src> as fallback."""
-    # Search for D3 bundled alongside common Node tooling in the environment
+    # Search for D3 — bundled static asset first, then common Node tooling locations
     candidates = [
+        # Bundled inside the package (the canonical location — always works after install)
+        Path(__file__).parent / "static" / "d3.min.js",
         # mermaid-cli ships its own D3 — check both /root and /home/claude
         Path.home() / ".npm-global/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/d3/dist/d3.min.js",
         Path("/home/claude/.npm-global/lib/node_modules/@mermaid-js/mermaid-cli/node_modules/d3/dist/d3.min.js"),
