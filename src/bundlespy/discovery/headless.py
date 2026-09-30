@@ -99,6 +99,14 @@ DESTRUCTIVE_KEYWORDS = {
     "send payment", "transfer", "withdraw", "confirm delete",
 }
 
+# Logout link keywords — never click these, they invalidate the session
+LOGOUT_KEYWORDS = {
+    "logout", "log out", "log-out", "sign out", "signout", "sign-out",
+    "logoff", "log off", "log-off", "cerrar sesión", "déconnexion",
+    "abmelden", "выход", "odhlásit", "注销", "ログアウト", "로그아웃",
+    "çıkış", "uitloggen", "uitloggen", "sair", "saída",
+}
+
 SKIP_FORM_CONTEXTS = {
     "payment", "checkout", "billing", "credit", "card",
     "order", "purchase", "buy", "transaction", "stripe",
@@ -740,6 +748,7 @@ class HeadlessEngine:
         self.routes:     Set[str]      = set()
         self.pages_visited: int        = 0
         self.auth_result: Optional[dict] = None  # populated during run()
+        self._seen_interact_states: Set[str] = set()  # DOM states already interacted with
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
@@ -875,6 +884,64 @@ class HeadlessEngine:
     def _is_destructive(self, text: str) -> bool:
         lower = (text or "").lower().strip()
         return any(kw in lower for kw in DESTRUCTIVE_KEYWORDS)
+
+    def _is_logout_link(self, element) -> bool:
+        """
+        Return True if the element is a logout/sign-out link.
+        Checks visible text, href, id, and class — covers all common patterns.
+        Never click a logout link: it invalidates the session and silently
+        breaks all subsequent authenticated page crawls.
+        """
+        try:
+            text  = (element.inner_text() or "").lower().strip()
+            href  = (element.get_attribute("href")  or "").lower()
+            eid   = (element.get_attribute("id")    or "").lower()
+            cls   = (element.get_attribute("class") or "").lower()
+            combined = f"{text} {href} {eid} {cls}"
+            return any(kw in combined for kw in LOGOUT_KEYWORDS)
+        except Exception:
+            return False
+
+    def _current_origin(self, page) -> str:
+        """Return the current page's origin (scheme + netloc) or empty string on error."""
+        try:
+            return "{0.scheme}://{0.netloc}".format(urlparse(page.url))
+        except Exception:
+            return ""
+
+    def _recover_drift(self, page, expected_url: str, stabilizer: PageStabilizer) -> bool:
+        """
+        Detect and recover from browser origin drift.
+
+        Drift happens when a page JS redirect, meta-refresh, or external link
+        moves the browser to an unexpected origin between navigations. If drift
+        is detected, we navigate back to expected_url before the next action
+        fires so actions never execute on the wrong page.
+
+        Returns True if drift was detected (and recovered), False if the browser
+        is already on the expected origin.
+        """
+        try:
+            expected_origin = "{0.scheme}://{0.netloc}".format(urlparse(expected_url))
+            current_origin  = self._current_origin(page)
+            if not current_origin or not expected_origin:
+                return False
+            if current_origin == expected_origin:
+                return False
+            # Drift detected — navigate back
+            logger.debug(
+                "Browser drift: expected=%s got=%s — recovering",
+                expected_origin, current_origin,
+            )
+            try:
+                page.goto(expected_url, timeout=self.timeout * 1000,
+                          wait_until="domcontentloaded")
+                stabilizer.wait_for_framework(max_ms=2000)
+            except Exception as nav_err:
+                logger.debug("Drift recovery navigation failed: %s", nav_err)
+            return True
+        except Exception:
+            return False
 
     def _extract_routes(self, page) -> Set[str]:
         try:
@@ -1110,6 +1177,19 @@ class HeadlessEngine:
         Adaptive waits after each action so JS-driven UI settles before the
         next step fires.
         """
+        # DOM simhash guard: skip interaction on states we've already triggered.
+        # Prevents re-firing the same JS events on SPAs that render the same
+        # component under different URLs (common in React Router / Vue Router apps).
+        try:
+            _ifp = self._dom_fingerprint(page)
+            if _ifp and _ifp in self._seen_interact_states:
+                logger.debug("Skipping interaction — duplicate DOM state")
+                return
+            if _ifp:
+                self._seen_interact_states.add(_ifp)
+        except Exception:
+            pass
+
         # Phase 1: Adaptive scroll — triggers lazy-load and infinite-scroll JS
         try:
             for frac in [0.25, 0.5, 0.75, 1.0, 0]:
@@ -1133,6 +1213,8 @@ class HeadlessEngine:
                             continue
                         if self._is_destructive(el.inner_text()):
                             continue
+                        if self._is_logout_link(el):
+                            continue
                         el.click(timeout=800)
                         stabilizer.wait_after_interaction(max_ms=800)
                     except Exception:
@@ -1150,6 +1232,8 @@ class HeadlessEngine:
                     if not el.is_visible() or not el.is_enabled():
                         continue
                     if self._is_destructive(el.inner_text()):
+                        continue
+                    if self._is_logout_link(el):
                         continue
                     el.click(timeout=800)
                     stabilizer.wait_after_interaction(max_ms=600)
@@ -2314,15 +2398,33 @@ class HeadlessEngine:
                     continue
 
                 try:
+                    # Drift guard: recover if a previous page's JS moved the
+                    # browser to an unexpected origin before we navigate here.
+                    self._recover_drift(page, self.target_url, stabilizer)
+
                     page.goto(url, timeout=self.timeout * 1000, wait_until="domcontentloaded")
                     with self._lock:
                         self.pages_visited += 1
 
-                    # Login loop detection — stop wasting time on auth failures
+                    # Session state check — detect silent mid-crawl session loss.
+                    # If we have credentials but land on a login page for a non-login
+                    # URL, the session was lost (expired cookie, server logout event).
                     if _is_login_page(page) and not _is_login_url(url):
                         login_loop_count += 1
                         if login_loop_count >= 2:
-                            logger.warning("Login loop — stopping route exploration")
+                            logger.warning(
+                                "Session lost mid-crawl after %d consecutive login "
+                                "redirects — stopping route exploration to avoid "
+                                "silent unauthenticated crawl",
+                                login_loop_count,
+                            )
+                            # Update auth_result so callers know the session dropped
+                            if self.auth_result is not None:
+                                self.auth_result["authenticated"] = False
+                                self.auth_result["reason"] = (
+                                    "Session lost mid-crawl — "
+                                    "server invalidated the session after login"
+                                )
                             break
                         continue
                     else:
