@@ -25,6 +25,12 @@ Optimization principles:
 - CrawlGraph DOT file export
 - PageLoadStrategy passthrough
 - Sub-page (popup/new-tab) detection
+- Response body URL extraction — parse every HTTP response for embedded URLs
+  (HTML attrs, JS fetch/axios calls, JSON endpoint fields, CSS url(), sourcemaps)
+- Cookie jar pre-loading — load Netscape-format cookie files (Burp Suite export)
+  and inject into browser context before crawl starts
+- URL structural deduplication (PathTrie) — collapse /item/1 /item/2 /item/3
+  into /item/* so parameterized routes don't get crawled N times
 """
 
 import re
@@ -1030,6 +1036,537 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
     return {k: v for k, v in (extra_headers or {}).items() if k.lower() != "cookie"}
 
 
+# ── PathTrie — URL structural deduplication ───────────────────────────────────
+# Mirrors Katana's FilterSimilar / PathTrie implementation.
+# Replaces numeric / UUID path segments with a wildcard token so that
+# /item/1, /item/2, /item/1337 all collapse to /item/* and are treated as
+# one unique structural pattern.  Configurable threshold controls how many
+# concrete values a segment must be seen with before it is wildcarded.
+
+import re as _re
+
+_NUMERIC_SEG   = _re.compile(r'^\d+$')
+_UUID_SEG      = _re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    _re.IGNORECASE,
+)
+_HEX_ID_SEG    = _re.compile(r'^[0-9a-f]{16,}$', _re.IGNORECASE)  # long hex IDs
+_SLUG_NUMERIC  = _re.compile(r'^[a-z0-9-]{2,50}$', _re.IGNORECASE)  # slug with digits
+
+_WILDCARD = "*"
+
+
+class PathTrie:
+    """
+    URL-path structural deduplication trie.
+
+    Each path segment becomes a node in the trie.  When the same position in
+    the path has been seen with >= `threshold` *different* concrete values, all
+    future values at that position are replaced with the wildcard token "*".
+
+    Thread-safe — all mutations hold the internal lock.
+
+    Usage::
+
+        trie = PathTrie(threshold=3)
+        for url in urls:
+            fingerprint = trie.fingerprint(url)
+            if not seen.add(fingerprint):   # set.add returns False on duplicate
+                continue   # structurally identical to a URL we already visited
+    """
+
+    def __init__(self, threshold: int = 3) -> None:
+        self._threshold: int = max(1, threshold)
+        self._lock: threading.Lock = threading.Lock()
+        # trie node: dict[segment -> {"_children": dict, "_values": set, "_wildcard": bool}]
+        self._root: dict = {"_children": {}, "_values": set(), "_wildcard": False}
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    def fingerprint(self, url: str) -> str:
+        """
+        Return a structural fingerprint of the URL's path.
+        Numeric / UUID / frequently-varying segments are replaced with "*".
+        Query string is stripped.  Fragment is stripped.
+
+        Examples::
+            /product/42          -> /product/*
+            /product/99          -> /product/*   (same fingerprint as above)
+            /user/abc-def/orders -> /user/*/orders
+            /about               -> /about        (stable, returned as-is)
+        """
+        try:
+            parsed  = urlparse(url)
+            path    = parsed.path or "/"
+            segs    = [s for s in path.split("/")]   # keep empty strings for leading /
+            result  = self._walk(self._root, segs, mutate=True)
+            # Rebuild path from fingerprinted segments
+            fingerprint_path = "/".join(result)
+            return urlunparse((parsed.scheme, parsed.netloc, fingerprint_path, "", "", ""))
+        except Exception:
+            return url
+
+    def is_known_pattern(self, url: str) -> bool:
+        """
+        Return True if this URL's structural pattern has already been seen
+        (i.e. the fingerprint matches a wildcard node in the trie).
+        Does NOT mutate the trie — read-only check.
+        """
+        try:
+            parsed = urlparse(url)
+            path   = parsed.path or "/"
+            segs   = [s for s in path.split("/")]
+            result = self._walk(self._root, segs, mutate=False)
+            return _WILDCARD in result
+        except Exception:
+            return False
+
+    # ── internal ──────────────────────────────────────────────────────────────
+
+    def _walk(self, node: dict, segs: List[str], mutate: bool) -> List[str]:
+        """Recursively walk/build the trie and return the fingerprinted segments."""
+        if not segs:
+            return []
+
+        seg, rest = segs[0], segs[1:]
+
+        with self._lock:
+            # Already wildcarded at this position — return wildcard immediately
+            if node.get("_wildcard"):
+                out_seg = _WILDCARD
+            elif seg == "":
+                # Empty string segments (leading / trailing slash) — keep as-is
+                out_seg = seg
+                if mutate:
+                    child = node["_children"].setdefault(seg, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+                else:
+                    child = node["_children"].get(seg, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+                return [out_seg] + self._walk(child, rest, mutate)
+            elif _NUMERIC_SEG.match(seg) or _UUID_SEG.match(seg) or _HEX_ID_SEG.match(seg):
+                # Clearly parametric — wildcard immediately without counting
+                out_seg = _WILDCARD
+                if mutate:
+                    node["_wildcard"] = True
+            else:
+                # Register this value; wildcard when threshold exceeded
+                if mutate:
+                    node["_values"].add(seg)
+                    if len(node["_values"]) >= self._threshold:
+                        node["_wildcard"] = True
+                        out_seg = _WILDCARD
+                    else:
+                        out_seg = seg
+                else:
+                    # Read-only: wildcard if the node is already past threshold
+                    if len(node.get("_values", set())) >= self._threshold:
+                        out_seg = _WILDCARD
+                    else:
+                        out_seg = seg
+
+            if out_seg == _WILDCARD:
+                # All concrete children collapse into the wildcard child
+                if mutate:
+                    child = node["_children"].setdefault(_WILDCARD, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+                else:
+                    child = node["_children"].get(_WILDCARD, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+            else:
+                if mutate:
+                    child = node["_children"].setdefault(seg, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+                else:
+                    child = node["_children"].get(seg, {
+                        "_children": {}, "_values": set(), "_wildcard": False
+                    })
+
+        return [out_seg] + self._walk(child, rest, mutate)
+
+
+def _url_structural_fingerprint(url: str, trie: "PathTrie") -> str:
+    """
+    Return the structural fingerprint of `url` using `trie`.
+    Strips query string and fragment before fingerprinting.
+    """
+    return trie.fingerprint(url)
+
+
+# ── Netscape cookie jar loader ────────────────────────────────────────────────
+# Parses the Netscape cookie file format exported by Burp Suite, curl,
+# Firefox, Chrome (via EditThisCookie), and most HTTP tools.
+# Each non-comment line is TAB-separated:
+#   domain  flag  path  secure  expiry  name  value
+#
+# Returns a list of Playwright cookie dicts ready for ctx.add_cookies().
+
+def load_cookie_jar(path: str) -> List[dict]:
+    """
+    Parse a Netscape-format cookie file and return Playwright cookie dicts.
+
+    Handles:
+    - Standard Netscape format (7 TAB-separated fields)
+    - HTTP-only cookies prefixed with #HttpOnly-
+    - Comment lines (# ...) and blank lines
+    - Cookies with no value (name only)
+    - Domain leading-dot normalization (.example.com -> example.com for Playwright)
+    - Expiry = 0 or missing -> session cookie (no expires key set)
+
+    Raises FileNotFoundError if path does not exist.
+    Raises ValueError on a completely unparseable file (not a cookie jar).
+    """
+    cookies: List[dict] = []
+    valid_lines = 0
+    error_lines = 0
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for raw_line in fh:
+                line = raw_line.rstrip("\r\n")
+
+                # Strip HttpOnly prefix (used by curl's --cookie-jar)
+                http_only = False
+                if line.startswith("#HttpOnly-"):
+                    line      = line[len("#HttpOnly-"):]
+                    http_only = True
+
+                # Skip comments and blanks
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split("\t")
+                if len(parts) < 6:
+                    error_lines += 1
+                    continue
+
+                # Pad to 7 fields — some exporters omit the value column for
+                # value-less cookies
+                while len(parts) < 7:
+                    parts.append("")
+
+                domain_raw, _flag, path_val, secure_str, expiry_str, name, value = (
+                    parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+                )
+
+                # Playwright requires domain WITHOUT a leading dot for host cookies,
+                # but WITH a leading dot for domain cookies (subdomains).
+                # We preserve the dot if present — Playwright handles both.
+                domain = domain_raw.strip()
+                if not domain:
+                    error_lines += 1
+                    continue
+
+                name  = name.strip()
+                value = value.strip()
+                if not name:
+                    error_lines += 1
+                    continue
+
+                secure = secure_str.strip().upper() == "TRUE"
+
+                cookie: dict = {
+                    "name":   name,
+                    "value":  value,
+                    "domain": domain,
+                    "path":   path_val.strip() or "/",
+                    "secure": secure,
+                    "httpOnly": http_only,
+                    "sameSite": "None" if secure else "Lax",
+                }
+
+                # Expiry — omit key for session cookies (expiry = 0 or blank)
+                try:
+                    exp = int(float(expiry_str.strip()))
+                    if exp > 0:
+                        cookie["expires"] = float(exp)
+                except (ValueError, TypeError):
+                    pass
+
+                cookies.append(cookie)
+                valid_lines += 1
+
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Failed to parse cookie jar {path!r}: {e}") from e
+
+    if valid_lines == 0 and error_lines > 0:
+        raise ValueError(
+            f"Cookie jar {path!r} contained {error_lines} lines but none were parseable. "
+            "Is this a Netscape cookie file?"
+        )
+
+    logger.info(
+        "Cookie jar loaded: %s — %d cookies parsed (%d lines skipped)",
+        path, valid_lines, error_lines,
+    )
+    return cookies
+
+
+# ── ResponseParser — extract URLs from every HTTP response body ───────────────
+# Mirrors Katana's ResponseParser (engine/parser).
+#
+# Runs on EVERY response body the browser receives — HTML, JS, JSON, CSS.
+# Extracts embedded URLs that the browser would never navigate to on its own
+# but which may reveal hidden API endpoints, admin routes, or internal services.
+#
+# Extraction layers (in order of reliability):
+#   1. HTML href/src/action attributes  (lxml-style regex — no DOM access needed)
+#   2. JavaScript string URL literals   (fetch/axios/XMLHttpRequest call patterns)
+#   3. JSON string values               (REST API pagination cursors, next-page links)
+#   4. CSS url() references             (background images hosted on app server)
+#   5. Source map references            (sourceMappingURL comment / header)
+#   6. Generic URL pattern sweep        (last resort — catches anything the above miss)
+
+# Pre-compiled patterns — compiled once at import time for speed.
+
+# HTML attribute URLs
+_RP_HTML_ATTRS = _re.compile(
+    r'''(?:href|src|action|data-src|data-href|data-url|data-endpoint|content)\s*=\s*["']([^"'#\s]{4,400})["']''',
+    _re.IGNORECASE,
+)
+
+# JS string literals — URLs passed to common HTTP call patterns
+_RP_JS_CALLS = _re.compile(
+    r'''(?:fetch|axios\.(?:get|post|put|patch|delete|request)|'XMLHttpRequest'|xhr\.open|'\.ajax'|'\$\.get'|'\$\.post')\s*\(\s*["'`]([^"'`\s]{4,400})["'`]''',
+    _re.IGNORECASE,
+)
+
+# JS string literals — bare URL strings (path or full URL) — broader pattern
+_RP_JS_STRINGS = _re.compile(
+    r'''["'`](/(?:[a-zA-Z0-9_\-./~!$&'()*+,;=:@%?#]){1,300})["'`]'''
+)
+
+# JSON string values that look like paths or full URLs
+_RP_JSON_URLS = _re.compile(
+    r'"(?:url|href|endpoint|path|next|prev|link|action|redirect|location|uri|src|source)"\s*:\s*"([^"]{4,400})"',
+    _re.IGNORECASE,
+)
+
+# CSS url() references
+_RP_CSS_URLS = _re.compile(r'''url\(\s*["']?([^"')#\s]{4,400})["']?\s*\)''', _re.IGNORECASE)
+
+# Source map references (inline comment + X-SourceMap header)
+_RP_SOURCEMAP = _re.compile(
+    r'//[#@]\s*sourceMappingURL\s*=\s*(\S+)',
+    _re.IGNORECASE,
+)
+
+# Generic absolute/relative URL sweep — catches anything above missed
+_RP_GENERIC_PATH = _re.compile(
+    r'''["'`\s]((?:https?://[^\s"'`<>]{8,400}|/[a-zA-Z0-9_\-./~!$&'()*+,;=:@%]{2,300}))["'`\s<>]'''
+)
+
+# File extensions to skip — static assets with no endpoint value
+_RP_SKIP_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".ogg", ".mp3", ".wav",
+    ".pdf", ".zip", ".tar", ".gz",
+})
+
+# Domains that are always third-party noise
+_RP_SKIP_DOMAINS = frozenset({
+    "google-analytics.com", "googletagmanager.com", "googleapis.com",
+    "gstatic.com", "doubleclick.net", "facebook.net", "facebook.com",
+    "twitter.com", "linkedin.com", "hotjar.com", "mixpanel.com",
+    "segment.io", "amplitude.com", "fullstory.com", "intercom.io",
+    "sentry.io", "bugsnag.com", "logrocket.com", "datadog-browser-agent.com",
+    "cloudflare.com", "jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com",
+    "fonts.googleapis.com", "fonts.gstatic.com", "ajax.googleapis.com",
+})
+
+# Max response body size to parse (8 MB) — avoids OOM on huge bundles
+_RP_MAX_BODY_BYTES = 8 * 1024 * 1024
+
+
+class ResponseParser:
+    """
+    Parses HTTP response bodies for embedded URLs.
+
+    Designed to be called from HeadlessEngine._handle_response() for every
+    non-blocked response, and also from a dedicated Playwright context-level
+    response handler that captures responses the browser would normally not
+    navigate to (XHR/fetch responses, JSON API responses, etc.)
+
+    All extraction is done with pre-compiled regexes — no DOM access, no
+    external dependencies.  Safe to call from any thread.
+
+    Usage::
+
+        parser = ResponseParser(target_origin="https://example.com")
+        urls   = parser.extract(response_url, content_type, body_bytes)
+        # urls is a list of absolute URL strings within the target origin
+    """
+
+    def __init__(self, target_origin: str) -> None:
+        """
+        target_origin: scheme + netloc of the crawl target, e.g. "https://example.com".
+        Only URLs that resolve to this origin (or are relative paths) are returned.
+        """
+        parsed = urlparse(target_origin)
+        self._origin  = f"{parsed.scheme}://{parsed.netloc}"
+        self._netloc  = parsed.netloc.lower()
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    def extract(self, response_url: str, content_type: str, body: bytes) -> List[str]:
+        """
+        Extract embedded URLs from a response body.
+
+        Returns a deduplicated list of absolute URLs that:
+        - Belong to the same origin as target_origin, OR are relative paths
+        - Are not obviously static assets (.png, .woff, etc.)
+        - Are not third-party analytics/CDN domains
+        - Are at least 4 characters long
+
+        Body is silently truncated to _RP_MAX_BODY_BYTES before parsing.
+        All exceptions are caught — never raises.
+        """
+        try:
+            if not body:
+                return []
+            # Truncate large bodies to avoid OOM / slow regex on 50MB bundles
+            if len(body) > _RP_MAX_BODY_BYTES:
+                body = body[:_RP_MAX_BODY_BYTES]
+
+            try:
+                text = body.decode("utf-8", errors="replace")
+            except Exception:
+                return []
+
+            ct_lower = (content_type or "").lower()
+            found: Set[str] = set()
+
+            # Choose extraction strategy based on content type
+            if "html" in ct_lower:
+                found.update(self._extract_html(text))
+                found.update(self._extract_js_strings(text))
+            elif "javascript" in ct_lower or "ecmascript" in ct_lower or self._is_js_url(response_url):
+                found.update(self._extract_js_calls(text))
+                found.update(self._extract_js_strings(text))
+                found.update(self._extract_sourcemaps(text, response_url))
+            elif "json" in ct_lower:
+                found.update(self._extract_json_urls(text))
+            elif "css" in ct_lower:
+                found.update(self._extract_css_urls(text))
+            else:
+                # Unknown type — run all extractors
+                found.update(self._extract_html(text))
+                found.update(self._extract_js_strings(text))
+                found.update(self._extract_json_urls(text))
+
+            # Always run generic sweep — catches anything above missed
+            found.update(self._extract_generic(text))
+
+            # Normalize + filter
+            return self._normalize_and_filter(found, response_url)
+
+        except Exception as e:
+            logger.debug("ResponseParser.extract error for %s: %s", response_url, e)
+            return []
+
+    # ── extraction layers ─────────────────────────────────────────────────────
+
+    def _extract_html(self, text: str) -> Set[str]:
+        return set(_RP_HTML_ATTRS.findall(text))
+
+    def _extract_js_calls(self, text: str) -> Set[str]:
+        return set(_RP_JS_CALLS.findall(text))
+
+    def _extract_js_strings(self, text: str) -> Set[str]:
+        return set(_RP_JS_STRINGS.findall(text))
+
+    def _extract_json_urls(self, text: str) -> Set[str]:
+        return set(_RP_JSON_URLS.findall(text))
+
+    def _extract_css_urls(self, text: str) -> Set[str]:
+        return set(_RP_CSS_URLS.findall(text))
+
+    def _extract_sourcemaps(self, text: str, response_url: str) -> Set[str]:
+        """Extract sourceMappingURL references and resolve them to absolute URLs."""
+        refs: Set[str] = set()
+        for match in _RP_SOURCEMAP.finditer(text):
+            ref = match.group(1).strip()
+            if ref.startswith("data:"):
+                continue  # inline source map — no URL to follow
+            refs.add(ref)
+        return refs
+
+    def _extract_generic(self, text: str) -> Set[str]:
+        return set(_RP_GENERIC_PATH.findall(text))
+
+    # ── normalization + filtering ─────────────────────────────────────────────
+
+    def _normalize_and_filter(self, raw: Set[str], base_url: str) -> List[str]:
+        """Resolve relative URLs, drop static assets and third-party domains."""
+        result: List[str] = []
+        seen: Set[str] = set()
+
+        for candidate in raw:
+            candidate = candidate.strip()
+            if not candidate or len(candidate) < 4:
+                continue
+            # Skip data URIs and JavaScript protocol
+            if candidate.startswith(("data:", "javascript:", "mailto:", "tel:", "#")):
+                continue
+
+            try:
+                # Resolve relative URLs against the response URL
+                absolute = urljoin(base_url, candidate)
+                parsed   = urlparse(absolute)
+            except Exception:
+                continue
+
+            # Must be http or https
+            if parsed.scheme not in ("http", "https"):
+                continue
+
+            netloc_lower = parsed.netloc.lower()
+
+            # Skip third-party noise domains
+            skip = False
+            for skip_domain in _RP_SKIP_DOMAINS:
+                if netloc_lower == skip_domain or netloc_lower.endswith("." + skip_domain):
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # Must belong to our target origin
+            if netloc_lower != self._netloc:
+                # Allow subdomains of the target — e.g. api.example.com for example.com
+                target_base = self._netloc.lstrip("www.")
+                if not (netloc_lower == target_base or
+                        netloc_lower.endswith("." + target_base)):
+                    continue
+
+            # Skip static asset extensions
+            path_lower = parsed.path.lower()
+            if any(path_lower.endswith(ext) for ext in _RP_SKIP_EXTS):
+                continue
+
+            # Normalize: drop query + fragment for dedup
+            norm = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            result.append(norm)
+
+        return result
+
+    @staticmethod
+    def _is_js_url(url: str) -> bool:
+        path = urlparse(url).path.lower()
+        return any(path.endswith(ext) for ext in (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"))
+
+
 # ── Login-page indicators ──────────────────────────────────────────────────────
 
 # Path segments that strongly indicate an authentication page.
@@ -1166,6 +1703,11 @@ class HeadlessEngine:
         auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
         page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
         hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
+        # New Katana enhancements (session 3)
+        cookie_jar_path:    Optional[str]  = None,   # Path to Netscape cookie file (Burp export)
+        url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
+        url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
+        response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -1190,6 +1732,33 @@ class HeadlessEngine:
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag — avoids re-auth mid-crawl
+
+        # Session 3 Katana enhancements
+        self.cookie_jar_path       = cookie_jar_path
+        self.url_filter_similar    = url_filter_similar
+        self.url_filter_threshold  = max(1, url_filter_threshold)
+        self.response_body_extract = response_body_extract
+
+        # PathTrie — URL structural dedup (created only when enabled)
+        self._path_trie: Optional[PathTrie] = (
+            PathTrie(threshold=self.url_filter_threshold)
+            if url_filter_similar else None
+        )
+        # PathTrie dedup tracking set — fingerprint -> bool (replaces URL seen check)
+        self._trie_seen: Set[str] = set()
+
+        # ResponseParser — parses every response body for embedded URLs
+        # Instantiated once with the target origin and reused across all responses
+        parsed_target = urlparse(target_url)
+        _target_origin = f"{parsed_target.scheme}://{parsed_target.netloc}"
+        self._response_parser: Optional[ResponseParser] = (
+            ResponseParser(target_origin=_target_origin)
+            if response_body_extract else None
+        )
+        # Lock-protected list of URLs discovered by the response parser that
+        # haven't been fed to the BFS queue yet (drained in run())
+        self._rp_discovered: List[str] = []
+        self._rp_lock: threading.Lock  = threading.Lock()
 
         self.registry    = AssetRegistry(external_seen)
         # Pre-seed content hash registry with hashes from crawler
@@ -1850,17 +2419,37 @@ class HeadlessEngine:
 
     def _handle_response(self, response, source_page: str) -> None:
         """
-        Capture JS files from network responses.
+        Capture JS files and extract embedded URLs from every network response.
 
-        Called from the context-level response handler (fires for every
-        request across all pages). Uses three-layer JS detection to handle
-        servers with missing, wrong, or non-standard Content-Type headers.
+        Two responsibilities:
+        1. ResponseParser — parse every response body for URLs not visible in the DOM
+           (Katana enhancement: response body URL extraction). Discovered URLs are
+           staged into self._rp_discovered and drained into the BFS queue in run().
+        2. JS capture — three-layer detection, body dedup, JS file creation (existing).
         """
         try:
             url           = response.url
             ct            = response.headers.get("content-type", "")
             resource_type = response.request.resource_type
 
+            # ── ResponseParser: extract embedded URLs from every response ────────
+            # Runs on ALL responses (HTML, JS, JSON, CSS) — before the JS-only
+            # guard below — so we harvest routes that live in non-JS responses too.
+            if self._response_parser is not None:
+                try:
+                    body_for_rp = response.body()
+                    if body_for_rp:
+                        found = self._response_parser.extract(url, ct, body_for_rp)
+                        if found:
+                            with self._rp_lock:
+                                self._rp_discovered.extend(found)
+                            logger.debug(
+                                "ResponseParser: %d URLs from %s", len(found), url
+                            )
+                except Exception as rp_err:
+                    logger.debug("ResponseParser error for %s: %s", url, rp_err)
+
+            # ── JS capture (original logic unchanged) ────────────────────────────
             if not self._is_js_response(url, ct, resource_type):
                 return
 
@@ -3493,6 +4082,32 @@ class HeadlessEngine:
             if self.extra_headers:
                 kwargs["extra_http_headers"] = self.extra_headers
 
+            # Cookie jar pre-loading — merge Netscape cookie file into self.cookies
+            # BEFORE context creation so they're available for the very first request.
+            # Handles Burp Suite exports, curl cookie jars, Firefox/Chrome exports.
+            if self.cookie_jar_path:
+                try:
+                    jar_cookies = load_cookie_jar(self.cookie_jar_path)
+                    self.cookies = list(self.cookies) + jar_cookies
+                    logger.info(
+                        "Cookie jar loaded: %d cookies from %s",
+                        len(jar_cookies), self.cookie_jar_path,
+                    )
+                except FileNotFoundError:
+                    logger.warning(
+                        "Cookie jar file not found: %s — skipping", self.cookie_jar_path
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        "Cookie jar parse error (%s): %s — skipping",
+                        self.cookie_jar_path, e,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Cookie jar load failed (%s): %s — skipping",
+                        self.cookie_jar_path, e,
+                    )
+
             ctx = browser.new_context(**kwargs)
 
             if self.cookies:
@@ -3673,9 +4288,35 @@ class HeadlessEngine:
             login_loop_count = 0
             bfs_depth: Dict[str, int] = {}  # url -> BFS depth for CrawlGraph
 
+            # PathTrie dedup tracking counters
+            _trie_filtered_count: int = 0
+            _rp_added_count: int      = 0
+
             while bfs_queue:
                 if self.pages_visited >= self.max_pages:
                     break
+
+                # Drain ResponseParser discoveries into the BFS queue.
+                # The response handler runs in the Playwright event thread and
+                # appends to _rp_discovered under _rp_lock. We drain here —
+                # at the top of each BFS iteration — so freshly discovered
+                # URLs from the previous page's responses feed into this run.
+                if self._response_parser is not None:
+                    with self._rp_lock:
+                        pending_rp = self._rp_discovered[:]
+                        self._rp_discovered.clear()
+                    for rp_url in pending_rp:
+                        if self.scope.in_scope(rp_url) and not self.registry.seen_url(rp_url):
+                            # PathTrie dedup: skip structurally identical URLs
+                            if self._path_trie is not None:
+                                fp = self._path_trie.fingerprint(rp_url)
+                                if fp in self._trie_seen:
+                                    _trie_filtered_count += 1
+                                    continue
+                                self._trie_seen.add(fp)
+                            self._add_route(urlparse(rp_url).path or "/")
+                            bfs_queue.append(rp_url)
+                            _rp_added_count += 1
 
                 # MaxCrawlDuration guard — timer starts after auth (Enhancement 10)
                 if self._is_crawl_deadline_exceeded():
@@ -3806,6 +4447,14 @@ class HeadlessEngine:
                     new_urls = self._build_urls(new_routes)
                     for new_url in new_urls:
                         if not self.registry.seen_url(new_url):
+                            # PathTrie dedup — skip structurally identical URLs
+                            # e.g. /item/1, /item/2, /item/3 all collapse to /item/*
+                            if self._path_trie is not None:
+                                new_fp = self._path_trie.fingerprint(new_url)
+                                if new_fp in self._trie_seen:
+                                    _trie_filtered_count += 1
+                                    continue
+                                self._trie_seen.add(new_fp)
                             self._add_route(urlparse(new_url).path or "/")
                             bfs_queue.append(new_url)
                             bfs_depth[new_url] = current_depth + 1
@@ -3878,6 +4527,12 @@ class HeadlessEngine:
                                         full = self._build_urls({r})
                                         for u in full:
                                             if not self.registry.seen_url(u):
+                                                if self._path_trie is not None:
+                                                    _fp = self._path_trie.fingerprint(u)
+                                                    if _fp in self._trie_seen:
+                                                        _trie_filtered_count += 1
+                                                        continue
+                                                    self._trie_seen.add(_fp)
                                                 bfs_queue.append(u)
                                 _action_pages_visited += 1
                                 phase3_consecutive_failures = 0
@@ -3959,6 +4614,12 @@ class HeadlessEngine:
                                         full = self._build_urls({r})
                                         for u in full:
                                             if not self.registry.seen_url(u):
+                                                if self._path_trie is not None:
+                                                    _fp = self._path_trie.fingerprint(u)
+                                                    if _fp in self._trie_seen:
+                                                        _trie_filtered_count += 1
+                                                        continue
+                                                    self._trie_seen.add(_fp)
                                                 bfs_queue.append(u)
                                 _action_pages_visited += 1
                                 phase3_consecutive_failures = 0
@@ -3981,6 +4642,23 @@ class HeadlessEngine:
 
             self.timer.stop("phase3_actions")
             logger.info("Phase 3 done: %d action pages", _action_pages_visited)
+
+            # Final ResponseParser drain — pick up anything discovered during
+            # the last Phase 3 action (these URLs won't be BFS-visited this run
+            # but are available in routes for the caller to use).
+            if self._response_parser is not None:
+                with self._rp_lock:
+                    pending_rp_final = self._rp_discovered[:]
+                    self._rp_discovered.clear()
+                for rp_url in pending_rp_final:
+                    if self.scope.in_scope(rp_url) and not self.registry.seen_url(rp_url):
+                        self._add_route(urlparse(rp_url).path or "/")
+                        _rp_added_count += 1
+                if pending_rp_final:
+                    logger.debug(
+                        "ResponseParser final drain: %d URLs added to routes",
+                        len(pending_rp_final),
+                    )
 
             # Close DiagnosticsWriter (Enhancement 11)
             if self._diagnostics:
@@ -4012,21 +4690,24 @@ class HeadlessEngine:
         crawl_graph_summary = self.crawl_graph.summary()
 
         stats = {
-            "pages":         self.pages_visited,
-            "js":            len(self.js_files),
-            "xhr":           sum(1 for c in self.api_calls if c.get("type") == "xhr"),
-            "fetch":         sum(1 for c in self.api_calls if c.get("type") == "fetch"),
-            "ws":            len(self.ws_urls),
-            "ws_messages":   len(self.ws_messages),
-            "routes":        len(self.routes),
-            "endpoints":     len(self.endpoints),
-            "workers":       len(workers_found),
-            "sw":            len(sw_found),
-            "es_modules":    len(es_mod_found),
-            "shadow_dom":    len(shadow_found),
-            "actions_queued": len(self._seen_actions),
-            "crawl_graph":   crawl_graph_summary,
-            "timings":       timings,
+            "pages":              self.pages_visited,
+            "js":                 len(self.js_files),
+            "xhr":                sum(1 for c in self.api_calls if c.get("type") == "xhr"),
+            "fetch":              sum(1 for c in self.api_calls if c.get("type") == "fetch"),
+            "ws":                 len(self.ws_urls),
+            "ws_messages":        len(self.ws_messages),
+            "routes":             len(self.routes),
+            "endpoints":          len(self.endpoints),
+            "workers":            len(workers_found),
+            "sw":                 len(sw_found),
+            "es_modules":         len(es_mod_found),
+            "shadow_dom":         len(shadow_found),
+            "actions_queued":     len(self._seen_actions),
+            "crawl_graph":        crawl_graph_summary,
+            "timings":            timings,
+            # Katana enhancements (session 3)
+            "response_parser_urls": _rp_added_count,
+            "trie_filtered":        _trie_filtered_count,
         }
 
         logger.info(
@@ -4087,6 +4768,11 @@ def collect_headless_full(
     page_load_strategy:   str            = "domcontentloaded",
     hooks:                Optional[CrawlHooks] = None,
     auth_credentials:     Optional[dict] = None,
+    # Katana enhancements (session 3)
+    cookie_jar_path:      Optional[str]  = None,
+    url_filter_similar:   bool           = False,
+    url_filter_threshold: int            = 3,
+    response_body_extract: bool          = True,
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -4107,6 +4793,12 @@ def collect_headless_full(
     page_load_strategy:    navigation wait strategy: eager/domcontentloaded/load/networkidle/none.
     hooks:                 CrawlHooks lifecycle callbacks (before_action, after_action, on_navigation, etc.).
     auth_credentials:      dict with 'username' and 'password' for auto-login fallback.
+    cookie_jar_path:       path to a Netscape-format cookie file (Burp Suite export) to pre-load.
+    url_filter_similar:    collapse structurally identical URLs (/item/1, /item/2 -> /item/*) to
+                           avoid hammering parameterized routes (PathTrie dedup, default False).
+    url_filter_threshold:  number of distinct values before a path segment is wildcarded (default 3).
+    response_body_extract: parse every HTTP response body for embedded URLs not visible in the DOM
+                           (JS fetch calls, JSON hrefs, CSS url(), sourcemaps — default True).
     """
     engine = HeadlessEngine(
         target_url             = url,
@@ -4129,6 +4821,10 @@ def collect_headless_full(
         auth_steps             = auth_steps or [],
         page_load_strategy     = page_load_strategy,
         hooks                  = hooks,
+        cookie_jar_path        = cookie_jar_path,
+        url_filter_similar     = url_filter_similar,
+        url_filter_threshold   = url_filter_threshold,
+        response_body_extract  = response_body_extract,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
