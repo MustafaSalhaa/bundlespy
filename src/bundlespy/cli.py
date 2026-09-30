@@ -783,10 +783,19 @@ def run_scan(args) -> int:
         _parsed_domain = _urlparse(target).netloc.split(":")[0]
         _playwright_cookies = _parse_cookie_string(args.cookie, _parsed_domain) if args.cookie else []
 
-        # Pre-seed headless dedup with content hashes from crawler JS files.
-        # This prevents headless from counting a file it sees again (same content,
-        # possibly same or different URL) as a new unique JS asset.
-        _crawler_js_hashes = {js.sha256 for js in all_js if js.sha256}
+        # Pre-seed headless dedup with content hashes from crawler JS files AND
+        # inline scripts the static crawler already captured.  Without the inline
+        # hashes headless would re-register every inline <script> block it sees on
+        # pages the crawler already visited, inflating the unique-asset count.
+        import hashlib as _hl
+        _crawler_inline_hashes: set = {
+            _hl.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+            for content, _ in getattr(crawler, "inline_scripts", [])
+            if content
+        }
+        _crawler_js_hashes = (
+            {js.sha256 for js in all_js if js.sha256} | _crawler_inline_hashes
+        )
 
         headless_result = collect_headless_full(
             target, scope,
