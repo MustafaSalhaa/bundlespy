@@ -79,6 +79,9 @@ class Fetcher:
         """
         Fetch a URL safely.
         Returns: (content, status_code, content_type, sha256)
+
+        Note: response headers (Link, X-Link, etc.) are available via
+        get_with_headers() if you need them.
         """
         safe, reason = validate_url(url, check_dns=True)
         if not safe:
@@ -142,3 +145,77 @@ class Fetcher:
         except Exception as e:
             logger.warning("Unexpected error fetching %s: %s", url, e)
             return None, 0, "", ""
+
+    def get_with_headers(
+        self,
+        url: str,
+        referer: str = "",
+    ) -> Tuple[Optional[str], int, str, str, dict]:
+        """
+        Fetch a URL and return response headers too.
+        Returns: (content, status_code, content_type, sha256, response_headers)
+
+        Use this when you need Link/X-Link headers for JS preload discovery.
+        Falls back to empty dict on error.
+        """
+        safe, reason = validate_url(url, check_dns=True)
+        if not safe:
+            logger.warning("Blocked request to %s: %s", url, reason)
+            return None, 0, "", "", {}
+
+        self._rate_limit()
+
+        if self.stealth:
+            headers = get_stealth_headers(self._current_ua, referer=referer)
+        else:
+            headers = {"User-Agent": self.user_agent}
+
+        if self.extra_headers:
+            headers.update(self.extra_headers)
+
+        try:
+            resp = self.session.get(
+                url,
+                timeout=self.timeout,
+                verify=False,
+                allow_redirects=True,
+                stream=True,
+                headers=headers,
+            )
+
+            content_type = resp.headers.get("Content-Type", "")
+            resp_headers = dict(resp.headers)
+
+            chunks = []
+            total = 0
+            for chunk in resp.iter_content(chunk_size=8192):
+                total += len(chunk)
+                if total > self.max_response_size:
+                    logger.warning(
+                        "Response from %s exceeded size limit, truncating", url
+                    )
+                    break
+                chunks.append(chunk)
+
+            raw = b"".join(chunks)
+
+            try:
+                content = raw.decode("utf-8", errors="replace")
+            except Exception:
+                content = raw.decode("latin-1", errors="replace")
+
+            sha256 = hashlib.sha256(raw).hexdigest()
+            return content, resp.status_code, content_type, sha256, resp_headers
+
+        except requests.exceptions.SSLError as e:
+            logger.warning("SSL error for %s: %s", url, e)
+            return None, 0, "", "", {}
+        except requests.exceptions.ConnectionError as e:
+            logger.warning("Connection error for %s: %s", url, e)
+            return None, 0, "", "", {}
+        except requests.exceptions.Timeout:
+            logger.warning("Timeout for %s", url)
+            return None, 0, "", "", {}
+        except Exception as e:
+            logger.warning("Unexpected error fetching %s: %s", url, e)
+            return None, 0, "", "", {}
