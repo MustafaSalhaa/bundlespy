@@ -44,7 +44,13 @@ from urllib.parse import urlparse, urljoin, urldefrag, urlunparse
 
 from .fetcher import Fetcher
 from .scope import ScopeChecker
-from ..discovery.html import extract_js_urls, extract_links, extract_inline_scripts
+from ..discovery.html import (
+    extract_js_urls,
+    extract_links,
+    extract_inline_scripts,
+    extract_htmx_endpoints,
+    extract_ping_urls,
+)
 from ..storage.models import JSFile, RouteState, AccessState
 from ..analysis.html_scanner import scan_html
 
@@ -267,6 +273,53 @@ RE_BASE_HREF = re.compile(
     re.IGNORECASE,
 )
 
+# ── Gap 3: Static form submission ─────────────────────────────────────────────
+# Extract all <form> blocks to build GET navigation requests from them.
+# action + name=value querystring = synthetic GET navigation target.
+RE_FORM_BLOCK      = re.compile(
+    r'<form\b([^>]*)>(.*?)</form>',
+    re.IGNORECASE | re.DOTALL,
+)
+RE_FORM_ATTR_ACTION = re.compile(r'\baction=["\']([^"\']*)["\']', re.IGNORECASE)
+RE_FORM_ATTR_METHOD = re.compile(r'\bmethod=["\']([^"\']*)["\']', re.IGNORECASE)
+RE_INPUT_NAME_VAL   = re.compile(
+    r'<input\b[^>]*\bname=["\']([^"\']+)["\'][^>]*(?:\bvalue=["\']([^"\']*)["\'])?[^>]*>',
+    re.IGNORECASE,
+)
+RE_INPUT_VAL_NAME   = re.compile(
+    r'<input\b[^>]*\bvalue=["\']([^"\']*)["\'][^>]*\bname=["\']([^"\']+)["\'][^>]*>',
+    re.IGNORECASE,
+)
+RE_SELECT_NAME      = re.compile(r'<select\b[^>]*\bname=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_TEXTAREA_NAME    = re.compile(r'<textarea\b[^>]*\bname=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# Binary content magic-byte prefixes (first 16 bytes are enough for detection)
+# Anything matching is treated as binary — body scraping is skipped entirely.
+_BINARY_MAGIC: tuple = (
+    b"\x89PNG",           # PNG
+    b"\xff\xd8\xff",      # JPEG
+    b"GIF8",              # GIF
+    b"RIFF",              # WAV / AVI / WebP (checks RIFF header)
+    b"BM",                # BMP
+    b"\x00\x00\x01\x00",  # ICO
+    b"\x1f\x8b",          # gzip
+    b"PK\x03\x04",        # ZIP / DOCX / XLSX / JAR
+    b"\x7fELF",           # ELF binary
+    b"MZ",                # PE / DOS executable
+    b"\xca\xfe\xba\xbe",  # Java class
+    b"%PDF",              # PDF
+    b"\x25\x50\x44\x46",  # PDF (alternative)
+    b"OggS",              # Ogg audio/video
+    b"\x1a\x45\xdf\xa3",  # WebM / MKV
+    b"fLaC",              # FLAC
+    b"\xff\xfb",          # MP3
+    b"ID3",               # MP3 ID3v2
+    b"wOFF",              # WOFF font
+    b"wOF2",              # WOFF2 font
+    b"\x00\x01\x00\x00",  # TTF
+    b"OTTO",              # OTF (CFF)
+)
+
 # integrity attribute on <script> tags - links to CDN-hosted files
 RE_SCRIPT_INTEGRITY = re.compile(
     r'<script[^>]+src=["\']([^"\']+)["\'][^>]+integrity=["\']([^"\']+)["\']',
@@ -338,6 +391,141 @@ def _resolve_with_base(url: str, base_href: Optional[str], page_url: str) -> str
     # base_href itself may be relative to the page
     absolute_base = urljoin(page_url, base_href)
     return urljoin(absolute_base, url)
+
+
+# ── Gap 2: Binary content guard ───────────────────────────────────────────────
+
+def _is_binary_response(content: str) -> bool:
+    """
+    Return True when the response body is binary data (image, font, archive…).
+
+    We check the first 32 characters of the string representation against
+    known binary magic-byte prefixes.  The fetcher decodes bytes to a str
+    with errors='replace', so magic bytes survive as latin-1 equivalent
+    characters.  A match means we must skip endpoint/link scraping on this
+    body — it will produce only garbage matches.
+
+    Equivalent to Katana's isTextualResponse() guard.
+    """
+    if not content:
+        return False
+    # Re-encode back to bytes to check magic bytes; take only the header
+    try:
+        header = content[:32].encode("latin-1", errors="replace")
+    except Exception:
+        return False
+    return any(header.startswith(magic) for magic in _BINARY_MAGIC)
+
+
+def _is_textual_content_type(content_type: str) -> bool:
+    """
+    Return True when the Content-Type header indicates textual content.
+
+    We allow text/*, application/json, application/javascript,
+    application/xml, application/xhtml+xml, and SVG.  Everything else
+    (image/*, audio/*, video/*, application/octet-stream, font/*…)
+    is considered non-textual and endpoint scraping is skipped.
+    """
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if not ct:
+        return True  # no content-type — assume text (safe default)
+    textual_prefixes = (
+        "text/",
+        "application/json",
+        "application/javascript",
+        "application/x-javascript",
+        "application/ecmascript",
+        "application/xml",
+        "application/xhtml+xml",
+        "application/ld+json",
+        "image/svg+xml",    # SVG is XML — we can parse it
+    )
+    return any(ct.startswith(p) for p in textual_prefixes)
+
+
+# ── Gap 3: Static form → GET navigation request ───────────────────────────────
+
+def _extract_form_get_urls(html: str, base_url: str) -> List[str]:
+    """
+    Build synthetic GET navigation URLs from every GET/unspecified <form> in the page.
+
+    For each form we:
+      1. Resolve the action URL (defaults to current page URL if absent)
+      2. Collect name=value pairs from <input>, <select>, <textarea>
+      3. Construct a ?name=placeholder_value querystring
+      4. Return the full URL — the crawler will visit it as a normal page
+
+    This is what Katana's bodyFormTagParser does for the static (non-headless)
+    crawler: it submits forms as real HTTP GET requests to discover parameters
+    and server-side routing decisions without a browser.
+
+    POST forms are intentionally excluded here — they mutate state.
+    The headless FormInteractor handles them under --forms.
+    """
+    urls: List[str] = []
+
+    for form_match in RE_FORM_BLOCK.finditer(html):
+        attrs_str  = form_match.group(1)
+        form_body  = form_match.group(2)
+
+        # Only process GET forms (or forms without an explicit method)
+        method_m = RE_FORM_ATTR_METHOD.search(attrs_str)
+        method   = method_m.group(1).upper() if method_m else "GET"
+        if method != "GET":
+            continue
+
+        # Resolve action URL
+        action_m  = RE_FORM_ATTR_ACTION.search(attrs_str)
+        action    = action_m.group(1).strip() if action_m else ""
+        action_url = urljoin(base_url, action) if action else base_url
+
+        # Skip non-HTTP targets
+        if not action_url.startswith(("http://", "https://")):
+            continue
+
+        # Collect field names (we use placeholder values — no real data)
+        params: List[str] = []
+
+        # <input name="foo" value="bar"> — prefer name-then-value order
+        seen_names: Set[str] = set()
+        for inp_m in RE_INPUT_NAME_VAL.finditer(form_body):
+            name = inp_m.group(1).strip()
+            val  = (inp_m.group(2) or "").strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                # Use the existing value if present, else a safe placeholder
+                params.append(f"{name}={val or 'test'}")
+        # Catch value-before-name attribute order
+        for inp_m in RE_INPUT_VAL_NAME.finditer(form_body):
+            val  = (inp_m.group(1) or "").strip()
+            name = inp_m.group(2).strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                params.append(f"{name}={val or 'test'}")
+
+        # <select name="sort"> — add a placeholder option value
+        for sel_m in RE_SELECT_NAME.finditer(form_body):
+            name = sel_m.group(1).strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                params.append(f"{name}=0")
+
+        # <textarea name="message">
+        for ta_m in RE_TEXTAREA_NAME.finditer(form_body):
+            name = ta_m.group(1).strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                params.append(f"{name}=test")
+
+        if params:
+            qs  = "&".join(params)
+            sep = "&" if "?" in action_url else "?"
+            urls.append(f"{action_url}{sep}{qs}")
+        else:
+            # Form has no named fields — just add the action URL as a link
+            urls.append(action_url)
+
+    return urls
 
 
 def _extract_js_from_manifest(content: str, base_url: str) -> List[str]:
@@ -919,6 +1107,16 @@ class Crawler:
 
         ct_lower = (content_type or "").lower()
 
+        # Gap 2: Binary content guard — skip body scraping on binary responses.
+        # Check Content-Type first (fast), then magic bytes (reliable fallback).
+        # This prevents false-positive endpoint matches from binary bodies.
+        if not _is_textual_content_type(content_type):
+            logger.debug("Skipping binary Content-Type %s for %s", content_type, url)
+            return
+        if _is_binary_response(content):
+            logger.debug("Skipping binary magic-byte response for %s", url)
+            return
+
         # JSON pages: extract any embedded JS URLs
         if "json" in ct_lower:
             for m in re.finditer(r'["\']([^"\']*\.js)["\']', content):
@@ -929,7 +1127,7 @@ class Crawler:
                         self._fetch_js(js_url, url)
             return
 
-        if "html" not in ct_lower and "text" not in ct_lower:
+        if "html" not in ct_lower and "text" not in ct_lower and "xml" not in ct_lower:
             return
 
         self.pages_crawled += 1
@@ -982,13 +1180,40 @@ class Crawler:
                 self.seen_inline_hashes.add(h)
                 self.inline_scripts.append((script, url))
 
-        # Queue new pages
+        # Queue new pages — standard links
+        effective_base_url = urljoin(url, base_href) if base_href else url
         if depth < self.max_depth:
-            for link in extract_links(content, url):
+            for link in extract_links(content, effective_base_url):
                 link_norm = link.rstrip("/")
                 if link_norm not in self.visited_pages and self.scope.in_scope(link):
                     self.visited_pages.add(link_norm)
                     queue.append((link, depth + 1))
+
+            # Gap 1: HTMX endpoints — hx-get/post/put/patch/delete targets
+            for htmx_url in extract_htmx_endpoints(content, effective_base_url):
+                norm = htmx_url.rstrip("/")
+                if norm not in self.visited_pages and self.scope.in_scope(htmx_url):
+                    self.visited_pages.add(norm)
+                    queue.append((htmx_url, depth + 1))
+
+            # Gap 3: Static GET form → navigation request
+            # Build ?name=value querystrings from GET forms and crawl them.
+            for form_url in _extract_form_get_urls(content, effective_base_url):
+                norm = form_url.rstrip("/")
+                if norm not in self.visited_pages and self.scope.in_scope(form_url):
+                    self.visited_pages.add(norm)
+                    queue.append((form_url, depth + 1))
+
+            # Gap 4: <a ping> / <area ping> — add as visited endpoints
+            # These are POST tracking URLs; we don't crawl them but record them
+            # as visited pages so they appear in the access state map.
+            for ping_url in extract_ping_urls(content, effective_base_url):
+                norm = ping_url.rstrip("/")
+                if norm not in self.visited_pages and self.scope.in_scope(ping_url):
+                    self.visited_pages.add(norm)
+                    # Record at depth+1 but don't recurse — ping targets are
+                    # POST endpoints that return 200 with no navigable content.
+                    self.page_access_states[ping_url] = 0  # unverified
 
     def _extract_all_js_from_html(
         self,
@@ -1070,6 +1295,12 @@ class Crawler:
         if not content or status not in range(200, 300):
             if status not in (404, 403, 0):
                 self.errors.append(f"Failed {url} (HTTP {status})")
+            return None
+
+        # Gap 2: Binary content guard — skip binary responses even at JS URLs.
+        # A CDN misconfiguration or redirect can serve an image at a .js path.
+        if _is_binary_response(content):
+            logger.debug("Skipping binary response at JS URL %s", url)
             return None
 
         # Loose content-type check (CDNs often return text/plain)
