@@ -49,6 +49,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from ..storage.models import JSFile, Endpoint
 from ..safety.network import validate_url
+from .form_interactor import FormInteractor
 
 logger = logging.getLogger("bundlespy.discovery.headless")
 
@@ -1825,6 +1826,8 @@ class HeadlessEngine:
         capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
         content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
         technology_detection:      bool  = False, # Enable per-response tech fingerprinting
+        # Form interaction engine
+        forms_mode:                bool  = False, # Enable Tier 2 form interaction (POST forms)
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -1861,6 +1864,8 @@ class HeadlessEngine:
         self.capture_raw_traffic      = capture_raw_traffic
         self.content_similarity_threshold = content_similarity_threshold
         self.technology_detection     = technology_detection
+        # Form interaction engine (Tier 1 always on; Tier 2 when forms_mode=True)
+        self.form_interactor = FormInteractor(tier2_enabled=forms_mode)
         # Raw traffic capture store
         self._raw_traffic: List[dict] = []
         self._raw_lock: threading.Lock = threading.Lock()
@@ -3232,199 +3237,47 @@ class HeadlessEngine:
 
     def _interact_forms(self, page, stabilizer: PageStabilizer) -> None:
         """
-        Multi-step form interaction engine.
+        Form interaction engine — delegates to FormInteractor (Tier 1 + Tier 2).
 
-        Goals:
-        - Fill safe text/search/email fields to trigger JS-driven validation
-          and conditional field reveal (e.g. "if email entered → show password").
-        - Click Next/Continue buttons to advance multi-step wizards and expose
-          new API calls made on each step transition.
-        - Detect modals that open after a step (aria-modal, [role=dialog]) and
-          interact with their content so any extra JS they load is captured.
+        Tier 1 (always active):
+          - GET forms only
+          - Search / filter / query fields only
+          - Safe dummy values — never real PII
+          - Submits via keyboard Enter to capture GET navigation URLs, then
+            navigates back so the crawl continues on the original page
 
-        Safety rules (never violated):
-        - Skip any form whose context touches payment/checkout keywords.
-        - Never click Submit / Place Order / Pay / Confirm Order buttons.
-        - Never click buttons whose text is in DESTRUCTIVE_KEYWORDS.
-        - At most MAX_STEPS steps per form so we can't loop forever.
-        - Clear every input field after interacting so state is not persisted.
+        Tier 2 (active when --forms flag was passed, i.e. engine.form_interactor.tier2_enabled):
+          - POST forms included, after intent classification
+          - Safe intents only: search, contact, newsletter, login, registration
+          - Never touches payment / checkout / delete / transfer forms
+          - Never fills destructive or sensitive fields (password only in login flows,
+            never card/cvv/amount/ssn/pin)
+          - Fills fields to trigger JS reactions — does NOT submit POST forms
+
+        Any new routes found via GET form submission are fed back into the BFS queue.
         """
-        MAX_STEPS       = 4   # max wizard steps per form
-        MAX_FORMS       = 6   # max forms to interact with per page
-        NEXT_SELECTORS  = [
-            "button[type='button']",          # generic next buttons
-            "button:not([type='submit'])",     # non-submit buttons in a form
-            "[data-action='next']",
-            "[data-step='next']",
-            "button.next", "button.continue",
-            "a.next", "a.continue",
-        ]
-        MODAL_SELECTORS = [
-            "[role='dialog']:not([hidden])",
-            "[aria-modal='true']:not([hidden])",
-            ".modal:not(.hidden):not(.d-none)",
-            ".dialog:not(.hidden)",
-        ]
-
+        source_url = page.url
         try:
-            forms = page.query_selector_all("form")[:MAX_FORMS]
-        except Exception:
+            page_report = self.form_interactor.interact_page(
+                page, stabilizer, source_url=source_url,
+            )
+        except Exception as e:
+            logger.debug("form_interactor.interact_page error: %s", e)
             return
 
-        for form in forms:
-            try:
-                # Skip payment / destructive form contexts
-                ctx = " ".join(filter(None, [
-                    form.get_attribute("id"),
-                    form.get_attribute("class"),
-                    form.get_attribute("action"),
-                    form.get_attribute("data-form-type"),
-                ])).lower()
-                if any(kw in ctx for kw in SKIP_FORM_CONTEXTS):
-                    continue
+        # Feed discovered GET-form routes back into the BFS queue
+        for route in page_report.new_routes:
+            self._add_route(route)
 
-                for _step in range(MAX_STEPS):
-                    # --- Fill visible safe inputs in current step ---
-                    try:
-                        inputs = form.query_selector_all(
-                            "input:not([type='hidden']):not([type='submit'])"
-                            ":not([type='radio']):not([type='checkbox']),"
-                            "textarea"
-                        )[:8]
-                    except Exception:
-                        inputs = []
-
-                    filled_any = False
-                    for inp in inputs:
-                        try:
-                            if not inp.is_visible() or not inp.is_enabled():
-                                continue
-                            itype = (inp.get_attribute("type") or "text").lower()
-                            iname = " ".join(filter(None, [
-                                inp.get_attribute("name"),
-                                inp.get_attribute("id"),
-                                inp.get_attribute("placeholder"),
-                                inp.get_attribute("autocomplete"),
-                            ])).lower()
-
-                            # Only fill safe field types
-                            if itype not in ("text", "search", "email", "tel", "url", ""):
-                                continue
-                            # Only interact with recognisably safe field names
-                            if not any(s in iname for s in SAFE_INPUT_NAMES):
-                                continue
-
-                            fill_val = FORM_FILL_VALUES.get(
-                                next((k for k in FORM_FILL_VALUES if k in iname), None),
-                                "test",
-                            )
-                            inp.click(timeout=600)
-                            inp.fill(fill_val)
-                            stabilizer.wait_after_interaction(max_ms=300)
-                            filled_any = True
-                        except Exception:
-                            pass
-
-                    if not filled_any and _step > 0:
-                        break  # nothing new appeared — wizard is done
-
-                    # --- Conditional field trigger: Tab through inputs ---
-                    try:
-                        page.keyboard.press("Tab")
-                        stabilizer.wait_after_interaction(max_ms=300)
-                    except Exception:
-                        pass
-
-                    # --- Look for a Next/Continue button (NOT submit) ---
-                    advanced = False
-                    for sel in NEXT_SELECTORS:
-                        if advanced:
-                            break
-                        try:
-                            for btn in form.query_selector_all(sel)[:4]:
-                                try:
-                                    if not btn.is_visible() or not btn.is_enabled():
-                                        continue
-                                    btn_text = (btn.inner_text() or "").lower().strip()
-                                    # Skip destructive and submit-like buttons
-                                    if self._is_destructive(btn_text):
-                                        continue
-                                    if any(w in btn_text for w in ("submit", "place order", "pay", "confirm order", "checkout")):
-                                        continue
-                                    # Only click Next/Continue/Continue-style buttons
-                                    if not any(w in btn_text for w in ("next", "continue", "proceed", "forward", "step", "go →", "→", ">")):
-                                        continue
-                                    btn.click(timeout=800)
-                                    stabilizer.wait_after_interaction(max_ms=1000)
-                                    advanced = True
-                                    break
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-
-                    # --- Check for modals that appeared after the step ---
-                    for modal_sel in MODAL_SELECTORS:
-                        try:
-                            modal = page.query_selector(modal_sel)
-                            if not modal or not modal.is_visible():
-                                continue
-                            # Interact with visible inputs inside the modal
-                            for inp in modal.query_selector_all(
-                                "input:not([type='hidden']):not([type='submit']),textarea"
-                            )[:4]:
-                                try:
-                                    itype = (inp.get_attribute("type") or "text").lower()
-                                    iname = " ".join(filter(None, [
-                                        inp.get_attribute("name"),
-                                        inp.get_attribute("id"),
-                                        inp.get_attribute("placeholder"),
-                                    ])).lower()
-                                    if itype not in ("text", "search", "email") or \
-                                       not any(s in iname for s in SAFE_INPUT_NAMES):
-                                        continue
-                                    if not inp.is_visible() or not inp.is_enabled():
-                                        continue
-                                    inp.fill("test")
-                                    stabilizer.wait_after_interaction(max_ms=300)
-                                    inp.fill("")  # clear
-                                except Exception:
-                                    pass
-                            # Close the modal so it doesn't block the next step
-                            for close_sel in [
-                                "[aria-label='Close']", "[data-dismiss='modal']",
-                                "[data-bs-dismiss='modal']", "button.close",
-                                ".modal-header button",
-                            ]:
-                                try:
-                                    close_btn = modal.query_selector(close_sel)
-                                    if close_btn and close_btn.is_visible():
-                                        close_btn.click(timeout=600)
-                                        stabilizer.wait_after_interaction(max_ms=500)
-                                        break
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-
-                    if not advanced:
-                        break  # no Next button found — form exploration done
-
-                # Clear all inputs we touched before moving to next form
-                try:
-                    for inp in form.query_selector_all(
-                        "input:not([type='hidden']):not([type='radio']):not([type='checkbox'])"
-                    )[:10]:
-                        try:
-                            if inp.is_visible():
-                                inp.fill("")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            except Exception:
-                pass
+        if page_report.forms_interacted > 0:
+            logger.debug(
+                "forms: %d found, %d interacted, %d skipped, %d new routes — %s",
+                page_report.forms_found,
+                page_report.forms_interacted,
+                page_report.forms_skipped,
+                len(page_report.new_routes),
+                source_url,
+            )
 
     def _observe_forms(self, page, stabilizer: PageStabilizer) -> None:
         """
@@ -5382,6 +5235,8 @@ def collect_headless_full(
     capture_raw_traffic:  bool           = False,
     content_similarity_threshold: float  = 0.0,
     technology_detection: bool           = False,
+    # Form interaction engine
+    forms_mode:           bool           = False,
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -5438,6 +5293,7 @@ def collect_headless_full(
         capture_raw_traffic    = capture_raw_traffic,
         content_similarity_threshold = content_similarity_threshold,
         technology_detection   = technology_detection,
+        forms_mode             = forms_mode,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
