@@ -125,6 +125,13 @@ other:
                      help="Disable page interaction - safer for production-sensitive targets")
     _hg.add_argument("--workers",     type=int, default=3, metavar="N",
                      help="Concurrent browser workers for headless scan (default: 3)")
+    _hg.add_argument("--forms",       dest="forms_mode", action="store_true", default=False,
+                     help=(
+                         "Tier 2 form interaction: fill POST forms classified as safe\n"
+                         "  (contact, newsletter, login, registration, search).\n"
+                         "  Never touches payment, checkout, delete, or transfer forms.\n"
+                         "  Tier 1 (GET search/filter forms) is always active with --headless."
+                     ))
 
     # Auth
     _ag = scan.add_argument_group("authentication")
@@ -809,6 +816,7 @@ def run_scan(args) -> int:
             cookies       = _playwright_cookies,
             extra_headers = extra_headers,
             seen_hashes   = _crawler_js_hashes,
+            forms_mode    = getattr(args, "forms_mode", False),
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
