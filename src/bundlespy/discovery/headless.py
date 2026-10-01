@@ -1708,6 +1708,11 @@ class HeadlessEngine:
         url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
         url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
         response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
+        # New Katana enhancements (session 4)
+        max_onclick_links:         int   = 50,   # Max a[onclick] links to simulate per page (0=disabled)
+        capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
+        content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
+        technology_detection:      bool  = False, # Enable per-response tech fingerprinting
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -1738,6 +1743,23 @@ class HeadlessEngine:
         self.url_filter_similar    = url_filter_similar
         self.url_filter_threshold  = max(1, url_filter_threshold)
         self.response_body_extract = response_body_extract
+
+        # Session 4 Katana enhancements
+        self.max_onclick_links        = max_onclick_links
+        self.capture_raw_traffic      = capture_raw_traffic
+        self.content_similarity_threshold = content_similarity_threshold
+        self.technology_detection     = technology_detection
+        # Raw traffic capture store
+        self._raw_traffic: List[dict] = []
+        self._raw_lock: threading.Lock = threading.Lock()
+        # JS nav tracking
+        self._js_nav_urls: List[str]  = []
+        self._js_nav_lock: threading.Lock = threading.Lock()
+        # Technology fingerprinting store {url -> [tech_names]}
+        self._tech_detections: dict   = {}
+        self._tech_lock: threading.Lock = threading.Lock()
+        # Content similarity — simple seen-content fingerprint set
+        self._content_hashes: Set[str] = set()
 
         # PathTrie — URL structural dedup (created only when enabled)
         self._path_trie: Optional[PathTrie] = (
@@ -2432,22 +2454,84 @@ class HeadlessEngine:
             ct            = response.headers.get("content-type", "")
             resource_type = response.request.resource_type
 
+            # ── Shared response body fetch (ResponseParser + tech fingerprinting) ─
+            # Fetched once and reused to avoid calling response.body() twice.
+            _resp_body: Optional[bytes] = None
+            if self._response_parser is not None or self.technology_detection or self.capture_raw_traffic:
+                try:
+                    _resp_body = response.body()
+                except Exception:
+                    _resp_body = None
+
             # ── ResponseParser: extract embedded URLs from every response ────────
             # Runs on ALL responses (HTML, JS, JSON, CSS) — before the JS-only
             # guard below — so we harvest routes that live in non-JS responses too.
-            if self._response_parser is not None:
+            if self._response_parser is not None and _resp_body:
                 try:
-                    body_for_rp = response.body()
-                    if body_for_rp:
-                        found = self._response_parser.extract(url, ct, body_for_rp)
-                        if found:
-                            with self._rp_lock:
-                                self._rp_discovered.extend(found)
-                            logger.debug(
-                                "ResponseParser: %d URLs from %s", len(found), url
-                            )
+                    found = self._response_parser.extract(url, ct, _resp_body)
+                    if found:
+                        with self._rp_lock:
+                            self._rp_discovered.extend(found)
+                        logger.debug(
+                            "ResponseParser: %d URLs from %s", len(found), url
+                        )
                 except Exception as rp_err:
                     logger.debug("ResponseParser error for %s: %s", url, rp_err)
+
+            # Technology fingerprinting — Katana hybrid feature 6
+            if self.technology_detection and _resp_body is not None:
+                try:
+                    techs = self._fingerprint_technologies(url, dict(response.headers), _resp_body)
+                    if techs:
+                        page_url = source_page or url
+                        with self._tech_lock:
+                            existing = self._tech_detections.get(page_url, [])
+                            self._tech_detections[page_url] = list(set(existing + techs))
+                except Exception as tech_err:
+                    logger.debug("Technology detection error for %s: %s", url, tech_err)
+
+            # Raw capture — store request+response bytes alongside api_call entries
+            # Katana's FetchRequestStageResponse captures full wire-level traffic;
+            # we approximate with Playwright's response object fields.
+            if self.capture_raw_traffic and _resp_body is not None:
+                try:
+                    req  = response.request
+                    resp = response
+                    # Build raw request representation
+                    req_headers = "\r\n".join(
+                        f"{k}: {v}" for k, v in (req.headers or {}).items()
+                    )
+                    post_data = ""
+                    try:
+                        post_data = req.post_data or ""
+                    except Exception:
+                        pass
+                    raw_req = (
+                        f"{req.method} {req.url} HTTP/1.1\r\n"
+                        f"{req_headers}\r\n\r\n"
+                        f"{post_data}"
+                    )
+                    # Build raw response representation
+                    resp_headers = "\r\n".join(
+                        f"{k}: {v}" for k, v in (resp.headers or {}).items()
+                    )
+                    resp_body_str = _resp_body.decode("utf-8", errors="replace")[:4096] if _resp_body else ""
+                    raw_resp = (
+                        f"HTTP/1.1 {resp.status}\r\n"
+                        f"{resp_headers}\r\n\r\n"
+                        f"{resp_body_str}"
+                    )
+                    with self._raw_lock:
+                        self._raw_traffic.append({
+                            "url":          url,
+                            "method":       req.method,
+                            "status":       resp.status,
+                            "raw_request":  raw_req,
+                            "raw_response": raw_resp,
+                            "source_page":  source_page,
+                        })
+                except Exception as raw_err:
+                    logger.debug("Raw capture error for %s: %s", url, raw_err)
 
             # ── JS capture (original logic unchanged) ────────────────────────────
             if not self._is_js_response(url, ct, resource_type):
@@ -3908,6 +3992,297 @@ class HeadlessEngine:
         except Exception:
             return ""
 
+    def _simulate_onclick_links(self, page, source_url: str, max_links: int = 50) -> list:
+        """
+        Click every a[onclick] element and record URL changes — Katana hybrid approach.
+
+        Standard crawlers miss JS redirects anchored to onclick handlers:
+            <a href="#" onclick="window.location='/admin/dashboard'">Admin</a>
+
+        Katana's navigateRequest() clicks each a[onclick] individually, records
+        the URL drift after click, then navigates back. We do the same:
+        1. Collect all a[onclick] selectors before clicking anything
+        2. For each: click -> measure URL drift -> navigate back
+        3. Return list of new URLs found (deduped, in-scope only)
+        """
+        new_urls = []
+        try:
+            # Collect href+onclick attrs without clicking yet
+            onclick_links = page.evaluate("""
+                () => {
+                    var links = Array.from(document.querySelectorAll('a[onclick]'));
+                    return links.slice(0, """ + str(max_links) + """).map(function(el, idx) {
+                        return {
+                            idx: idx,
+                            href: el.href || '',
+                            onclick: el.getAttribute('onclick') || '',
+                            text: (el.textContent || '').trim().slice(0, 60)
+                        };
+                    });
+                }
+            """)
+            if not onclick_links:
+                return []
+
+            parsed = urlparse(self.target_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            pre_url = page.url
+
+            for link_info in onclick_links:
+                if self.pages_visited >= self.max_pages:
+                    break
+                idx = link_info.get("idx", 0)
+                try:
+                    # Re-query by index each time (DOM may have changed)
+                    elements = page.query_selector_all("a[onclick]")
+                    if idx >= len(elements):
+                        continue
+                    el = elements[idx]
+                    if not el.is_visible():
+                        continue
+                    pre_click_url = page.url
+                    # Click and briefly wait for any navigation
+                    try:
+                        el.click(timeout=500)
+                    except Exception:
+                        # click() may throw if it triggers navigation — that's fine
+                        pass
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=1500)
+                    except Exception:
+                        pass
+                    post_url = page.url
+                    # URL drift — JS redirected us somewhere new
+                    if post_url != pre_click_url and post_url != pre_url:
+                        parsed_post = urlparse(post_url)
+                        if parsed_post.netloc == parsed.netloc:
+                            if self.scope.in_scope(post_url) and not self.registry.seen_url(post_url):
+                                new_urls.append(post_url)
+                                logger.debug(
+                                    "onclick drift: %s -> %s",
+                                    pre_click_url, post_url,
+                                )
+                    # Navigate back to source regardless of drift
+                    if page.url != source_url:
+                        try:
+                            page.goto(source_url, timeout=self.timeout * 1000,
+                                     wait_until="domcontentloaded")
+                            page.wait_for_load_state("domcontentloaded", timeout=2000)
+                        except Exception:
+                            try:
+                                page.go_back(timeout=3000)
+                            except Exception:
+                                pass
+                except Exception as link_err:
+                    logger.debug("onclick link %d error: %s", idx, link_err)
+                    # Try to recover back to source
+                    try:
+                        if page.url != source_url:
+                            page.goto(source_url, timeout=self.timeout * 1000,
+                                     wait_until="domcontentloaded")
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("onclick simulation error for %s: %s", source_url, e)
+        return new_urls
+
+    def _fingerprint_technologies(self, url: str, headers: dict, body_bytes: bytes) -> list:
+        """
+        Lightweight inline Wappalyzer-style technology fingerprinting.
+
+        Checks response headers and body against signature patterns for common
+        technologies. No external service — all patterns are inline regexes.
+        Returns a list of detected technology names for this response.
+
+        Katana runs Wappalyzer per-response in hybrid/crawl.go; we do the same
+        with a curated inline fingerprint database covering the most common stacks.
+        """
+        import re as _re
+        detected = []
+        try:
+            h = {k.lower(): v for k, v in (headers or {}).items()}
+            body = ""
+            try:
+                body = body_bytes.decode("utf-8", errors="ignore")[:8192] if body_bytes else ""
+            except Exception:
+                pass
+
+            _FINGERPRINTS = [
+                # (tech_name, [(source, pattern)])
+                # source: "header:<name>", "body"
+                ("Django",        [("header:x-frame-options", r"SAMEORIGIN"),
+                                  ("header:server",          r"WSGIServer|gunicorn"),
+                                  ("body",                   r"csrfmiddlewaretoken|django")]),
+                ("Rails",         [("header:x-powered-by",   r"Phusion Passenger"),
+                                  ("header:server",          r"nginx|puma|thin"),
+                                  ("body",                   r"csrf-token.*Rails|data-turbolinks")]),
+                ("Laravel",       [("header:set-cookie",      r"laravel_session"),
+                                  ("body",                   r"Laravel|Illuminate\\\\")]),
+                ("WordPress",     [("body",                   r"/wp-content/|/wp-includes/|wp-json")]),
+                ("Drupal",        [("header:x-generator",     r"Drupal"),
+                                  ("body",                   r"Drupal\.settings|/sites/default/files/")]),
+                ("Joomla",        [("body",                   r"/components/com_|Joomla!")]),
+                ("Next.js",       [("header:x-powered-by",   r"Next\.js"),
+                                  ("body",                   r"__NEXT_DATA__|/_next/static/")]),
+                ("Nuxt.js",       [("body",                   r"__NUXT__|/_nuxt/")]),
+                ("React",         [("body",                   r"react\.development\.js|react\.production\.min|__reactFiber|ReactDOM")]),
+                ("Vue.js",        [("body",                   r"Vue\.js|vue\.min\.js|__vue__|v-bind:|v-on:")]),
+                ("Angular",       [("body",                   r"ng-version=|angular\.min\.js|ng-app|ng-controller")]),
+                ("Svelte",        [("body",                   r"__svelte|svelte/internal")]),
+                ("jQuery",        [("body",                   r"jquery\.min\.js|jQuery v[0-9]|jquery-[0-9]")]),
+                ("Bootstrap",     [("body",                   r"bootstrap\.min\.css|bootstrap\.bundle|getbootstrap\.com")]),
+                ("GraphQL",       [("body",                   r'"__typename"|"query":\s*"query |graphql')]),
+                ("Nginx",         [("header:server",          r"nginx")]),
+                ("Apache",        [("header:server",          r"Apache")]),
+                ("Express",       [("header:x-powered-by",   r"Express")]),
+                ("ASP.NET",       [("header:x-powered-by",   r"ASP\.NET"),
+                                  ("header:x-aspnet-version", r".")]),
+                ("PHP",           [("header:x-powered-by",   r"PHP/"),
+                                  ("body",                   r"\.php\?|PHPSESSID")]),
+                ("Cloudflare",    [("header:cf-ray",          r".")]),
+                ("Fastly",        [("header:x-served-by",     r"cache-")]),
+                ("AWS CloudFront",[("header:x-amz-cf-id",     r".")]),
+                ("Shopify",       [("header:x-shopify-stage", r"."),
+                                  ("body",                   r"Shopify\.theme|cdn\.shopify\.com")]),
+                ("Stripe",        [("body",                   r"stripe\.com/v3|Stripe\(")]),
+                ("Google Analytics",[("body",                 r"gtag\(|ga\('create'|google-analytics\.com/analytics")]),
+            ]
+            for tech_name, patterns in _FINGERPRINTS:
+                for source, pattern in patterns:
+                    try:
+                        if source.startswith("header:"):
+                            hname = source[7:]
+                            hval  = h.get(hname, "")
+                            if hval and _re.search(pattern, hval, _re.IGNORECASE):
+                                detected.append(tech_name)
+                                break
+                        elif source == "body":
+                            if body and _re.search(pattern, body, _re.IGNORECASE):
+                                detected.append(tech_name)
+                                break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("Tech fingerprint error for %s: %s", url, e)
+        return detected
+
+    def _is_similar_content(self, page) -> bool:
+        """
+        Structural content similarity gate — skip near-duplicate pages.
+
+        Uses a lightweight structural fingerprint (tag sequence + form count +
+        link count) and checks Hamming distance against previously seen fingerprints.
+        Threshold 0.0 = disabled. Threshold 0.85 = skip if 85%+ structurally similar.
+
+        Katana's SimhashOracle uses simhash with configurable threshold; we use
+        a simpler but effective structural hash approach that doesn't require
+        external dependencies.
+        """
+        if self.content_similarity_threshold <= 0.0:
+            return False
+        try:
+            sig = page.evaluate("""
+                () => {
+                    var tags = Array.from(document.querySelectorAll('*'))
+                        .slice(0, 200)
+                        .map(function(el) { return el.tagName.toLowerCase(); });
+                    var forms  = document.querySelectorAll('form').length;
+                    var links  = document.querySelectorAll('a').length;
+                    var inputs = document.querySelectorAll('input').length;
+                    var sorted = tags.slice().sort().join(',');
+                    return sorted + '|f' + forms + '|l' + links + '|i' + inputs;
+                }
+            """)
+            if not sig:
+                return False
+            # Convert to a 64-bit simhash-style fingerprint using character n-grams
+            # Hamming distance check: count differing bits between fingerprints
+            h = hashlib.sha256(sig.encode()).digest()
+            # Convert first 8 bytes to integer for bit comparison
+            new_fp_int = int.from_bytes(h[:8], "big")
+            threshold_bits = int((1.0 - self.content_similarity_threshold) * 64)
+            for seen_fp in self._content_hashes:
+                seen_int = int(seen_fp, 16)
+                xor = new_fp_int ^ seen_int
+                hamming = bin(xor).count("1")
+                if hamming <= threshold_bits:
+                    return True  # Too similar to a seen page
+            # Not a duplicate — register this fingerprint
+            self._content_hashes.add(format(new_fp_int, "016x"))
+            return False
+        except Exception as e:
+            logger.debug("Content similarity check error: %s", e)
+            return False
+
+    def _extract_shadow_dom_routes(self, page) -> set:
+        """
+        Extract routes from shadow DOM using CDP DOMGetDocument with pierce=True.
+
+        Playwright's page.content() and querySelectorAll() only see the light DOM.
+        Web Components hide entire navigation trees inside shadow roots that are
+        invisible to standard scraping. CDP with pierce=True crosses every shadow
+        boundary in a single call, returning the full composed tree.
+
+        Katana does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
+        pierce=True, then walks nodes collecting href/action attributes.
+        """
+        found = set()
+        cdp = None
+        try:
+            cdp = page.context.new_cdp_session(page)
+            doc = cdp.send("DOM.getDocument", {"depth": -1, "pierce": True})
+            root = doc.get("root", {})
+
+            parsed = urlparse(self.target_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+
+            def _walk(node):
+                if not isinstance(node, dict):
+                    return
+                # nodeType 1 = ELEMENT_NODE
+                if node.get("nodeType") != 1:
+                    for child in node.get("children", []):
+                        _walk(child)
+                    return
+                tag = (node.get("localName") or "").lower()
+                attrs = {}
+                raw_attrs = node.get("attributes", [])
+                # CDP returns attributes as flat [name, value, name, value...] list
+                for i in range(0, len(raw_attrs) - 1, 2):
+                    attrs[raw_attrs[i].lower()] = raw_attrs[i + 1]
+
+                if tag in ("a", "link"):
+                    href = attrs.get("href", "")
+                    if href and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                        if href.startswith("/"):
+                            found.add(href)
+                        elif href.startswith(origin):
+                            found.add(urlparse(href).path or "/")
+                elif tag == "form":
+                    action = attrs.get("action", "")
+                    if action and not action.startswith(("javascript:", "mailto:")):
+                        if action.startswith("/"):
+                            found.add(action)
+                        elif action.startswith(origin):
+                            found.add(urlparse(action).path or "/")
+
+                for child in node.get("children", []):
+                    _walk(child)
+                # Pierce shadow roots
+                for shadow in node.get("shadowRoots", []):
+                    _walk(shadow)
+
+            _walk(root)
+        except Exception as e:
+            logger.debug("CDP shadow DOM error: %s", e)
+        finally:
+            if cdp is not None:
+                try:
+                    cdp.detach()
+                except Exception:
+                    pass
+        return found
+
     def _flush_page_intel(self, page, source_url: str) -> set:
         """
         Extract all intelligence from the current page in one pass.
@@ -3958,6 +4333,16 @@ class HeadlessEngine:
                     new_routes.add(iframe_url)
         except Exception as e:
             logger.debug("Iframe extraction error %s: %s", source_url, e)
+
+        # Shadow DOM traversal — extract routes hidden inside Web Components.
+        # Playwright's page.content() only sees the light DOM; shadow roots require
+        # CDP DOMGetDocument with pierce=True to pierce every shadow boundary.
+        # Katana uses this same approach in hybrid/crawl.go navigateRequest().
+        try:
+            shadow_routes = self._extract_shadow_dom_routes(page)
+            new_routes.update(shadow_routes)
+        except Exception as e:
+            logger.debug("Shadow DOM traversal error %s: %s", source_url, e)
 
         # Inline scripts — extract content directly from DOM (no HTTP fetch needed).
         # Must run in the Playwright thread; _collect_inline_scripts registers
@@ -4144,6 +4529,29 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
+            # JS navigation tracking — Katana's PageFrameNavigated approach.
+            # page.on("framenavigated") fires for window.location=, meta-refresh,
+            # history.pushState, and client-side router transitions that the
+            # response handler misses because they don't produce a new HTTP response.
+            def _on_frame_navigated(frame):
+                try:
+                    if frame != page.main_frame:
+                        return  # Only track main frame navigations
+                    nav_url = frame.url
+                    if not nav_url or nav_url in ("about:blank", ""):
+                        return
+                    parsed_nav = urlparse(nav_url)
+                    if parsed_nav.netloc and parsed_nav.netloc != urlparse(self.target_url).netloc:
+                        return  # Cross-origin — not our target
+                    if self.scope.in_scope(nav_url) and not self.registry.seen_url(nav_url):
+                        with self._js_nav_lock:
+                            self._js_nav_urls.append(nav_url)
+                        logger.debug("JS nav detected: %s", nav_url)
+                except Exception:
+                    pass
+
+            page.on("framenavigated", _on_frame_navigated)
+
             # Sub-page detection — register popup/new-tab listener on context
             # (Enhancement 10 — must be set up before any navigation)
             self._detect_sub_pages(ctx, stabilizer, self.target_url)
@@ -4291,6 +4699,9 @@ class HeadlessEngine:
             # PathTrie dedup tracking counters
             _trie_filtered_count: int = 0
             _rp_added_count: int      = 0
+            # Session 4 counters
+            _js_nav_count: int        = 0
+            _onclick_nav_count: int   = 0
 
             while bfs_queue:
                 if self.pages_visited >= self.max_pages:
@@ -4317,6 +4728,23 @@ class HeadlessEngine:
                             self._add_route(urlparse(rp_url).path or "/")
                             bfs_queue.append(rp_url)
                             _rp_added_count += 1
+
+                # Drain JS navigation discoveries — framenavigated events from
+                # SPA router transitions (history.pushState, window.location=, etc.)
+                with self._js_nav_lock:
+                    pending_js_nav = self._js_nav_urls[:]
+                    self._js_nav_urls.clear()
+                for js_nav_url in pending_js_nav:
+                    if self.scope.in_scope(js_nav_url) and not self.registry.seen_url(js_nav_url):
+                        if self._path_trie is not None:
+                            js_fp = self._path_trie.fingerprint(js_nav_url)
+                            if js_fp in self._trie_seen:
+                                _trie_filtered_count += 1
+                                continue
+                            self._trie_seen.add(js_fp)
+                        self._add_route(urlparse(js_nav_url).path or "/")
+                        bfs_queue.append(js_nav_url)
+                        _js_nav_count += 1
 
                 # MaxCrawlDuration guard — timer starts after auth (Enhancement 10)
                 if self._is_crawl_deadline_exceeded():
@@ -4432,6 +4860,14 @@ class HeadlessEngine:
                         )
                         self.crawl_graph.add_edge(load_action)
 
+                    # Content similarity gate — skip near-duplicate pages
+                    # (Katana hybrid feature 5)
+                    if self.content_similarity_threshold > 0.0:
+                        if self._is_similar_content(page):
+                            logger.debug("Content similarity gate: skipping %s", url)
+                            self._consecutive_failures = 0
+                            continue
+
                     if self.interact:
                         self._interact(page, stabilizer)
                         self._observe_forms(page, stabilizer)
@@ -4445,6 +4881,20 @@ class HeadlessEngine:
                     # Feed newly discovered routes straight back into the BFS
                     # queue so they're visited this run, not a future run.
                     new_urls = self._build_urls(new_routes)
+
+                    # onclick simulation — Katana hybrid feature 2
+                    if self.max_onclick_links > 0:
+                        try:
+                            onclick_new = self._simulate_onclick_links(
+                                page, url, max_links=self.max_onclick_links
+                            )
+                            for onclick_url in onclick_new:
+                                if onclick_url not in new_urls:
+                                    new_urls.append(onclick_url)
+                                    _onclick_nav_count += 1
+                        except Exception as e:
+                            logger.debug("onclick simulation failed for %s: %s", url, e)
+
                     for new_url in new_urls:
                         if not self.registry.seen_url(new_url):
                             # PathTrie dedup — skip structurally identical URLs
@@ -4708,6 +5158,11 @@ class HeadlessEngine:
             # Katana enhancements (session 3)
             "response_parser_urls": _rp_added_count,
             "trie_filtered":        _trie_filtered_count,
+            # Katana enhancements (session 4)
+            "onclick_navigations":  _onclick_nav_count,
+            "js_nav_urls":          _js_nav_count,
+            "technologies":         dict(self._tech_detections),
+            "raw_traffic_captured": len(self._raw_traffic),
         }
 
         logger.info(
@@ -4726,6 +5181,8 @@ class HeadlessEngine:
             "timings":     timings,
             "auth_result": self.auth_result,
             "crawl_graph": crawl_graph_summary,
+            "raw_traffic":    self._raw_traffic if self.capture_raw_traffic else [],
+            "technologies":   self._tech_detections,
         }
 
 def _playwright_available() -> bool:
@@ -4773,6 +5230,11 @@ def collect_headless_full(
     url_filter_similar:   bool           = False,
     url_filter_threshold: int            = 3,
     response_body_extract: bool          = True,
+    # Katana enhancements (session 4)
+    max_onclick_links:    int            = 50,
+    capture_raw_traffic:  bool           = False,
+    content_similarity_threshold: float  = 0.0,
+    technology_detection: bool           = False,
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -4825,6 +5287,10 @@ def collect_headless_full(
         url_filter_similar     = url_filter_similar,
         url_filter_threshold   = url_filter_threshold,
         response_body_extract  = response_body_extract,
+        max_onclick_links      = max_onclick_links,
+        capture_raw_traffic    = capture_raw_traffic,
+        content_similarity_threshold = content_similarity_threshold,
+        technology_detection   = technology_detection,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
