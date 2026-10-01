@@ -2498,14 +2498,17 @@ class HeadlessEngine:
     def _add_route(self, route: str) -> bool:
         """Thread-safe route registration. Returns True if new.
 
-        Registers both the route path (for stats/coverage) and, for routes
-        that carry a query string, the full relative URL so the URL registry
-        dedup treats /projects?category=laravel as distinct from /projects.
+        For routes with a query string, also registers the bare path so coverage
+        stats count the path once — but only when the bare path differs from the
+        full route, otherwise the two register_route() calls see the same string
+        and the second always returns False, preventing anything from being added.
         """
-        # For stats/coverage: register bare path (strip query)
         path_only = route.split("?")[0]
-        self.registry.register_route(path_only)
-        # For per-variation dedup: register the full route (with query if any)
+        # Register bare path for coverage stats ONLY when route has a query string.
+        # If path_only == route (no query), skip this call — we do it below.
+        if path_only != route:
+            self.registry.register_route(path_only)
+        # Register the full route (or bare path when no query) for dedup.
         if self.registry.register_route(route):
             with self._lock:
                 self.routes.add(route)
