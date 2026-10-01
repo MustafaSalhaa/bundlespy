@@ -2181,12 +2181,19 @@ class BrowserPool:
         ctx.on("response", lambda r: resp_queue.put(
             (r, r.frame.url if r.frame else r.url)
         ))
-        ctx.route(
-            "**/*",
-            lambda route: route.abort()
-            if self._block_fn(route.request.url, route.request.resource_type)
-            else route.continue_()
-        )
+        def _route_handler_pool(route):
+            # route.abort()/continue_() go through Playwright's sync→async bridge
+            # which tries to switch greenlets across OS thread boundaries — fatal.
+            # Instead, schedule the coroutine directly on the already-running event
+            # loop (we ARE on the event loop thread inside this callback), bypassing
+            # the sync bridge entirely.
+            import asyncio as _asyncio
+            if self._block_fn(route.request.url, route.request.resource_type):
+                _asyncio.ensure_future(route._impl_obj.abort())
+            else:
+                _asyncio.ensure_future(route._impl_obj.continue_())
+
+        ctx.route("**/*", _route_handler_pool)
 
         page = ctx.new_page()
 
@@ -5006,12 +5013,19 @@ class HeadlessEngine:
 
             ctx.on("response", _on_response)
 
-            ctx.route(
-                "**/*",
-                lambda route: route.abort()
-                if self._should_block(route.request.url, route.request.resource_type)
-                else route.continue_()
-            )
+            def _route_handler_phase1(route):
+                # route.abort()/continue_() go through Playwright's sync→async bridge
+                # which tries to switch greenlets across OS thread boundaries — fatal.
+                # Instead, schedule the coroutine directly on the already-running event
+                # loop (we ARE on the event loop thread inside this callback), bypassing
+                # the sync bridge entirely.
+                import asyncio as _asyncio
+                if self._should_block(route.request.url, route.request.resource_type):
+                    _asyncio.ensure_future(route._impl_obj.abort())
+                else:
+                    _asyncio.ensure_future(route._impl_obj.continue_())
+
+            ctx.route("**/*", _route_handler_phase1)
 
             # ── Single persistent page — reused across all navigation ─────────
             page = ctx.new_page()
