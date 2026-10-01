@@ -1,553 +1,341 @@
 """
-Secret detection engine.
-Loads rules from rules/secrets.yaml, applies patterns against JS content,
-scores findings, and filters likely false positives.
+PII post-match validation and false-positive reduction.
+
+Called by SecretScanner after pattern matching to validate PII findings:
+  - Credit cards: Luhn algorithm
+  - IBANs: ISO 13616 mod-97 checksum
+  - SSNs: area/group/serial constraints
+  - Emails: MX/format sanity (no network calls; pure structural)
+  - Phone: digit-count range validation
+  - GPS: precision and range clipping
+
+These validators run AFTER the regex fires and can:
+  1. Upgrade confidence if the checksum passes
+  2. Mark as likely_false_positive if it fails
+
+None of these make network calls. All validation is local/structural.
 """
 
 import re
-import math
-import hashlib
 import logging
-import os
-import base64
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Set
-from pathlib import Path
+from typing import Tuple
 
-import yaml
-
-from ..storage.models import Finding
-
-logger = logging.getLogger("bundlespy.analysis.secrets")
-
-# Word/phrase indicators: any of these appearing ANYWHERE in the matched value
-# almost certainly means it is a placeholder.  Real secrets never contain
-# human-readable words like "example" or "changeme".
-FP_INDICATORS = [
-    "example", "placeholder", "your-key", "your_key", "insert_key",
-    "api_key_here", "changeme", "replace_me", "todo", "fixme", "dummy",
-    "fake", "test_key", "sample", "demo", "enter_your", "<your",
-    "your-api", "your_secret",
-]
-
-# Sequential / repetitive patterns that should be caught by entropy checks.
-# These are NOT used for substring matching against real keys — a Stripe key
-# like sk_live_...1234567890 should not be suppressed just because those
-# digits happen to appear somewhere in the key.
-# (Kept here as documentation; the entropy + unique-char checks in
-# _is_likely_fp() already reject values that ARE these patterns.)
+logger = logging.getLogger("bundlespy.analysis.pii")
 
 
-@dataclass
-class SecretRule:
-    id: str
-    name: str
-    category: str
-    pattern: re.Pattern
-    severity: str
-    confidence: float
-    description: str
-    remediation: str
-    fp_notes: str
-    min_length: int = 0
-    min_entropy: float = 0.0  # per-rule entropy floor; 0.0 = use global default
+# ---------------------------------------------------------------------------
+# Credit Card — Luhn Algorithm
+# ---------------------------------------------------------------------------
+
+def luhn_check(number: str) -> bool:
+    """
+    Run the Luhn algorithm on a digit string.
+    Returns True if the number is a valid Luhn sequence.
+    """
+    digits = re.sub(r"\D", "", number)
+    if len(digits) < 12 or len(digits) > 19:
+        return False
+    total = 0
+    reverse = digits[::-1]
+    for i, ch in enumerate(reverse):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
 
 
-def _shannon_entropy(value: str) -> float:
-    """Calculate Shannon entropy of a string. Higher = more random = more likely real."""
-    if not value:
-        return 0.0
-    freq = {}
-    for c in value:
-        freq[c] = freq.get(c, 0) + 1
-    length = len(value)
-    return -sum((f / length) * math.log2(f / length) for f in freq.values())
-
-
-def _is_likely_fp(value: str, min_entropy: float = 2.0) -> Tuple[bool, str]:
-    """Check if a matched value looks like a placeholder or example."""
-    lower = value.lower()
-    for indicator in FP_INDICATORS:
-        if indicator in lower:
-            return True, f"contains placeholder indicator '{indicator}'"
-
-    # Entropy check: caller can pass a higher threshold for generic rules
-    entropy = _shannon_entropy(value)
-    if len(value) > 8 and entropy < min_entropy:
-        return True, f"low entropy ({entropy:.2f}) suggests non-random value"
-
-    # Repeated character sequences
-    if len(set(value)) < 4 and len(value) > 8:
-        return True, "too few unique characters"
-
-    return False, ""
-
-
-def _get_context(content: str, pos: int, chars: int = 120) -> str:
-    """Extract surrounding context around a match position."""
-    start = max(0, pos - chars // 2)
-    end   = min(len(content), pos + chars // 2)
-    return content[start:end].replace("\n", " ").strip()
-
-
-# Known CDN / library hostnames — secrets found in these files are almost
-# certainly false positives from example keys embedded in documentation or
-# source comments shipped with the library itself.
-_LIBRARY_HOSTS = {
-    "cdn.jsdelivr.net",
-    "cdnjs.cloudflare.com",
-    "unpkg.com",
-    "cdn.skypack.dev",
-    "esm.sh",
-    "esm.run",
-    "cdn.bootcdn.net",
-    "ajax.googleapis.com",
-    "ajax.aspnetcdn.com",
-    "stackpath.bootstrapcdn.com",
-    "maxcdn.bootstrapcdn.com",
-    "code.jquery.com",
-    "cdn.plot.ly",
-    "d3js.org",
-    "cdn.datatables.net",
-    "cdn.auth0.com",
-    "cdn.segment.com",
-    "js.stripe.com",
-    "js.braintreegateway.com",
-    "static.hotjar.com",
-    "cdn.optimizely.com",
-    "assets.adobedtm.com",
+# Known test/example card numbers that should always be FP
+_CC_KNOWN_TEST = {
+    "4111111111111111",  # Visa test
+    "4242424242424242",  # Stripe Visa test
+    "5555555555554444",  # Mastercard test
+    "5105105105105100",  # Mastercard test
+    "378282246310005",   # Amex test
+    "371449635398431",   # Amex test
+    "6011111111111117",  # Discover test
+    "3530111333300000",  # JCB test
+    "3566002020360505",  # JCB test
 }
 
-# URL path fragments that strongly indicate a vendored / bundled library
-_LIBRARY_PATH_PATTERNS = [
-    "/vendor/",
-    "/vendors/",
-    "/vendors~",
-    "/node_modules/",
-    "/lib/",
-    "/static/js/chunk-",
-    "/static/js/vendors-",
-    ".min.js",
-    "-bundle.js",
-    "-bundle.min.js",
-    "/polyfill",
-    "/runtime.",
-    "/commons.",
-    "jquery",
-    "lodash",
-    "moment.js",
-    "bootstrap",
-    "react.development",
-    "react.production",
-]
 
-
-def _is_library_url(url: str) -> bool:
+def validate_credit_card(value: str) -> Tuple[bool, str]:
     """
-    Return True if *url* looks like a third-party CDN or vendored library
-    resource that should be excluded from secret scanning.
-
-    This is a fast heuristic — it checks the hostname against a known CDN
-    list and the path against common vendor / dist patterns.  False negatives
-    (returning False for a real library) are acceptable; false positives would
-    suppress genuine secrets in first-party code, so the bar for inclusion in
-    the CDN list is deliberately high (only universally-recognised CDNs).
+    Validate a credit card number match.
+    Returns (is_valid, reason).
     """
-    if not url:
-        return False
-
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        path = parsed.path or ""
-    except Exception:
-        return False
-
-    # Exact CDN hostname match
-    if host in _LIBRARY_HOSTS:
-        return True
-
-    # Subdomain of a known CDN (e.g. my-org.cdn.jsdelivr.net)
-    for cdn in _LIBRARY_HOSTS:
-        if host.endswith("." + cdn):
-            return True
-
-    # Path-based heuristics (applies to any host, including self-hosted)
-    path_lower = path.lower()
-    for pattern in _LIBRARY_PATH_PATTERNS:
-        if pattern in path_lower:
-            return True
-
-    return False
+    digits = re.sub(r"\D", "", value)
+    if digits in _CC_KNOWN_TEST:
+        return False, "known test card number"
+    if not luhn_check(digits):
+        return False, "fails Luhn check"
+    # Reject obvious sequential or repeated numbers
+    if len(set(digits)) <= 2:
+        return False, "too few unique digits (likely placeholder)"
+    return True, "Luhn valid"
 
 
-def _get_line_number(content: str, pos: int) -> int:
-    return content[:pos].count("\n") + 1
+# ---------------------------------------------------------------------------
+# IBAN — ISO 13616 mod-97 checksum
+# ---------------------------------------------------------------------------
+
+# Country code -> expected IBAN length
+_IBAN_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28,
+    "BA": 20, "BE": 16, "BG": 22, "BH": 22, "BR": 29,
+    "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24,
+    "DE": 22, "DJ": 27, "DK": 18, "DO": 28, "DZ": 24,
+    "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FK": 18,
+    "FO": 18, "FR": 27, "GB": 22, "GE": 22, "GI": 23,
+    "GL": 18, "GR": 27, "GT": 28, "HR": 21, "HU": 28,
+    "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27,
+    "JO": 30, "KW": 30, "KZ": 20, "LB": 28, "LC": 32,
+    "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25,
+    "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20,
+    "MR": 27, "MT": 31, "MU": 30, "MZ": 25, "NI": 32,
+    "NL": 18, "NO": 15, "OM": 23, "PK": 24, "PL": 28,
+    "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22,
+    "RU": 33, "SA": 24, "SC": 31, "SD": 18, "SE": 24,
+    "SI": 19, "SK": 24, "SM": 27, "SN": 28, "SO": 23,
+    "ST": 25, "SV": 28, "TL": 23, "TN": 24, "TR": 26,
+    "UA": 29, "VA": 22, "VG": 24, "XK": 20,
+}
 
 
-# Regex for stripping single-line JS comments before scanning.
-# We only strip // comments - block comments are left because they sometimes
-# contain real secrets embedded in code that's been temporarily commented out.
-_RE_LINE_COMMENT = re.compile(r'(?m)(?:^|\s)//[^\n]*')
-
-
-def _strip_line_comments(content: str) -> Tuple[str, List[int]]:
+def validate_iban(value: str) -> Tuple[bool, str]:
     """
-    Strip single-line JS/TS comments and return cleaned content plus a
-    position mapping so line numbers can be recovered.
-    Returns (stripped_content, list_of_original_newline_positions).
+    Validate an IBAN using ISO 13616 mod-97 algorithm.
+    Returns (is_valid, reason).
     """
-    # Instead of truly removing chars (which shifts all positions), replace
-    # comment text with spaces to preserve offsets exactly.
-    result = list(content)
-    for m in _RE_LINE_COMMENT.finditer(content):
-        start = m.start()
-        # Preserve the leading whitespace/newline char before //
-        slash_pos = content.index("//", start)
-        for i in range(slash_pos, m.end()):
-            result[i] = " "
-    return "".join(result)
+    iban = re.sub(r"[\s\-]", "", value).upper()
+    country = iban[:2]
 
+    # Check country code is known
+    if country not in _IBAN_LENGTHS:
+        return False, f"unknown IBAN country code '{country}'"
 
-# Known secret prefixes that indicate a partial match (prefix without the rest).
-# If we see these concatenated with a variable (e.g. "sk_live_" + someVar)
-# we flag it as a partial secret indicator.
-_PARTIAL_SECRET_PREFIXES = [
-    ("sk_live_",     "STRIPE_SECRET_KEY",   "Stripe live secret key prefix"),
-    ("sk_test_",     "STRIPE_TEST_SECRET",  "Stripe test secret key prefix"),
-    ("pk_live_",     "STRIPE_PUB_KEY",      "Stripe live publishable key prefix"),
-    ("AKIA",         "AWS_ACCESS_KEY",      "AWS access key prefix"),
-    ("AIza",         "FIREBASE_API_KEY",    "Firebase API key prefix"),
-    ("gsk_",         "GROQ_API_KEY",        "Groq API key prefix"),
-    ("lin_api_",     "LINEAR_API_KEY",      "Linear API key prefix"),
-    ("dp.st.",       "DOPPLER_TOKEN",       "Doppler service token prefix"),
-    ("vercel_blob_rw_", "VERCEL_BLOB_TOKEN","Vercel Blob token prefix"),
-    ("ghp_",         "GITHUB_TOKEN",        "GitHub personal access token prefix"),
-    ("gho_",         "GITHUB_TOKEN",        "GitHub OAuth token prefix"),
-    ("ghr_",         "GITHUB_TOKEN",        "GitHub refresh token prefix"),
-    ("github_pat_",  "GITHUB_FINE_GRAINED", "GitHub fine-grained PAT prefix"),
-    ("re_",          "RESEND_API_KEY",      "Resend API key prefix"),
-    ("pk.eyJ1",      "MAPBOX_ACCESS_TOKEN", "Mapbox public token prefix"),
-    ("sk.eyJ1",      "MAPBOX_SECRET_TOKEN", "Mapbox secret token prefix"),
-]
+    # Check length
+    expected = _IBAN_LENGTHS[country]
+    if len(iban) != expected:
+        return False, f"wrong length for {country} IBAN: expected {expected}, got {len(iban)}"
 
-# Pattern: prefix followed by concatenation with a variable (not a string literal)
-_RE_CONCAT = re.compile(
-    r'["\x27`]({prefix})["\x27`]\s*\+\s*(?:[A-Za-z_$][A-Za-z0-9_$]*|`\$\{{)'
-)
+    # Rearrange: move first 4 chars to end
+    rearranged = iban[4:] + iban[:4]
 
-
-def _find_partial_secrets(content: str, file_url: str, source_page: str) -> List[Finding]:
-    """
-    Detect secrets split across string concatenation or template literals.
-    Example: const key = "sk_live_" + apiSecretVar;
-    Flags these as INFO-level partial secret indicators.
-    """
-    findings: List[Finding] = []
-    seen: Set[str] = set()
-
-    for prefix, rule_id, description in _PARTIAL_SECRET_PREFIXES:
-        pattern = re.compile(
-            r'["\x27`](' + re.escape(prefix) + r')["\x27`]\s*\+\s*'
-            r'(?:[A-Za-z_$][A-Za-z0-9_$]*|\$\{[^}]+\})'
-        )
-        for m in pattern.finditer(content):
-            dedup_key = f"PARTIAL:{rule_id}:{m.group(1)}"
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-
-            line_no = _get_line_number(content, m.start())
-            context = _get_context(content, m.start())
-            finding_id = Finding.make_id(f"PARTIAL_{rule_id}", prefix, file_url)
-
-            findings.append(Finding(
-                id                   = finding_id,
-                rule_id              = f"PARTIAL_{rule_id}",
-                title                = f"Partial Secret: {description}",
-                category             = "Partial",
-                severity             = "INFO",
-                confidence           = 0.60,
-                file_url             = file_url,
-                source_page          = source_page,
-                line_number          = line_no,
-                column               = m.start() - content.rfind("\n", 0, m.start()),
-                matched_value        = prefix,
-                redacted_value       = prefix,
-                sha256               = hashlib.sha256(f"PARTIAL_{rule_id}:{prefix}:{file_url}".encode()).hexdigest(),
-                context              = context,
-                description          = f"Secret prefix '{prefix}' found concatenated with a variable - full secret assembled at runtime.",
-                impact               = "",
-                remediation          = "Trace the variable to find the full secret. Runtime-assembled secrets are still secrets.",
-                false_positive_notes = "Prefix concatenation is deliberate obfuscation in some cases.",
-                confidence_label     = "candidate",
-                occurrences          = [f"{file_url}:{line_no}"],
-            ))
-
-    return findings
-
-
-_SEVERITY_ORDER = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
-
-
-def _severity_score(finding: Finding) -> float:
-    """
-    Composite score combining severity, confidence, and validation status.
-    Higher = more urgent to review.
-    Used for sorting findings by priority.
-    """
-    sev  = _SEVERITY_ORDER.get(finding.severity, 1)
-    conf = finding.confidence
-    # Boost confirmed_live findings, penalize likely_false_positive
-    label_boost = {
-        "likely_secret":         1.2,
-        "candidate":             1.0,
-        "likely_false_positive": 0.3,
-    }.get(finding.confidence_label, 1.0)
-    return sev * conf * label_boost
-
-
-def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
-    """Load detection rules from YAML file."""
-    if rules_path is None:
-        # Find the rules file — prefer the largest one (most rules)
-        _base = Path(__file__).parent
-        candidates = [
-            _base / "rules" / "secrets.yaml",
-            _base.parent / "rules" / "secrets.yaml",
-            _base.parent.parent / "rules" / "secrets.yaml",
-            _base.parent.parent.parent / "rules" / "secrets.yaml",
-        ]
-        existing = [p for p in candidates if p.exists()]
-        if existing:
-            # Pick the file with most content (most rules)
-            rules_path = max(existing, key=lambda p: p.stat().st_size)
+    # Replace letters with digits (A=10, B=11, ..., Z=35)
+    numeric = ""
+    for ch in rearranged:
+        if ch.isalpha():
+            numeric += str(ord(ch) - 55)
         else:
-            rules_path = candidates[0]
+            numeric += ch
 
+    # Mod-97 check
     try:
-        with open(rules_path) as f:
-            data = yaml.safe_load(f)
-    except FileNotFoundError:
-        logger.error("Rules file not found: %s", rules_path)
-        return []
-    except yaml.YAMLError as e:
-        logger.error("Failed to parse rules file: %s", e)
-        return []
+        remainder = int(numeric) % 97
+    except ValueError:
+        return False, "non-numeric characters in IBAN body"
 
-    rules = []
-    for raw in data.get("rules", []):
-        try:
-            compiled = re.compile(raw["pattern"])
-            rules.append(SecretRule(
-                id          = raw["id"],
-                name        = raw["name"],
-                category    = raw["category"],
-                pattern     = compiled,
-                severity    = raw["severity"],
-                confidence  = float(raw["confidence"]),
-                description = raw["description"],
-                remediation = raw["remediation"],
-                fp_notes    = raw.get("fp_notes", ""),
-                min_length  = int(raw.get("min_length", 0)),
-                min_entropy = float(raw.get("min_entropy", 0.0)),
-            ))
-        except re.error as e:
-            logger.warning("Invalid regex in rule %s: %s", raw.get("id"), e)
+    if remainder != 1:
+        return False, f"mod-97 check failed (remainder={remainder})"
 
-    logger.info("Loaded %d secret detection rules", len(rules))
-    return rules
+    return True, "IBAN checksum valid"
 
 
-# Pattern to detect process.env.SECRET_NAME references
-_RE_ENV_NAME = re.compile(
-    r'process\.env\.([A-Z][A-Z0-9_]{2,})',
+# ---------------------------------------------------------------------------
+# SSN — US Social Security Number constraints
+# ---------------------------------------------------------------------------
+
+# Area numbers that are never valid
+_SSN_INVALID_AREAS = {
+    "000", "666",
+    # 900-999 are reserved
+}
+
+
+def validate_ssn(value: str) -> Tuple[bool, str]:
+    """
+    Validate a US SSN beyond just the format.
+    Returns (is_valid, reason).
+    """
+    digits = re.sub(r"\D", "", value)
+    if len(digits) != 9:
+        return False, "wrong digit count"
+
+    area   = digits[:3]
+    group  = digits[3:5]
+    serial = digits[5:]
+
+    if area in _SSN_INVALID_AREAS:
+        return False, f"invalid SSN area '{area}'"
+    if int(area) >= 900:
+        return False, "SSN area 900-999 is reserved (ITINs, not SSNs)"
+    if group == "00":
+        return False, "group number 00 is invalid"
+    if serial == "0000":
+        return False, "serial number 0000 is invalid"
+    # Repeated-digit check (e.g. 123-45-6789 is a known fake)
+    if len(set(digits)) <= 3:
+        return False, "too few unique digits (likely placeholder)"
+
+    return True, "SSN passes constraint checks"
+
+
+# ---------------------------------------------------------------------------
+# Email — structural sanity (no network)
+# ---------------------------------------------------------------------------
+
+# TLDs that are almost always test/example domains
+_EXAMPLE_TLDS_AND_DOMAINS = re.compile(
+    r"@(?:"
+    # Exact placeholder domains (any TLD)
+    r"example\.[a-z]{2,}|test\.[a-z]{2,}|sample\.[a-z]{2,}|"
+    r"fake\.[a-z]{2,}|dummy\.[a-z]{2,}|placeholder\.[a-z]{2,}|"
+    r"yourcompany\.[a-z]{2,}|yourdomain\.[a-z]{2,}|changeme\.[a-z]{2,}|"
+    r"foo\.com|bar\.com|baz\.com|qux\.com|"
+    # Disposable / throw-away email services (any subdomain)
+    r"(?:[a-z0-9\-]+\.)?mailinator\.com|"
+    r"(?:[a-z0-9\-]+\.)?guerrillamail\.[a-z]{2,}|"
+    r"(?:[a-z0-9\-]+\.)?trashmail\.[a-z]{2,}|"
+    r"(?:[a-z0-9\-]+\.)?yopmail\.com|"
+    r"(?:[a-z0-9\-]+\.)?sharklasers\.com|"
+    r"(?:[a-z0-9\-]+\.)?throwam\.com|"
+    r"(?:[a-z0-9\-]+\.)?guerrillamailblock\.com|"
+    r"(?:[a-z0-9\-]+\.)?mailtest\.[a-z]{2,}|"
+    # Single-label (localhost, invalid, etc.)
+    r"localhost|invalid"
+    r")$",
+    re.IGNORECASE,
 )
 
-# ENV_NAME finding rule_id constant
-_ENV_NAME_RULE_ID = "ENV_NAME"
 
-
-def _decode_b64_chunks(content: str) -> List[Tuple[str, int]]:
+def validate_email(value: str) -> Tuple[bool, str]:
     """
-    Extract and decode base64 chunks from JS content.
-    Returns list of (decoded_text, original_position) tuples.
-    Only attempts chunks that are likely encoded secrets (length >= 32, valid b64).
+    Structural email validation — no network calls.
+    Returns (is_valid, reason).
     """
-    results = []
-    # Match quoted base64-looking strings of sufficient length
-    b64_pattern = re.compile(r'["\x27`]([A-Za-z0-9+/]{32,}={0,2})["\x27`]')
-    for m in b64_pattern.finditer(content):
-        raw = m.group(1)
-        # Must be valid base64 length
-        if len(raw) % 4 not in (0, 2, 3):
-            continue
-        try:
-            decoded = base64.b64decode(raw + "==").decode("utf-8", errors="strict")
-            if decoded and len(decoded) >= 20:
-                results.append((decoded, m.start()))
-        except Exception:
-            pass
-    return results
+    if _EXAMPLE_TLDS_AND_DOMAINS.search(value):
+        return False, "placeholder/example email domain"
+
+    # Basic RFC 5321 structure
+    if "@" not in value:
+        return False, "not an email address"
+
+    local, _, domain = value.rpartition("@")
+
+    if not local or len(local) > 64:
+        return False, "invalid local part"
+    if not domain or len(domain) > 253:
+        return False, "invalid domain"
+    if "." not in domain:
+        return False, "domain has no TLD"
+
+    tld = domain.rsplit(".", 1)[-1]
+    if len(tld) < 2:
+        return False, "TLD too short"
+
+    return True, "email passes structural checks"
 
 
-class SecretScanner:
-    def __init__(self, rules_path: Optional[str] = None):
-        self.rules = load_rules(rules_path)
+# ---------------------------------------------------------------------------
+# Phone — digit range sanity
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def severity_score(finding: Finding) -> float:
-        """Composite priority score for a finding. Higher = review first."""
-        return _severity_score(finding)
+def validate_phone(value: str) -> Tuple[bool, str]:
+    """
+    Sanity-check extracted phone number.
+    Returns (is_valid, reason).
+    """
+    digits = re.sub(r"\D", "", value)
+    # E.164 allows 7-15 digits (excluding the + prefix digit count)
+    if len(digits) < 7 or len(digits) > 15:
+        return False, f"digit count {len(digits)} outside valid range 7-15"
+    # All same digit (0000000, 1111111, etc.)
+    if len(set(digits)) == 1:
+        return False, "all same digit (placeholder)"
+    # Sequential run (1234567890)
+    sequential = "".join(str(i) for i in range(10))
+    if digits[:7] in sequential or digits in sequential:
+        return False, "sequential digits (placeholder)"
+    return True, "phone passes sanity checks"
 
-    def _scan_content(
-        self,
-        content: str,
-        file_url: str,
-        source_page: str,
-        findings: List[Finding],
-        seen: Dict[str, Finding],
-        pos_offset: int = 0,
-    ) -> None:
-        """Inner scan loop: run all rules against content."""
-        for rule in self.rules:
-            for match in rule.pattern.finditer(content):
-                raw_value = match.group(0)
-                # If there's a capture group, prefer it (more specific)
-                if match.lastindex and match.lastindex >= 1:
-                    try:
-                        cap = match.group(1)
-                        if cap:
-                            raw_value = cap
-                    except IndexError:
-                        pass
 
-                # Apply min_length filter
-                if rule.min_length and len(raw_value) < rule.min_length:
-                    continue
+# ---------------------------------------------------------------------------
+# GPS Coordinates — range and precision check
+# ---------------------------------------------------------------------------
 
-                # Check for false positives - use per-rule entropy floor when set
-                _entropy_floor = rule.min_entropy if rule.min_entropy > 0.0 else 2.0
-                is_fp, fp_reason = _is_likely_fp(raw_value, min_entropy=_entropy_floor)
+def validate_gps(lat_str: str, lon_str: str) -> Tuple[bool, str]:
+    """
+    Validate GPS coordinates — check range and reject low-precision values.
+    Returns (is_valid, reason).
+    """
+    try:
+        lat = float(lat_str)
+        lon = float(lon_str)
+    except (ValueError, TypeError):
+        return False, "non-numeric coordinate"
 
-                confidence = rule.confidence
-                status     = "candidate"
+    if not (-90 <= lat <= 90):
+        return False, f"latitude {lat} out of range [-90, 90]"
+    if not (-180 <= lon <= 180):
+        return False, f"longitude {lon} out of range [-180, 180]"
 
-                if is_fp:
-                    confidence = min(confidence * 0.3, 0.3)
-                    status     = "likely_false_positive"
-                elif confidence >= 0.85:
-                    status = "likely_secret"
+    # Require at least 4 decimal places (city-level precision or better)
+    lat_decimals = len(lat_str.split(".")[-1]) if "." in lat_str else 0
+    lon_decimals = len(lon_str.split(".")[-1]) if "." in lon_str else 0
+    if lat_decimals < 4 or lon_decimals < 4:
+        return False, "fewer than 4 decimal places (city-level, not personal location)"
 
-                redacted = Finding.redact(raw_value)
-                sha256   = hashlib.sha256(f"{rule.id}:{raw_value}".encode()).hexdigest()
-                actual_pos = match.start() + pos_offset
-                context  = _get_context(content, match.start())
-                line_no  = _get_line_number(content, match.start())
+    # Well-known null island / zeros
+    if lat == 0.0 and lon == 0.0:
+        return False, "null island (0,0) is a placeholder"
 
-                finding_id = Finding.make_id(rule.id, raw_value, file_url)
+    return True, "GPS coordinates within valid range with sufficient precision"
 
-                # Deduplication: same rule + value across files
-                if sha256 in seen:
-                    seen[sha256].occurrences.append(f"{file_url}:{line_no}")
-                    continue
 
-                finding = Finding(
-                    id                   = finding_id,
-                    rule_id              = rule.id,
-                    title                = rule.name,
-                    category             = rule.category,
-                    severity             = rule.severity,
-                    confidence           = round(confidence, 2),
-                    file_url             = file_url,
-                    source_page          = source_page,
-                    line_number          = line_no,
-                    column               = match.start() - content.rfind("\n", 0, match.start()),
-                    matched_value        = raw_value,
-                    redacted_value       = redacted,
-                    sha256               = sha256,
-                    context              = context,
-                    description          = rule.description,
-                    impact               = "",
-                    remediation          = rule.remediation,
-                    false_positive_notes = fp_reason or rule.fp_notes,
-                    confidence_label     = status,
-                    occurrences          = [f"{file_url}:{line_no}"],
-                )
+# ---------------------------------------------------------------------------
+# Dispatch table — called from SecretScanner after a rule match
+# ---------------------------------------------------------------------------
 
-                seen[sha256] = finding
-                findings.append(finding)
+_PII_VALIDATORS = {
+    "PII_CREDIT_CARD":        lambda v, _:  validate_credit_card(v),
+    "PII_IBAN":               lambda v, _:  validate_iban(v),
+    "PII_SSN_US":             lambda v, _:  validate_ssn(v),
+    "PII_EMAIL_HARDCODED":    lambda v, _:  validate_email(v),
+    "PII_EMAIL_IN_URL":       lambda v, _:  validate_email(v.replace("%40", "@")),
+    "PII_PHONE_INTL":         lambda v, _:  validate_phone(v),
+    "PII_PHONE_US":           lambda v, _:  validate_phone(v),
+}
 
-    def scan(self, content: str, file_url: str, source_page: str = "") -> List[Finding]:
-        """
-        Scan JavaScript content for secrets.
-        Returns a list of Finding objects, deduplicated by value+rule,
-        sorted by severity score (most critical first).
-        """
-        findings: List[Finding] = []
-        seen: Dict[str, Finding] = {}  # sha256 -> Finding
 
-        # Strip single-line comments before scanning to avoid flagging
-        # secrets that were commented out (reduces noise, not blind spots -
-        # commented-out secrets are still findings but get lower confidence).
-        # We keep original content for line number accuracy since stripping
-        # replaces comment text with spaces rather than removing it.
-        stripped = _strip_line_comments(content)
+def validate_pii_finding(rule_id: str, matched_value: str, context: str = "") -> Tuple[float, str]:
+    """
+    Post-match validation for PII findings.
 
-        # Primary scan on comment-stripped content
-        self._scan_content(stripped, file_url, source_page, findings, seen)
+    Returns (confidence_multiplier, new_status):
+      - (1.2, "likely_secret")  → checksum/structure passes, boost confidence
+      - (1.0, "candidate")      → no validator, keep as-is
+      - (0.1, "likely_false_positive") → validation failed
 
-        # Lower confidence on findings that only matched inside a comment
-        # (match is in stripped spaces, meaning the original had a comment there)
-        # This is implicitly handled - stripping replaces with spaces so patterns
-        # requiring non-space chars won't match in stripped comment regions.
+    The caller multiplies the rule's base confidence by the returned multiplier
+    and sets the confidence_label to the returned status.
+    """
+    validator = _PII_VALIDATORS.get(rule_id)
+    if validator is None:
+        # No specific validator — keep default scoring
+        return 1.0, "candidate"
 
-        # Base64 decode layer: try to decode embedded b64 blobs and re-scan
-        for decoded_text, orig_pos in _decode_b64_chunks(content):
-            self._scan_content(decoded_text, file_url, source_page, findings, seen, pos_offset=orig_pos)
+    try:
+        is_valid, reason = validator(matched_value, context)
+    except Exception as exc:
+        logger.debug("PII validator error for %s: %s", rule_id, exc)
+        return 1.0, "candidate"
 
-        # Partial secret detection: "sk_live_" + someVar patterns
-        for partial_finding in _find_partial_secrets(content, file_url, source_page):
-            sha = partial_finding.sha256
-            if sha not in seen:
-                seen[sha] = partial_finding
-                findings.append(partial_finding)
-
-        # ENV_NAME detection: flag process.env.SECRET_NAME references
-        for match in _RE_ENV_NAME.finditer(content):
-            env_name = match.group(1)
-            sha256 = hashlib.sha256(f"{_ENV_NAME_RULE_ID}:{env_name}".encode()).hexdigest()
-            if sha256 in seen:
-                continue
-            line_no = _get_line_number(content, match.start())
-            context = _get_context(content, match.start())
-            finding_id = Finding.make_id(_ENV_NAME_RULE_ID, env_name, file_url)
-            finding = Finding(
-                id                   = finding_id,
-                rule_id              = _ENV_NAME_RULE_ID,
-                title                = "Environment Variable Reference",
-                category             = "ENV",
-                severity             = "INFO",
-                confidence           = 0.7,
-                file_url             = file_url,
-                source_page          = source_page,
-                line_number          = line_no,
-                column               = match.start() - content.rfind("\n", 0, match.start()),
-                matched_value        = env_name,
-                redacted_value       = env_name,
-                sha256               = sha256,
-                context              = context,
-                description          = f"Secret loaded from environment variable: {env_name}",
-                impact               = "",
-                remediation          = "Verify this environment variable is not accidentally exposed at runtime.",
-                false_positive_notes = "process.env references are common and often intentional.",
-                confidence_label     = "candidate",
-                occurrences          = [f"{file_url}:{line_no}"],
-            )
-            seen[sha256] = finding
-            findings.append(finding)
-
-        # Sort by severity score: CRITICAL confirmed_live first, INFO FP last
-        findings.sort(key=_severity_score, reverse=True)
-        return findings
+    if is_valid:
+        logger.debug("PII %s validated OK: %s", rule_id, reason)
+        return 1.15, "likely_secret"
+    else:
+        logger.debug("PII %s rejected: %s", rule_id, reason)
+        return 0.1, "likely_false_positive"
