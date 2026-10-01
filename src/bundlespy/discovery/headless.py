@@ -2087,216 +2087,169 @@ def _is_login_page(page) -> bool:
 
 class BrowserPool:
     """
-    Pool of N independent Playwright browser instances.
-    Each slot has its own browser + context + page so parallel workers
-    never share a page object. Slots are created lazily on first acquire.
+    Concurrency limiter + browser configuration store for Phase 2 parallel BFS.
 
-    Usage:
-        pool = BrowserPool(num_browsers=5, pw=pw, **ctx_kwargs)
-        slot = pool.acquire()
+    Playwright sync_api binds every object (browser, context, page) to the
+    greenlet of the thread that created it.  Sharing a pre-created browser
+    across threads causes "greenlet.error: Cannot switch to a different thread".
+
+    The fix: each ThreadPoolExecutor worker thread owns its entire Playwright
+    lifecycle — it calls _make_browser_for_thread() to create a fresh
+    sync_playwright() context + browser + context + page, uses it for one URL
+    visit, then tears it all down via _close_browser_for_thread().  No browser
+    objects cross thread boundaries.
+
+    BrowserPool only provides:
+      - a Semaphore to cap concurrency at num_browsers parallel visits
+      - stored config (browser args, ctx kwargs, cookies, init script, callbacks)
+        so workers don't need to pass a long argument list themselves
+      - acquire() / release() that gate on the semaphore only (no slot dict)
+      - close_all() which is now a no-op (workers clean up themselves)
+
+    Usage (inside each worker thread):
+        _browser_pool.acquire()          # blocks if num_browsers slots busy
         try:
-            slot["page"].goto(url)
+            slot = _browser_pool.make_thread_browser()
+            try:
+                slot["page"].goto(url)
+                ...
+            finally:
+                _browser_pool.close_thread_browser(slot)
         finally:
-            pool.release(slot)
-        pool.close_all()
+            _browser_pool.release()
     """
 
-    def __init__(self, num_browsers: int, pw, browser_args: list,
+    def __init__(self, num_browsers: int, browser_args: list,
                  ctx_kwargs: dict, cookies: list, init_script: str,
                  block_fn, response_fn,
                  cdp_request_fn=None, cdp_response_fn=None):
-        self._num         = max(1, num_browsers)
-        self._pw          = pw
+        self._num          = max(1, num_browsers)
         self._browser_args = browser_args
-        self._ctx_kwargs  = ctx_kwargs
-        self._cookies     = cookies
-        self._init_script = init_script
-        self._block_fn    = block_fn       # callable(url, resource_type) -> bool
-        self._response_fn = response_fn    # callable(response, source_page)
-        # Gap 2: Optional CDP-level interception callbacks.
-        # cdp_request_fn(url, method, headers, body_bytes) -> None
-        # cdp_response_fn(url, status, headers, body_bytes) -> None
+        self._ctx_kwargs   = ctx_kwargs
+        self._cookies      = cookies
+        self._init_script  = init_script
+        self._block_fn     = block_fn
+        self._response_fn  = response_fn
         self._cdp_request_fn  = cdp_request_fn
         self._cdp_response_fn = cdp_response_fn
+        # Semaphore caps the number of parallel browser visits.
+        self._sem = threading.Semaphore(self._num)
 
-        self._sem         = threading.Semaphore(self._num)
-        self._lock        = threading.Lock()
-        # Playwright sync_api is NOT thread-safe for concurrent browser launches.
-        # Multiple threads calling pw.chromium.launch() simultaneously deadlock
-        # against the internal asyncio event loop. Serialize all _make_slot calls
-        # with a dedicated lock so only one browser launches at a time.
-        self._launch_lock = threading.Lock()
-        self._slots: List[Optional[dict]] = [None] * self._num
-        self._free:  List[int]            = list(range(self._num))
+    def make_thread_browser(self) -> dict:
+        """
+        Create a complete Playwright stack owned by the calling thread.
 
-    def _make_slot(self, idx: int) -> dict:
-        with self._launch_lock:
-            browser = self._pw.chromium.launch(
-                headless=True,
-                args=self._browser_args,
-            )
-            ctx = browser.new_context(**self._ctx_kwargs)
-            if self._cookies:
+        Must be called from the worker thread that will use the returned page —
+        never from a different thread.  Returns a dict with keys:
+          pw, browser, ctx, page, cdp, resp_queue, resp_thread
+        Pass the whole dict to close_thread_browser() when done.
+        """
+        from playwright.sync_api import sync_playwright as _sync_playwright
+
+        pw      = _sync_playwright().start()
+        browser = pw.chromium.launch(headless=True, args=self._browser_args)
+        ctx     = browser.new_context(**self._ctx_kwargs)
+
+        if self._cookies:
+            try:
+                ctx.add_cookies(self._cookies)
+            except Exception:
+                pass
+        ctx.add_init_script(self._init_script)
+
+        # Queue-based response handler — the ctx.on("response") callback fires
+        # on Playwright's internal asyncio event loop thread.  Calling
+        # response.body() from that thread deadlocks (event loop is busy).
+        # We enqueue the lightweight (response_obj, source_url) tuple here and
+        # drain it from a daemon thread that can safely call body().
+        resp_queue: queue.Queue = queue.Queue()
+
+        def _response_worker():
+            while True:
+                item = resp_queue.get()
+                if item is None:
+                    break
+                r, src = item
                 try:
-                    ctx.add_cookies(self._cookies)
+                    self._response_fn(r, src)
                 except Exception:
                     pass
-            ctx.add_init_script(self._init_script)
 
-            # Queue-based response handler — avoids Playwright sync API reentrancy
-            # deadlock. The ctx.on("response") callback fires on Playwright's internal
-            # event loop thread; calling response.body() (inside _handle_response) from
-            # that same thread deadlocks because the loop is busy. We put only the
-            # lightweight (response_obj, source_url) tuple onto a queue here — reading
-            # r.frame.url is safe because we're still on the event thread and the frame
-            # reference is valid at this point. The worker thread drains the queue and
-            # calls _response_fn (which may call response.body()) without blocking the
-            # event loop.
-            _slot_resp_queue: queue.Queue = queue.Queue()
+        resp_thread = threading.Thread(target=_response_worker, daemon=True)
+        resp_thread.start()
 
-            def _slot_response_worker():
-                while True:
-                    item = _slot_resp_queue.get()
-                    if item is None:
-                        break
-                    r, src = item
-                    try:
-                        self._response_fn(r, src)
-                    except Exception:
-                        pass
+        ctx.on("response", lambda r: resp_queue.put(
+            (r, r.frame.url if r.frame else r.url)
+        ))
+        ctx.route(
+            "**/*",
+            lambda route: route.abort()
+            if self._block_fn(route.request.url, route.request.resource_type)
+            else route.continue_()
+        )
 
-            _slot_resp_thread = threading.Thread(target=_slot_response_worker, daemon=True)
-            _slot_resp_thread.start()
+        page = ctx.new_page()
 
-            ctx.on("response", lambda r: _slot_resp_queue.put(
-                (r, r.frame.url if r.frame else r.url)
-            ))
-            ctx.route(
-                "**/*",
-                lambda route: route.abort()
-                if self._block_fn(route.request.url, route.request.resource_type)
-                else route.continue_()
-            )
-            page = ctx.new_page()
-
-        # Gap 6: Auto-dismiss ALL JS dialogs (alert/confirm/prompt/beforeunload).
-        # Katana does this via CDP PageHandleJavaScriptDialog. Without this, any
-        # page that fires alert() on load blocks the browser slot indefinitely
-        # until the navigation timeout kills it — wasting a whole slot timeout.
-        # We accept() dialogs so confirm()-gated flows don't stall, and we catch
-        # prompt() by returning an empty string (accepted = True, text = "").
+        # Gap 6: Auto-dismiss JS dialogs so alert()/confirm() don't stall visits.
         page.on("dialog", lambda d: d.accept() if d.type in ("alert", "beforeunload") else d.dismiss())
 
-        # Gap 2: Attach CDP Fetch interception if raw traffic capture is enabled.
-        # Each pool slot gets its own independent CDP session so parallel workers
-        # don't share state. The session is stored in the slot dict and detached
-        # on release/recreation to avoid CDP session leaks.
-        _slot_cdp: Optional[object] = None
+        # Gap 2: CDP Fetch interception for raw traffic capture.
+        cdp: Optional[object] = None
         if self._cdp_request_fn is not None or self._cdp_response_fn is not None:
-            _slot_cdp = _attach_cdp_fetch_interception(
+            cdp = _attach_cdp_fetch_interception(
                 page,
                 on_request_body_fn  = self._cdp_request_fn,
                 on_response_body_fn = self._cdp_response_fn,
                 resource_patterns   = ["*"],
             )
 
-        return {"idx": idx, "browser": browser, "ctx": ctx, "page": page,
-                "cdp": _slot_cdp, "resp_queue": _slot_resp_queue, "resp_thread": _slot_resp_thread}
+        return {
+            "pw":          pw,
+            "browser":     browser,
+            "ctx":         ctx,
+            "page":        page,
+            "cdp":         cdp,
+            "resp_queue":  resp_queue,
+            "resp_thread": resp_thread,
+        }
 
-    def _is_slot_healthy(self, slot: dict) -> bool:
+    def close_thread_browser(self, slot: dict) -> None:
         """
-        Gap 5: Poisoned slot detection — mirrors Katana's PutBrowserToPool check.
-
-        Katana calls BrowserGetVersion over CDP before returning a slot to the pool.
-        If the browser crashed or was killed mid-visit, the CDP call fails and the
-        slot is discarded instead of being returned as a live browser. Without this,
-        the next acquire() gets a dead slot and fails immediately on goto().
-
-        We check two things:
-        1. The page's underlying CDP connection is still alive (evaluate ping).
-        2. The browser process is still connected (evaluate on a fresh about:blank
-           would raise if the browser is gone).
+        Tear down the Playwright stack created by make_thread_browser().
+        Must be called from the same worker thread that created it.
         """
+        # Gap 2 cleanup
+        _detach_cdp_session(slot.get("cdp"))
+        # Stop response worker before closing ctx (avoids body() on closed ctx)
         try:
-            slot["page"].evaluate("() => true")
-            return True
+            slot["resp_queue"].put(None)
+            slot["resp_thread"].join(timeout=3)
         except Exception:
-            return False
+            pass
+        try:
+            slot["ctx"].close()
+        except Exception:
+            pass
+        try:
+            slot["browser"].close()
+        except Exception:
+            pass
+        try:
+            slot["pw"].stop()
+        except Exception:
+            pass
 
-    def acquire(self) -> dict:
-        """Block until a slot is free, then return it."""
+    def acquire(self) -> None:
+        """Block until a concurrency slot is free."""
         self._sem.acquire()
-        with self._lock:
-            idx = self._free.pop()
-        if self._slots[idx] is None:
-            self._slots[idx] = self._make_slot(idx)
-        return self._slots[idx]
 
-    def release(self, slot: dict) -> None:
-        """
-        Return a slot to the pool, or discard and recreate it if poisoned.
-
-        Gap 5: If the page crashed, timed out, or the browser died mid-visit,
-        the slot is poisoned. Returning it would give the next worker a dead
-        browser that fails immediately. We detect this with a cheap CDP ping
-        and replace the slot in-place so pool size stays constant.
-        """
-        if not self._is_slot_healthy(slot):
-            logger.debug(
-                "BrowserPool slot %d poisoned — closing and replacing", slot["idx"]
-            )
-            # Detach CDP session before closing the context (Gap 2 cleanup)
-            _detach_cdp_session(slot.get("cdp"))
-            # Stop the response worker thread before closing ctx
-            try:
-                slot["resp_queue"].put(None)
-                slot["resp_thread"].join(timeout=3)
-            except Exception:
-                pass
-            # Close whatever is still alive
-            try:
-                slot["ctx"].close()
-            except Exception:
-                pass
-            try:
-                slot["browser"].close()
-            except Exception:
-                pass
-            # Recreate slot immediately so pool capacity never shrinks
-            try:
-                new_slot = self._make_slot(slot["idx"])
-                self._slots[slot["idx"]] = new_slot
-            except Exception as e:
-                logger.warning(
-                    "BrowserPool slot %d recreation failed: %s — slot marked None",
-                    slot["idx"], e,
-                )
-                self._slots[slot["idx"]] = None
-        with self._lock:
-            self._free.append(slot["idx"])
+    def release(self) -> None:
+        """Release a concurrency slot."""
         self._sem.release()
 
     def close_all(self) -> None:
-        """Shut down every initialized browser."""
-        for slot in self._slots:
-            if slot is None:
-                continue
-            # Detach CDP session before closing context (Gap 2 cleanup)
-            _detach_cdp_session(slot.get("cdp"))
-            # Stop the response worker thread before closing ctx
-            try:
-                slot["resp_queue"].put(None)
-                slot["resp_thread"].join(timeout=3)
-            except Exception:
-                pass
-            try:
-                slot["ctx"].close()
-            except Exception:
-                pass
-            try:
-                slot["browser"].close()
-            except Exception:
-                pass
+        """No-op — each worker thread tears down its own browser."""
+        pass
 
 
 class HeadlessEngine:
@@ -5376,7 +5329,6 @@ class HeadlessEngine:
 
             _browser_pool = BrowserPool(
                 num_browsers  = self.num_browsers,
-                pw            = pw,
                 browser_args  = _pool_browser_args,
                 ctx_kwargs    = kwargs,
                 cookies       = self.cookies,
@@ -5409,12 +5361,22 @@ class HeadlessEngine:
 
             def _visit_url_in_slot(url: str, depth: int):
                 """
-                Visit one URL using a pool slot.
+                Visit one URL using a thread-local Playwright browser.
+
+                Each call creates its own sync_playwright() + browser + context +
+                page, uses it, then tears it all down.  This is the only safe
+                pattern with Playwright sync_api under threading: objects are
+                greenlet-bound and cannot cross thread boundaries.
+
                 Returns (new_urls, onclick_count, success, session_lost_flag).
                 Called from a ThreadPoolExecutor worker thread.
                 """
-                slot = _browser_pool.acquire()
+                # Gate on concurrency limit — blocks until a slot is available.
+                _browser_pool.acquire()
+                slot = None
                 try:
+                    # Build a fresh browser stack owned by this thread.
+                    slot = _browser_pool.make_thread_browser()
                     slot_page       = slot["page"]
                     slot_stabilizer = PageStabilizer(slot_page)
 
@@ -5506,7 +5468,9 @@ class HeadlessEngine:
                     logger.debug("Error visiting %s: %s", url, e)
                     return [], 0, False, False
                 finally:
-                    _browser_pool.release(slot)
+                    if slot is not None:
+                        _browser_pool.close_thread_browser(slot)
+                    _browser_pool.release()
 
             # Use a ThreadPoolExecutor scoped to Phase 2 only.
             # We dispatch batches of up to num_browsers URLs at a time so the
