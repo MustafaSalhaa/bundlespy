@@ -1781,6 +1781,93 @@ def _is_login_page(page) -> bool:
     return False
 
 
+class BrowserPool:
+    """
+    Pool of N independent Playwright browser instances.
+    Each slot has its own browser + context + page so parallel workers
+    never share a page object. Slots are created lazily on first acquire.
+
+    Usage:
+        pool = BrowserPool(num_browsers=5, pw=pw, **ctx_kwargs)
+        slot = pool.acquire()
+        try:
+            slot["page"].goto(url)
+        finally:
+            pool.release(slot)
+        pool.close_all()
+    """
+
+    def __init__(self, num_browsers: int, pw, browser_args: list,
+                 ctx_kwargs: dict, cookies: list, init_script: str,
+                 block_fn, response_fn):
+        self._num         = max(1, num_browsers)
+        self._pw          = pw
+        self._browser_args = browser_args
+        self._ctx_kwargs  = ctx_kwargs
+        self._cookies     = cookies
+        self._init_script = init_script
+        self._block_fn    = block_fn    # callable(url, resource_type) -> bool
+        self._response_fn = response_fn # callable(response, source_page)
+
+        self._sem         = threading.Semaphore(self._num)
+        self._lock        = threading.Lock()
+        self._slots: List[Optional[dict]] = [None] * self._num
+        self._free:  List[int]            = list(range(self._num))
+
+    def _make_slot(self, idx: int) -> dict:
+        browser = self._pw.chromium.launch(
+            headless=True,
+            args=self._browser_args,
+        )
+        ctx = browser.new_context(**self._ctx_kwargs)
+        if self._cookies:
+            try:
+                ctx.add_cookies(self._cookies)
+            except Exception:
+                pass
+        ctx.add_init_script(self._init_script)
+        ctx.on("response", lambda r: self._response_fn(
+            r, r.frame.url if r.frame else r.url
+        ))
+        ctx.route(
+            "**/*",
+            lambda route: route.abort()
+            if self._block_fn(route.request.url, route.request.resource_type)
+            else route.continue_()
+        )
+        page = ctx.new_page()
+        return {"idx": idx, "browser": browser, "ctx": ctx, "page": page}
+
+    def acquire(self) -> dict:
+        """Block until a slot is free, then return it."""
+        self._sem.acquire()
+        with self._lock:
+            idx = self._free.pop()
+        if self._slots[idx] is None:
+            self._slots[idx] = self._make_slot(idx)
+        return self._slots[idx]
+
+    def release(self, slot: dict) -> None:
+        """Return a slot to the pool."""
+        with self._lock:
+            self._free.append(slot["idx"])
+        self._sem.release()
+
+    def close_all(self) -> None:
+        """Shut down every initialized browser."""
+        for slot in self._slots:
+            if slot is None:
+                continue
+            try:
+                slot["ctx"].close()
+            except Exception:
+                pass
+            try:
+                slot["browser"].close()
+            except Exception:
+                pass
+
+
 class HeadlessEngine:
     """
     Optimized headless engine.
@@ -1828,6 +1915,8 @@ class HeadlessEngine:
         technology_detection:      bool  = False, # Enable per-response tech fingerprinting
         # Form interaction engine
         forms_mode:                bool  = False, # Enable Tier 2 form interaction (POST forms)
+        # Browser pool
+        num_browsers:              int   = 5,     # Parallel browser instances (default 5)
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -1836,6 +1925,7 @@ class HeadlessEngine:
         self.max_pages   = max_pages
         self.interact    = interact
         self.num_workers = max(1, min(workers, 5))
+        self.num_browsers = max(1, num_browsers)
         self.cookies       = cookies or []        # Playwright cookie dicts
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
@@ -4669,12 +4759,47 @@ class HeadlessEngine:
             self.timer.stop("phase1_root")
             logger.info("Phase 1 done: %d routes", len(self.routes))
 
-            # ── Phase 2: BFS route exploration ────────────────────────────────
+            # ── Phase 2: BFS route exploration (parallel browser pool) ────────
             # Bug 19 fix: use a real BFS deque so routes discovered during the
             # loop are fed back into the queue immediately and visited in the
             # same run. The old code collected new_routes_found and only added
             # them after the loop ended — they were never visited.
             self.timer.start("phase2_routes")
+
+            # Build the browser pool — N independent browser+context+page sets.
+            # Phase 1 (auth) used the single browser above; the pool takes over
+            # for Phase 2 parallel BFS. Each slot replicates the same context
+            # config (UA, stealth flags, cookies, init script, routing rules).
+            _pool_browser_args = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
+                "--blink-settings=imagesEnabled=false",
+                "--disable-background-networking",
+                "--disable-sync",
+            ]
+
+            def _pool_response_fn(r, source_url):
+                try:
+                    self._handle_response(r, source_url)
+                except Exception:
+                    pass
+
+            _browser_pool = BrowserPool(
+                num_browsers = self.num_browsers,
+                pw           = pw,
+                browser_args = _pool_browser_args,
+                ctx_kwargs   = kwargs,
+                cookies      = self.cookies,
+                init_script  = INTERCEPT_JS,
+                block_fn     = self._should_block,
+                response_fn  = _pool_response_fn,
+            )
+            logger.info(
+                "BrowserPool ready: %d parallel browser slots", self.num_browsers
+            )
 
             initial_urls = self._build_urls(self.routes)
             # Bug 11 fix: _build_urls already sorts by priority; don't sort again.
@@ -4689,232 +4814,250 @@ class HeadlessEngine:
             _js_nav_count: int        = 0
             _onclick_nav_count: int   = 0
 
-            while bfs_queue:
-                if self.pages_visited >= self.max_pages:
-                    break
+            # Session-loss flag — set by any pool worker hitting a login wall
+            _session_lost = threading.Event()
 
-                # Drain ResponseParser discoveries into the BFS queue.
-                # The response handler runs in the Playwright event thread and
-                # appends to _rp_discovered under _rp_lock. We drain here —
-                # at the top of each BFS iteration — so freshly discovered
-                # URLs from the previous page's responses feed into this run.
-                if self._response_parser is not None:
-                    with self._rp_lock:
-                        pending_rp = self._rp_discovered[:]
-                        self._rp_discovered.clear()
-                    for rp_url in pending_rp:
-                        if self.scope.in_scope(rp_url) and not self.registry.seen_url(rp_url):
-                            # PathTrie dedup: skip structurally identical URLs
-                            if self._path_trie is not None:
-                                fp = self._path_trie.fingerprint(rp_url)
-                                if fp in self._trie_seen:
-                                    _trie_filtered_count += 1
-                                    continue
-                                self._trie_seen.add(fp)
-                            _rp_parsed  = urlparse(rp_url)
-                            _rp_route   = (_rp_parsed.path or "/") + (
-                                ("?" + _rp_parsed.query) if _rp_parsed.query else ""
-                            )
-                            self._add_route(_rp_route)
-                            bfs_queue.append(rp_url)
-                            _rp_added_count += 1
-
-                # Drain JS navigation discoveries — framenavigated events from
-                # SPA router transitions (history.pushState, window.location=, etc.)
-                with self._js_nav_lock:
-                    pending_js_nav = self._js_nav_urls[:]
-                    self._js_nav_urls.clear()
-                for js_nav_url in pending_js_nav:
-                    if self.scope.in_scope(js_nav_url) and not self.registry.seen_url(js_nav_url):
-                        if self._path_trie is not None:
-                            js_fp = self._path_trie.fingerprint(js_nav_url)
-                            if js_fp in self._trie_seen:
-                                _trie_filtered_count += 1
-                                continue
-                            self._trie_seen.add(js_fp)
-                        _jn_parsed = urlparse(js_nav_url)
-                        _jn_route  = (_jn_parsed.path or "/") + (
-                            ("?" + _jn_parsed.query) if _jn_parsed.query else ""
-                        )
-                        self._add_route(_jn_route)
-                        bfs_queue.append(js_nav_url)
-                        _js_nav_count += 1
-
-                # MaxCrawlDuration guard — timer starts after auth (Enhancement 10)
-                if self._is_crawl_deadline_exceeded():
-                    logger.info(
-                        "MaxCrawlDuration (%ds) reached — stopping BFS",
-                        self.max_crawl_duration,
-                    )
-                    break
-
-                # MaxFailureCount guard — halt if too many consecutive failures (Enhancement 4)
-                if self._consecutive_failures >= self.max_failures:
-                    logger.warning(
-                        "MaxFailureCount (%d) reached — halting BFS to avoid "
-                        "spinning on a broken or blocked target",
-                        self.max_failures,
-                    )
-                    break
-
-                url = bfs_queue.popleft()
-                current_depth = bfs_depth.get(url, 1)
-
-                if not self.registry.register_url(url):
-                    continue
-
-                safe, _ = validate_url(url)
-                if not safe or not self.scope.in_scope(url):
-                    continue
-
+            def _visit_url_in_slot(url: str, depth: int):
+                """
+                Visit one URL using a pool slot.
+                Returns (new_urls, onclick_count, success, session_lost_flag).
+                Called from a ThreadPoolExecutor worker thread.
+                """
+                slot = _browser_pool.acquire()
                 try:
-                    # Drift guard: recover if a previous page's JS moved the
-                    # browser to an unexpected origin before we navigate here.
-                    self._recover_drift(page, self.target_url, stabilizer)
+                    slot_page       = slot["page"]
+                    slot_stabilizer = PageStabilizer(slot_page)
 
-                    page.goto(url, timeout=self.timeout * 1000, wait_until=_wait_until)
+                    slot_page.goto(
+                        url,
+                        timeout    = self.timeout * 1000,
+                        wait_until = _wait_until,
+                    )
                     with self._lock:
                         self.pages_visited += 1
 
-                    # Fire on_navigation hook (Enhancement 4)
+                    # on_navigation hook
                     if self.hooks.on_navigation:
                         try:
                             self.hooks.on_navigation(url)
                         except Exception:
                             pass
 
-                    # Session state check — detect silent mid-crawl session loss.
-                    # If we have credentials but land on a login page for a non-login
-                    # URL, the session was lost (expired cookie, server logout event).
-                    if _is_login_page(page) and not _is_login_url(url):
-                        # Fire on_login_detected hook when landing on login unexpectedly
+                    # Session-loss detection — if we land on a login page for
+                    # a non-login URL the session cookie is gone server-side.
+                    if _is_login_page(slot_page) and not _is_login_url(url):
                         if self.hooks.on_login_detected:
                             try:
-                                self.hooks.on_login_detected(page)
+                                self.hooks.on_login_detected(slot_page)
                             except Exception:
                                 pass
-                        login_loop_count += 1
-                        # loggedIn flag: only attempt re-auth once per mid-crawl loss,
-                        # and only when we were previously authenticated (Enhancement 7)
-                        if self._logged_in and login_loop_count == 1:
-                            logger.warning(
-                                "Mid-crawl session loss detected — attempting auto-login re-auth"
-                            )
-                            re_ok = self._try_auto_login(page, stabilizer)
-                            if re_ok:
-                                self._logged_in = True
-                                login_loop_count = 0
-                                logger.info("Mid-crawl re-auth succeeded")
-                                continue
-                        if login_loop_count >= 2:
-                            logger.warning(
-                                "Session lost mid-crawl after %d consecutive login "
-                                "redirects — stopping route exploration to avoid "
-                                "silent unauthenticated crawl",
-                                login_loop_count,
-                            )
-                            # Update auth_result so callers know the session dropped
-                            if self.auth_result is not None:
-                                self.auth_result["authenticated"] = False
-                                self.auth_result["reason"] = (
-                                    "Session lost mid-crawl — "
-                                    "server invalidated the session after login"
-                                )
-                            self._logged_in = False
-                            break
-                        continue
-                    else:
-                        login_loop_count = 0  # reset on successful non-login page
+                        _session_lost.set()
+                        return [], 0, False, True
 
-                    # Cookie consent bypass — try once per new page (Enhancement 8)
+                    # Cookie consent
                     if self.cookie_consent_bypass:
-                        self._dismiss_cookie_consent(page)
+                        self._dismiss_cookie_consent(slot_page)
 
-                    # Captcha detection — try handler if configured (Enhancement 9)
-                    if self._is_captcha_page(page):
-                        self._handle_captcha(page)
+                    # Captcha
+                    if self._is_captcha_page(slot_page):
+                        self._handle_captcha(slot_page)
 
-                    # DOM state dedup — skip identical states
-                    stabilizer.wait_for_framework(max_ms=2000)
-                    fp = self._dom_fingerprint(page)
-                    if fp and fp in _seen_dom_states:
-                        logger.debug("Duplicate DOM state, skipping: %s", url)
-                        self._consecutive_failures = 0  # dedup is expected, not a failure
-                        continue
+                    # DOM state dedup
+                    slot_stabilizer.wait_for_framework(max_ms=2000)
+                    fp = self._dom_fingerprint(slot_page)
                     if fp:
-                        _seen_dom_states.add(fp)
-                        # Register page state in CrawlGraph (Enhancement 1)
-                        self.crawl_graph.add_page_state(fp[:16], url, depth=current_depth)
-                        # Record LOAD_URL edge
+                        with self._lock:
+                            if fp in _seen_dom_states:
+                                return [], 0, True, False
+                            _seen_dom_states.add(fp)
+                        self.crawl_graph.add_page_state(fp[:16], url, depth=depth)
                         load_action = CrawlAction(
-                            action_type=ActionType.LOAD_URL,
-                            url=url,
-                            depth=current_depth,
-                            parent_url=url,
+                            action_type = ActionType.LOAD_URL,
+                            url         = url,
+                            depth       = depth,
+                            parent_url  = url,
                         )
                         self.crawl_graph.add_edge(load_action)
 
-                    # Content similarity gate — skip near-duplicate pages
-                    # (Katana hybrid feature 5)
+                    # Content similarity gate
                     if self.content_similarity_threshold > 0.0:
-                        if self._is_similar_content(page):
+                        if self._is_similar_content(slot_page):
                             logger.debug("Content similarity gate: skipping %s", url)
-                            self._consecutive_failures = 0
-                            continue
+                            return [], 0, True, False
 
                     if self.interact:
-                        self._interact(page, stabilizer)
-                        self._observe_forms(page, stabilizer)
+                        self._interact(slot_page, slot_stabilizer)
+                        self._observe_forms(slot_page, slot_stabilizer)
 
-                    new_routes = self._flush_page_intel(page, url)
+                    new_routes = self._flush_page_intel(slot_page, url)
+                    self._discover_form_actions(slot_page, url)
+                    self._discover_click_actions(slot_page, url)
 
-                    # Discover typed actions (forms, JS buttons) for Phase 3
-                    self._discover_form_actions(page, url)
-                    self._discover_click_actions(page, url)
+                    new_urls   = self._build_urls(new_routes)
+                    _oc_count  = 0
 
-                    # Feed newly discovered routes straight back into the BFS
-                    # queue so they're visited this run, not a future run.
-                    new_urls = self._build_urls(new_routes)
-
-                    # onclick simulation — Katana hybrid feature 2
                     if self.max_onclick_links > 0:
                         try:
                             onclick_new = self._simulate_onclick_links(
-                                page, url, max_links=self.max_onclick_links
+                                slot_page, url, max_links=self.max_onclick_links
                             )
                             for onclick_url in onclick_new:
                                 if onclick_url not in new_urls:
                                     new_urls.append(onclick_url)
-                                    _onclick_nav_count += 1
+                                    _oc_count += 1
                         except Exception as e:
                             logger.debug("onclick simulation failed for %s: %s", url, e)
 
-                    for new_url in new_urls:
-                        if not self.registry.seen_url(new_url):
-                            # PathTrie dedup — skip structurally identical URLs
-                            # e.g. /item/1, /item/2, /item/3 all collapse to /item/*
-                            if self._path_trie is not None:
-                                new_fp = self._path_trie.fingerprint(new_url)
-                                if new_fp in self._trie_seen:
-                                    _trie_filtered_count += 1
-                                    continue
-                                self._trie_seen.add(new_fp)
-                            # Preserve query string in route registration —
-                            # /projects?category=laravel is a distinct route from /projects
-                            _parsed_new = urlparse(new_url)
-                            _route_key  = (_parsed_new.path or "/") + (
-                                ("?" + _parsed_new.query) if _parsed_new.query else ""
-                            )
-                            self._add_route(_route_key)
-                            bfs_queue.append(new_url)
-                            bfs_depth[new_url] = current_depth + 1
-
-                    # Successful page visit — reset consecutive failure counter
-                    self._consecutive_failures = 0
+                    return new_urls, _oc_count, True, False
 
                 except Exception as e:
                     logger.debug("Error visiting %s: %s", url, e)
-                    self._consecutive_failures += 1
+                    return [], 0, False, False
+                finally:
+                    _browser_pool.release(slot)
+
+            # Use a ThreadPoolExecutor scoped to Phase 2 only.
+            # We dispatch batches of up to num_browsers URLs at a time so the
+            # BFS queue drains can still feed new URLs between batches.
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+            with ThreadPoolExecutor(max_workers=self.num_browsers) as _executor:
+                while bfs_queue:
+                    if self.pages_visited >= self.max_pages:
+                        break
+
+                    if _session_lost.is_set():
+                        logger.warning(
+                            "Session lost mid-crawl — stopping BFS to avoid "
+                            "silent unauthenticated crawl"
+                        )
+                        if self.auth_result is not None:
+                            self.auth_result["authenticated"] = False
+                            self.auth_result["reason"] = (
+                                "Session lost mid-crawl — "
+                                "server invalidated the session after login"
+                            )
+                        self._logged_in = False
+                        break
+
+                    # Drain ResponseParser discoveries into the BFS queue.
+                    if self._response_parser is not None:
+                        with self._rp_lock:
+                            pending_rp = self._rp_discovered[:]
+                            self._rp_discovered.clear()
+                        for rp_url in pending_rp:
+                            if self.scope.in_scope(rp_url) and not self.registry.seen_url(rp_url):
+                                if self._path_trie is not None:
+                                    fp = self._path_trie.fingerprint(rp_url)
+                                    if fp in self._trie_seen:
+                                        _trie_filtered_count += 1
+                                        continue
+                                    self._trie_seen.add(fp)
+                                _rp_parsed = urlparse(rp_url)
+                                _rp_route  = (_rp_parsed.path or "/") + (
+                                    ("?" + _rp_parsed.query) if _rp_parsed.query else ""
+                                )
+                                self._add_route(_rp_route)
+                                bfs_queue.append(rp_url)
+                                _rp_added_count += 1
+
+                    # Drain JS navigation discoveries
+                    with self._js_nav_lock:
+                        pending_js_nav = self._js_nav_urls[:]
+                        self._js_nav_urls.clear()
+                    for js_nav_url in pending_js_nav:
+                        if self.scope.in_scope(js_nav_url) and not self.registry.seen_url(js_nav_url):
+                            if self._path_trie is not None:
+                                js_fp = self._path_trie.fingerprint(js_nav_url)
+                                if js_fp in self._trie_seen:
+                                    _trie_filtered_count += 1
+                                    continue
+                                self._trie_seen.add(js_fp)
+                            _jn_parsed = urlparse(js_nav_url)
+                            _jn_route  = (_jn_parsed.path or "/") + (
+                                ("?" + _jn_parsed.query) if _jn_parsed.query else ""
+                            )
+                            self._add_route(_jn_route)
+                            bfs_queue.append(js_nav_url)
+                            _js_nav_count += 1
+
+                    # MaxCrawlDuration guard
+                    if self._is_crawl_deadline_exceeded():
+                        logger.info(
+                            "MaxCrawlDuration (%ds) reached — stopping BFS",
+                            self.max_crawl_duration,
+                        )
+                        break
+
+                    # MaxFailureCount guard
+                    if self._consecutive_failures >= self.max_failures:
+                        logger.warning(
+                            "MaxFailureCount (%d) reached — halting BFS",
+                            self.max_failures,
+                        )
+                        break
+
+                    # Collect a batch of URLs — up to num_browsers at once
+                    _batch_items: List[tuple] = []
+                    while bfs_queue and len(_batch_items) < self.num_browsers:
+                        candidate = bfs_queue.popleft()
+                        current_depth = bfs_depth.get(candidate, 1)
+
+                        if not self.registry.register_url(candidate):
+                            continue
+                        safe_c, _ = validate_url(candidate)
+                        if not safe_c or not self.scope.in_scope(candidate):
+                            continue
+                        _batch_items.append((candidate, current_depth))
+
+                    if not _batch_items:
+                        continue
+
+                    # Dispatch batch in parallel
+                    _futures = {
+                        _executor.submit(_visit_url_in_slot, _burl, _bdepth): (_burl, _bdepth)
+                        for _burl, _bdepth in _batch_items
+                    }
+
+                    for _fut in _as_completed(_futures):
+                        _burl, _bdepth = _futures[_fut]
+                        try:
+                            new_urls, oc_count, success, sess_lost = _fut.result()
+                        except Exception as _fe:
+                            logger.debug("Future error for %s: %s", _burl, _fe)
+                            self._consecutive_failures += 1
+                            continue
+
+                        if sess_lost:
+                            continue  # session_lost event already set
+
+                        if not success:
+                            self._consecutive_failures += 1
+                            continue
+
+                        self._consecutive_failures = 0
+                        _onclick_nav_count += oc_count
+
+                        # Feed newly discovered URLs back into BFS queue
+                        for new_url in new_urls:
+                            if not self.registry.seen_url(new_url):
+                                if self._path_trie is not None:
+                                    new_fp = self._path_trie.fingerprint(new_url)
+                                    if new_fp in self._trie_seen:
+                                        _trie_filtered_count += 1
+                                        continue
+                                    self._trie_seen.add(new_fp)
+                                _parsed_new = urlparse(new_url)
+                                _route_key  = (_parsed_new.path or "/") + (
+                                    ("?" + _parsed_new.query) if _parsed_new.query else ""
+                                )
+                                self._add_route(_route_key)
+                                bfs_queue.append(new_url)
+                                bfs_depth[new_url] = _bdepth + 1
+
+            # Shut down all pool browsers — must happen inside sync_playwright ctx
+            _browser_pool.close_all()
+            logger.info("BrowserPool closed")
 
             self.timer.stop("phase2_routes")
 
@@ -5237,6 +5380,8 @@ def collect_headless_full(
     technology_detection: bool           = False,
     # Form interaction engine
     forms_mode:           bool           = False,
+    # Browser pool
+    num_browsers:         int            = 5,
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -5263,6 +5408,8 @@ def collect_headless_full(
     url_filter_threshold:  number of distinct values before a path segment is wildcarded (default 3).
     response_body_extract: parse every HTTP response body for embedded URLs not visible in the DOM
                            (JS fetch calls, JSON hrefs, CSS url(), sourcemaps — default True).
+    num_browsers:          number of parallel browser instances in the pool for Phase 2 BFS
+                           (default 5; lower to 1-2 when WAF rate-limiting is a concern).
     """
     engine = HeadlessEngine(
         target_url             = url,
@@ -5294,6 +5441,7 @@ def collect_headless_full(
         content_similarity_threshold = content_similarity_threshold,
         technology_detection   = technology_detection,
         forms_mode             = forms_mode,
+        num_browsers           = num_browsers,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
