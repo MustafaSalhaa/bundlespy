@@ -2414,6 +2414,11 @@ class HeadlessEngine:
         self.ws_messages: List[dict]   = []   # WS payload capture (item 9)
         self.routes:     Set[str]      = set()
         self.pages_visited: int        = 0
+        # Total JS responses intercepted by the browser (before dedup).
+        # js_files only counts NEW files not seen by the static crawler;
+        # this counter tracks how many JS responses the browser actually
+        # saw so the operator can distinguish "0 new" from "0 seen at all".
+        self._js_intercepted_count: int = 0
         self.auth_result: Optional[dict] = None  # populated during run()
         self._seen_interact_states: Set[str] = set()  # DOM states already interacted with
         # Action queue — typed crawl actions for state-based exploration
@@ -3171,6 +3176,13 @@ class HeadlessEngine:
             safe, _ = validate_url(url)
             if not safe or not self.scope.in_scope(url):
                 return
+
+            # Count every in-scope JS response the browser saw, before dedup.
+            # This lets us distinguish "0 new (all already found by static
+            # crawler)" from "0 seen at all", which is an important operator
+            # signal.  Thread-safe: use the existing self._lock.
+            with self._lock:
+                self._js_intercepted_count += 1
 
             # URL-level dedup — normalize strips query/fragment for comparison
             norm = self.registry._normalize(url)
@@ -5940,6 +5952,10 @@ class HeadlessEngine:
         stats = {
             "pages":              self.pages_visited,
             "js":                 len(self.js_files),
+            # Total JS responses the browser intercepted before dedup.
+            # When the static crawler already found all JS files, js==0 but
+            # js_intercepted>0 — this tells the operator headless was working.
+            "js_intercepted":     self._js_intercepted_count,
             "xhr":                sum(1 for c in self.api_calls if c.get("type") == "xhr"),
             "fetch":              sum(1 for c in self.api_calls if c.get("type") == "fetch"),
             "ws":                 len(self.ws_urls),
@@ -5964,8 +5980,9 @@ class HeadlessEngine:
         }
 
         logger.info(
-            "Headless done: %d pages, %d JS, %d routes, %d graph-nodes, %.1fs total",
-            self.pages_visited, len(self.js_files),
+            "Headless done: %d pages, %d JS new (%d intercepted), %d routes, "
+            "%d graph-nodes, %.1fs total",
+            self.pages_visited, len(self.js_files), self._js_intercepted_count,
             len(self.routes), crawl_graph_summary["nodes"],
             timings.get("total", 0),
         )
