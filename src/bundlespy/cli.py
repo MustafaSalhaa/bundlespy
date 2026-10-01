@@ -1421,6 +1421,7 @@ def run_scan(args) -> int:
         headless_stats      = extras.get("headless_stats", {}),
         sm_details          = extras.get("source_map_details", {}),
         visited_pages       = getattr(crawler if not args.passive else None, "visited_pages", set()) or set(),
+        max_pages           = getattr(args, "max_pages", 0) or 0,
     )
     extras["coverage"] = coverage
 
