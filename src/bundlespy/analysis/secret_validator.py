@@ -768,6 +768,50 @@ def validate_datadog_api_key(key: str) -> ValidationResult:
     return ValidationResult("DATADOG_API_KEY", False, "Datadog", f"HTTP {resp.status_code}", http_status=resp.status_code)
 
 
+def validate_datadog_app_key(app_key: str) -> ValidationResult:
+    """
+    Validate a Datadog Application Key.
+    App keys use DD-APPLICATION-KEY header (not DD-API-KEY).
+    Probe /api/v1/validate which requires a valid app key + api key pair,
+    so we fall back to /api/v2/current_user which accepts app key alone.
+    """
+    resp = _req("GET",
+        "https://api.datadoghq.com/api/v2/current_user",
+        headers={
+            "DD-APPLICATION-KEY": app_key,
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("DATADOG_APP_KEY", False, "Datadog", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data  = resp.json()
+            attrs = data.get("data", {}).get("attributes", {})
+            name  = attrs.get("name", "?")
+            email = attrs.get("email", "?")
+            return ValidationResult(
+                "DATADOG_APP_KEY", True, "Datadog",
+                f"CONFIRMED LIVE - User: {name} ({email})",
+                http_status=200,
+                context={"user": name},
+            )
+        except Exception:
+            return ValidationResult("DATADOG_APP_KEY", True, "Datadog", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 403:
+        return ValidationResult(
+            "DATADOG_APP_KEY", True, "Datadog",
+            "CONFIRMED LIVE - Authenticated (403 on /current_user - app key valid, scoped permissions)",
+            http_status=403,
+        )
+    if resp.status_code == 401:
+        return ValidationResult("DATADOG_APP_KEY", False, "Datadog", "Invalid or revoked application key")
+
+    return ValidationResult("DATADOG_APP_KEY", False, "Datadog", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
 # ── Mapbox ─────────────────────────────────────────────────────────────────────
 
 def validate_mapbox_token(token: str) -> ValidationResult:
@@ -996,6 +1040,79 @@ def validate_pusher_key(app_key: str, app_id: Optional[str] = None, app_secret: 
     return ValidationResult("PUSHER_APP_KEY", False, "Pusher", f"HTTP {resp.status_code}", http_status=resp.status_code)
 
 
+# ── Resend ─────────────────────────────────────────────────────────────────────
+
+def validate_resend_key(key: str) -> ValidationResult:
+    """Validate Resend API key via /v1/api-keys endpoint."""
+    resp = _req("GET",
+        "https://api.resend.com/api-keys",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("RESEND_API_KEY", False, "Resend", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data  = resp.json()
+            count = len(data.get("data", []))
+            return ValidationResult(
+                "RESEND_API_KEY", True, "Resend",
+                f"CONFIRMED LIVE - {count} API key(s) in account",
+                http_status=200,
+                context={"key_count": str(count)},
+            )
+        except Exception:
+            return ValidationResult("RESEND_API_KEY", True, "Resend", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 401:
+        return ValidationResult("RESEND_API_KEY", False, "Resend", "Invalid or revoked API key")
+    if resp.status_code == 403:
+        return ValidationResult(
+            "RESEND_API_KEY", True, "Resend",
+            "CONFIRMED LIVE - Authenticated (403 - key valid but lacks api-keys:read scope)",
+            http_status=403,
+        )
+
+    return ValidationResult("RESEND_API_KEY", False, "Resend", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
+# ── Replicate ──────────────────────────────────────────────────────────────────
+
+def validate_replicate_key(key: str) -> ValidationResult:
+    """Validate Replicate API token via /v1/account endpoint."""
+    resp = _req("GET",
+        "https://api.replicate.com/v1/account",
+        headers={
+            "Authorization": f"Token {key}",
+            "User-Agent": _UA,
+        },
+    )
+    if not resp:
+        return ValidationResult("REPLICATE_API_KEY", False, "Replicate", "Request failed")
+
+    if resp.status_code == 200:
+        try:
+            data     = resp.json()
+            username = data.get("username", "?")
+            name     = data.get("name", "?")
+            return ValidationResult(
+                "REPLICATE_API_KEY", True, "Replicate",
+                f"CONFIRMED LIVE - Account: {username} ({name})",
+                http_status=200,
+                context={"username": username},
+            )
+        except Exception:
+            return ValidationResult("REPLICATE_API_KEY", True, "Replicate", "CONFIRMED LIVE - HTTP 200", http_status=200)
+
+    if resp.status_code == 401:
+        return ValidationResult("REPLICATE_API_KEY", False, "Replicate", "Invalid or revoked API token")
+
+    return ValidationResult("REPLICATE_API_KEY", False, "Replicate", f"HTTP {resp.status_code}", http_status=resp.status_code)
+
+
 # ── Rule ID -> Validator map ───────────────────────────────────────────────────
 
 VALIDATORS: Dict[str, Callable] = {
@@ -1006,6 +1123,7 @@ VALIDATORS: Dict[str, Callable] = {
     # OpenAI
     "OPENAI_API_KEY":        validate_openai_key,
     "OPENAI_API_KEY_V2":     validate_openai_key,
+    "OPENAI_API_KEY_V3":     validate_openai_key,
     # Anthropic
     "ANTHROPIC_API_KEY":     validate_anthropic_key,
     # GitHub
@@ -1024,8 +1142,11 @@ VALIDATORS: Dict[str, Callable] = {
     "SLACK_APP_TOKEN":       validate_slack_token,
     # SendGrid
     "SENDGRID_API_KEY":      validate_sendgrid_key,
+    "RESEND_API_KEY":        validate_resend_key,
     # Twilio
     "TWILIO_ACCOUNT_SID":    validate_twilio_sid_only,
+    "TWILIO_AUTH_TOKEN":     validate_twilio_sid_only,
+    "TWILIO_API_KEY":        validate_twilio_sid_only,
     # Telegram
     "TELEGRAM_BOT_TOKEN":    validate_telegram_token,
     # Discord
@@ -1034,6 +1155,7 @@ VALIDATORS: Dict[str, Callable] = {
     "NPM_TOKEN":             validate_npm_token,
     # HuggingFace
     "HUGGINGFACE_TOKEN":     validate_huggingface_token,
+    "REPLICATE_API_KEY":     validate_replicate_key,
     # Mailgun
     "MAILGUN_API_KEY":       validate_mailgun_key,
     # Groq
@@ -1043,7 +1165,7 @@ VALIDATORS: Dict[str, Callable] = {
     "SUPABASE_SERVICE_KEY":  validate_supabase_key,
     # Datadog
     "DATADOG_API_KEY":       validate_datadog_api_key,
-    "DATADOG_APP_KEY":       validate_datadog_api_key,
+    "DATADOG_APP_KEY":       validate_datadog_app_key,
     # Mapbox
     "MAPBOX_ACCESS_TOKEN":   validate_mapbox_token,
     "MAPBOX_SECRET_TOKEN":   validate_mapbox_token,
