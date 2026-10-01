@@ -78,46 +78,276 @@ class FormIntent(Enum):
 
 # ── Safe dummy values ─────────────────────────────────────────────────────────
 
-# Values we fill into specific field types.
-# They are designed to be recognisably fake and never trigger real server actions.
+# ── Gap 7: Smart field-aware fill values ──────────────────────────────────────
+#
+# Equivalent to Katana's FormFillSuggestions() — values are chosen per
+# field *type* (HTML input type + autocomplete + name token) to produce the
+# most realistic-looking value that will actually pass client-side validation
+# without carrying any real PII or triggering real server actions.
+#
+# All values are obviously fake:
+#   - email domain is .invalid (RFC 2606 reserved — never resolves)
+#   - phone numbers are all-zeros or clearly not real
+#   - names, companies, and addresses use "Test" prefix
+#   - numeric fields use minimal real-looking values (e.g. "21" for age)
+#
+# Lookup priority in _smart_fill_value():
+#   1. HTML autocomplete attribute value
+#   2. HTML input type attribute
+#   3. Field name/id token fuzzy match
+#   4. Generic text fallback
+
 SAFE_VALUES: Dict[str, str] = {
-    # Search/filter
-    "search":   "test",
-    "q":        "test",
-    "query":    "test",
-    "find":     "test",
-    "keyword":  "test",
-    "keywords": "test",
-    "term":     "test",
-    "filter":   "all",
-    "sort":     "asc",
-    "category": "all",
-    "tag":      "test",
-    "type":     "all",
-    # Contact / newsletter
-    "name":     "Test User",
-    "fullname": "Test User",
-    "subject":  "Test",
-    "message":  "test",
-    "comment":  "test",
-    "feedback": "test",
-    # Auth (Tier 2 login forms only)
-    "username": "testuser",
-    "user":     "testuser",
-    "login":    "testuser",
-    "email":    "probe@bundlespy.invalid",
-    # Generic text fallback for Tier 2
-    "_text":    "test",
-    # URL field
-    "url":      "https://example.invalid",
-    "website":  "https://example.invalid",
-    # Number field
-    "_number":  "1",
-    # Phone (Tier 2 contact forms only — clearly fake)
-    "phone":    "0000000000",
-    "tel":      "0000000000",
-    "mobile":   "0000000000",
+    # ── Search / filter ───────────────────────────────────────────────────────
+    "search":           "test",
+    "q":                "test",
+    "query":            "test",
+    "find":             "test",
+    "keyword":          "test",
+    "keywords":         "test",
+    "term":             "test",
+    "filter":           "all",
+    "sort":             "asc",
+    "category":         "all",
+    "tag":              "test",
+    "type":             "all",
+    # ── Contact / newsletter ──────────────────────────────────────────────────
+    "name":             "Test User",
+    "fullname":         "Test User",
+    "full_name":        "Test User",
+    "first_name":       "Test",
+    "last_name":        "User",
+    "given_name":       "Test",
+    "family_name":      "User",
+    "subject":          "Test inquiry",
+    "message":          "This is a test message.",
+    "comment":          "test comment",
+    "feedback":         "test feedback",
+    "description":      "test description",
+    "body":             "test body text",
+    "content":          "test content",
+    "note":             "test note",
+    "notes":            "test notes",
+    # ── Location / address ────────────────────────────────────────────────────
+    "address":          "1 Test Street",
+    "address1":         "1 Test Street",
+    "address2":         "Suite 100",
+    "street":           "1 Test Street",
+    "city":             "Test City",
+    "state":            "CA",
+    "province":         "ON",
+    "region":           "Test Region",
+    "zip":              "00000",
+    "zipcode":          "00000",
+    "postal":           "00000",
+    "postal_code":      "00000",
+    "postcode":         "00000",
+    "country":          "US",
+    # ── Organisation / professional ───────────────────────────────────────────
+    "company":          "Test Company",
+    "organization":     "Test Org",
+    "organisation":     "Test Org",
+    "org":              "Test Org",
+    "job_title":        "Tester",
+    "title":            "Tester",
+    "position":         "Tester",
+    "department":       "QA",
+    # ── Auth (Tier 2 only) ────────────────────────────────────────────────────
+    "username":         "testuser",
+    "user_name":        "testuser",
+    "user":             "testuser",
+    "login":            "testuser",
+    "handle":           "testuser",
+    "email":            "probe@bundlespy.invalid",
+    "e_mail":           "probe@bundlespy.invalid",
+    "mail":             "probe@bundlespy.invalid",
+    # ── URLs / web ────────────────────────────────────────────────────────────
+    "url":              "https://example.invalid",
+    "website":          "https://example.invalid",
+    "homepage":         "https://example.invalid",
+    "link":             "https://example.invalid",
+    # ── Phone / fax ───────────────────────────────────────────────────────────
+    "phone":            "0000000000",
+    "tel":              "0000000000",
+    "mobile":           "0000000000",
+    "fax":              "0000000000",
+    "telephone":        "0000000000",
+    "cellphone":        "0000000000",
+    # ── Numeric ───────────────────────────────────────────────────────────────
+    "age":              "21",
+    "quantity":         "1",
+    "qty":              "1",
+    "count":            "1",
+    "number":           "1",
+    "num":              "1",
+    "amount_safe":      "1",   # generic numeric (NOT financial amount — that's blocked)
+    "_number":          "1",
+    # ── Dates ─────────────────────────────────────────────────────────────────
+    "date":             "2000-01-01",
+    "birth_date":       "2000-01-01",
+    "dob":              "2000-01-01",
+    "birthday":         "2000-01-01",
+    "start_date":       "2000-01-01",
+    "end_date":         "2000-12-31",
+    # ── Generic fallbacks ─────────────────────────────────────────────────────
+    "_text":            "test",
 }
+
+# Autocomplete attribute → fill value mapping.
+# The HTML autocomplete spec defines these token values:
+# https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#attr-fe-autocomplete
+_AUTOCOMPLETE_FILL: Dict[str, str] = {
+    # Names
+    "name":               SAFE_VALUES["name"],
+    "given-name":         SAFE_VALUES["given_name"],
+    "family-name":        SAFE_VALUES["family_name"],
+    "additional-name":    "M",
+    "nickname":           "testuser",
+    "honorific-prefix":   "Mr",
+    "honorific-suffix":   "Jr",
+    # Contact
+    "email":              SAFE_VALUES["email"],
+    "tel":                SAFE_VALUES["tel"],
+    "tel-national":       SAFE_VALUES["tel"],
+    "tel-local":          SAFE_VALUES["tel"],
+    # Address
+    "street-address":     SAFE_VALUES["address"],
+    "address-line1":      SAFE_VALUES["address1"],
+    "address-line2":      SAFE_VALUES["address2"],
+    "address-level1":     SAFE_VALUES["state"],
+    "address-level2":     SAFE_VALUES["city"],
+    "address-level3":     SAFE_VALUES["city"],
+    "postal-code":        SAFE_VALUES["postal_code"],
+    "country":            SAFE_VALUES["country"],
+    "country-name":       "United States",
+    # Organisation
+    "organization":       SAFE_VALUES["organization"],
+    "organization-title": SAFE_VALUES["job_title"],
+    # Auth (username only — we never fill password)
+    "username":           SAFE_VALUES["username"],
+    # Web
+    "url":                SAFE_VALUES["url"],
+    # Dates
+    "bday":               SAFE_VALUES["birth_date"],
+    "bday-day":           "1",
+    "bday-month":         "1",
+    "bday-year":          "2000",
+    # Search
+    "search":             SAFE_VALUES["search"],
+    # Sex / gender — harmless demographic field on some forms
+    "sex":                "other",
+}
+
+# HTML input type → fill value mapping.
+# Used when autocomplete isn't set and name-token matching doesn't match.
+_INPUT_TYPE_FILL: Dict[str, str] = {
+    "text":           SAFE_VALUES["_text"],
+    "search":         SAFE_VALUES["search"],
+    "email":          SAFE_VALUES["email"],
+    "url":            SAFE_VALUES["url"],
+    "tel":            SAFE_VALUES["tel"],
+    "number":         SAFE_VALUES["_number"],
+    "date":           SAFE_VALUES["date"],
+    "month":          "2000-01",
+    "week":           "2000-W01",
+    "time":           "00:00",
+    "datetime-local": "2000-01-01T00:00",
+    "textarea":       SAFE_VALUES["message"],
+}
+
+
+def _smart_fill_value(el, itype: str) -> str:
+    """
+    Gap 7: Katana-style smart fill value selection.
+
+    Priority chain (first match wins):
+      1. HTML `autocomplete` attribute — the browser's own semantic hint
+      2. HTML `type` attribute — email/url/tel/number/date have defined formats
+      3. Fuzzy match on name + id + placeholder + aria-label token
+      4. Generic text fallback: "test"
+
+    Returns a fill value that:
+      - Passes basic client-side format validation (type=email needs @, etc.)
+      - Is obviously fake (domain .invalid, all-zero phone, "Test" names)
+      - Never contains real PII
+    """
+    # 1. autocomplete attribute → most specific semantic hint
+    try:
+        ac = (el.get_attribute("autocomplete") or "").strip().lower()
+        # Strip "section-foo " prefix and "shipping " / "billing " modifiers
+        ac_tokens = ac.split()
+        for tok in reversed(ac_tokens):
+            if tok in _AUTOCOMPLETE_FILL:
+                return _AUTOCOMPLETE_FILL[tok]
+    except Exception:
+        pass
+
+    # 2. HTML input type — ONLY for semantically specific types that imply a
+    #    format constraint (email needs @, url needs scheme, etc.).
+    #    Generic types (text, textarea, number) defer to token matching below
+    #    so that a field named "first_name" with type="text" still gets "Test"
+    #    rather than the bland "test" fallback.
+    _SPECIFIC_INPUT_TYPES: Set[str] = {
+        "email", "url", "tel", "date", "month", "week",
+        "time", "datetime-local", "search",
+    }
+    type_val = itype.strip().lower()
+    if type_val in _SPECIFIC_INPUT_TYPES and type_val in _INPUT_TYPE_FILL:
+        return _INPUT_TYPE_FILL[type_val]
+
+    # 3. Token fuzzy match (name + id + placeholder + aria-label)
+    #    Runs for ALL types — including generic text/number/textarea.
+    try:
+        token = _field_token(el)  # function defined below — forward ref is fine
+
+        # Substring matches that must run BEFORE key-scan because they are
+        # more specific than a short key that would fire too broadly.
+        # e.g. "first_name" contains "first" → given_name, not "name" → Test User
+        if any(x in token for x in ("first", "given")):
+            return SAFE_VALUES["given_name"]
+        if any(x in token for x in ("last", "family", "surname")):
+            return SAFE_VALUES["family_name"]
+        if "birth" in token or "dob" in token:
+            return SAFE_VALUES["birth_date"]
+        if "zip" in token or "postal" in token or "postcode" in token:
+            return SAFE_VALUES["postal_code"]
+        if "street" in token or "addr" in token:
+            return SAFE_VALUES["address"]
+        if "city" in token or "town" in token:
+            return SAFE_VALUES["city"]
+        if "country" in token:
+            return SAFE_VALUES["country"]
+        if "company" in token or "employer" in token:
+            return SAFE_VALUES["company"]
+        if "org" in token and "organi" not in token:
+            # "org" alone or "org_name" → company; but "organization" has its own key below
+            return SAFE_VALUES["company"]
+        if "job" in token or "position" in token or "role" in token:
+            return SAFE_VALUES["job_title"]
+        if "age" in token:
+            return SAFE_VALUES["age"]
+        if "qty" in token or "quantity" in token:
+            return SAFE_VALUES["quantity"]
+        if "username" in token or "user_name" in token or "userid" in token:
+            return SAFE_VALUES["username"]
+
+        # Exact key match — now runs after the high-specificity checks above
+        for key in SAFE_VALUES:
+            if key.startswith("_"):
+                continue
+            if key in token:
+                return SAFE_VALUES[key]
+    except Exception:
+        pass
+
+    # 4. Type-based fallback — now only reached when token matching found nothing.
+    #    For text/number/textarea, this is the final safety net before the
+    #    ultimate generic fallback.
+    if type_val in _INPUT_TYPE_FILL:
+        return _INPUT_TYPE_FILL[type_val]
+
+    # 5. Ultimate generic fallback
+    return SAFE_VALUES["_text"]
 
 
 # ── Classification patterns ───────────────────────────────────────────────────
@@ -672,14 +902,13 @@ class FormInteractor:
                 ):
                     continue
 
-                # Number fields: use "1" as fill value
-                if itype == "number":
-                    fill_val = SAFE_VALUES["_number"]
-                elif itype in ("url",):
-                    fill_val = SAFE_VALUES["url"]
-                elif itype in ("tel",):
-                    fill_val = SAFE_VALUES["tel"]
-                else:
+                # Gap 7: Smart fill value — type+autocomplete+token-aware.
+                # _smart_fill_value() picks the best realistic-looking fake
+                # value for this specific field; overrides the generic fallback.
+                fill_val = _smart_fill_value(inp, itype)
+
+                # Sanity fallback: field_res.fill_value is still valid when set
+                if not fill_val:
                     fill_val = field_res.fill_value or SAFE_VALUES["_text"]
 
                 try:
