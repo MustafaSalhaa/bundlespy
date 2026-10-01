@@ -791,11 +791,16 @@ EXTRACT_ROUTES_JS = """
         }
     } catch(e) {}
 
-    // Anchor links
+    // Anchor links — preserve query strings so filter URLs like
+    // /projects?category=E-Commerce are discovered (Katana gap fix)
     document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
         try {
             const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
-            if (h && h.startsWith('/') && !h.startsWith('//')) add(h.split('?')[0].split('#')[0]);
+            if (!h || h.startsWith('//') || h.startsWith('http') || h.startsWith('#') || h.startsWith('javascript:') || h.startsWith('mailto:')) return;
+            if (h.startsWith('/')) {
+                // Strip fragment but keep query string — /projects?category=foo is a real URL
+                add(h.split('#')[0]);
+            }
         } catch(e) {}
     });
 
@@ -804,10 +809,67 @@ EXTRACT_ROUTES_JS = """
         ['data-route','data-path','routerLink'].forEach(attr => {
             try {
                 const v = el.getAttribute(attr);
-                if (v && v.startsWith('/')) add(v.split('?')[0]);
+                if (v && v.startsWith('/')) add(v.split('#')[0]);
             } catch(e) {}
         });
     });
+
+    // link[rel] tags — manifest, canonical, alternate (Katana gap fix)
+    // Katana picks up /site.webmanifest via link[rel=manifest]; we were missing it
+    document.querySelectorAll('link[rel][href]').forEach(el => {
+        try {
+            const rel = (el.getAttribute('rel') || '').toLowerCase();
+            const h   = el.getAttribute('href') || '';
+            if (['manifest', 'canonical', 'alternate', 'sitemap'].some(r => rel.includes(r))) {
+                if (h.startsWith('/') && !h.startsWith('//')) add(h.split('#')[0]);
+            }
+        } catch(e) {}
+    });
+
+    // Vue reactive filter/tag options — scrape values from v-bind:to / :to / to attrs
+    // and from rendered filter buttons (e.g. <button @click="$router.push({query:{category:'foo'}})">)
+    // that never appear as plain hrefs but produce ?category= URLs when clicked.
+    try {
+        document.querySelectorAll('[data-category],[data-tag],[data-filter]').forEach(el => {
+            try {
+                ['data-category','data-tag','data-filter'].forEach(attr => {
+                    const v = el.getAttribute(attr);
+                    if (v) {
+                        // Attempt to reconstruct the parameterized URL from the current path
+                        const path = window.location.pathname;
+                        const param = attr.replace('data-', '');
+                        add(path + '?' + param + '=' + encodeURIComponent(v));
+                    }
+                });
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // Vue router-link :to objects — Vue compiles these into href attrs at render time,
+    // but catch any that slipped through as JSON in data attrs
+    try {
+        document.querySelectorAll('[to]').forEach(el => {
+            try {
+                const to = el.getAttribute('to') || '';
+                if (to.startsWith('/') || to.startsWith('{')) {
+                    if (to.startsWith('/')) {
+                        add(to.split('#')[0]);
+                    } else {
+                        // Try parsing {path, query} object
+                        const obj = JSON.parse(to.replace(/'/g, '"'));
+                        if (obj && obj.path) {
+                            let r = obj.path;
+                            if (obj.query && typeof obj.query === 'object') {
+                                const qs = Object.entries(obj.query).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+                                if (qs) r += '?' + qs;
+                            }
+                            add(r);
+                        }
+                    }
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
 
     return Array.from(routes).filter(r => r.length > 1).slice(0, MAX);
 })()
@@ -866,9 +928,48 @@ class AssetRegistry:
 
     @staticmethod
     def _normalize(url: str) -> str:
+        """Normalize a URL for deduplication.
+
+        Query strings are preserved when they look like content filters
+        (key=slug-value pairs such as ?category=laravel or ?tag=ai).
+        Tracking parameters (utm_*, fbclid, gclid, ref, etc.) and
+        fragments are always stripped.
+
+        This lets BundleSpy discover filter pages like
+        /projects?category=E-Commerce that Katana finds via anchor hrefs,
+        while still collapsing pagination noise like ?page=2&page=3.
+        """
+        # Tracking / noise params to always strip
+        _TRACKING = frozenset([
+            "utm_source","utm_medium","utm_campaign","utm_term","utm_content",
+            "fbclid","gclid","msclkid","_ga","ref","referrer","source",
+            "sid","session_id","timestamp","ts","t","rand","_","cb",
+        ])
         try:
             p = urlparse(url)
-            return urlunparse((p.scheme, p.netloc, p.path, "", "", "")).lower()
+            if not p.query:
+                # No query string — standard normalization (strip fragment)
+                return urlunparse((p.scheme, p.netloc, p.path, "", "", "")).lower()
+
+            # Parse query string — keep content-filter params, drop tracking noise
+            import urllib.parse as _up
+            qs_pairs = _up.parse_qsl(p.query, keep_blank_values=False)
+            kept = []
+            for k, v in qs_pairs:
+                if k.lower() in _TRACKING:
+                    continue
+                # Keep short slug-like values (category, tag, filter, sort, type, etc.)
+                # Drop long values — they're likely tokens, cursors, or encoded data
+                if len(v) <= 120:
+                    kept.append((k, v))
+
+            if not kept:
+                # All params were noise — normalize without query
+                return urlunparse((p.scheme, p.netloc, p.path, "", "", "")).lower()
+
+            # Rebuild with sorted params so ?a=1&b=2 == ?b=2&a=1
+            qs_norm = _up.urlencode(sorted(kept))
+            return urlunparse((p.scheme, p.netloc, p.path, "", qs_norm, "")).lower()
         except Exception:
             return url.lower()
 
@@ -1087,13 +1188,21 @@ class PathTrie:
         """
         Return a structural fingerprint of the URL's path.
         Numeric / UUID / frequently-varying segments are replaced with "*".
-        Query string is stripped.  Fragment is stripped.
+        Fragment is stripped.
+
+        Query strings are preserved and included in the fingerprint when
+        they contain content-filter parameters (short slug-like values).
+        This lets /projects?category=laravel and /projects?category=vuejs
+        produce distinct fingerprints so both get visited, while
+        /item/1 and /item/2 still collapse to /item/* as before.
 
         Examples::
-            /product/42          -> /product/*
-            /product/99          -> /product/*   (same fingerprint as above)
-            /user/abc-def/orders -> /user/*/orders
-            /about               -> /about        (stable, returned as-is)
+            /product/42                    -> /product/*
+            /product/99                    -> /product/*   (same fingerprint)
+            /user/abc-def/orders           -> /user/*/orders
+            /about                         -> /about        (stable, returned as-is)
+            /projects?category=laravel     -> /projects?category=laravel  (distinct)
+            /projects?category=vuejs       -> /projects?category=vuejs    (distinct)
         """
         try:
             parsed  = urlparse(url)
@@ -1102,7 +1211,10 @@ class PathTrie:
             result  = self._walk(self._root, segs, mutate=True)
             # Rebuild path from fingerprinted segments
             fingerprint_path = "/".join(result)
-            return urlunparse((parsed.scheme, parsed.netloc, fingerprint_path, "", "", ""))
+            # Preserve content-filter query strings in the fingerprint
+            # so filter pages aren't collapsed into their base path
+            qs = parsed.query or ""
+            return urlunparse((parsed.scheme, parsed.netloc, fingerprint_path, "", qs, ""))
         except Exception:
             return url
 
@@ -2384,7 +2496,16 @@ class HeadlessEngine:
         return True
 
     def _add_route(self, route: str) -> bool:
-        """Thread-safe route registration. Returns True if new."""
+        """Thread-safe route registration. Returns True if new.
+
+        Registers both the route path (for stats/coverage) and, for routes
+        that carry a query string, the full relative URL so the URL registry
+        dedup treats /projects?category=laravel as distinct from /projects.
+        """
+        # For stats/coverage: register bare path (strip query)
+        path_only = route.split("?")[0]
+        self.registry.register_route(path_only)
+        # For per-variation dedup: register the full route (with query if any)
         if self.registry.register_route(route):
             with self._lock:
                 self.routes.add(route)
@@ -3689,13 +3810,21 @@ class HeadlessEngine:
         return bool(seg_re.search(route))
 
     def _build_urls(self, routes: Set[str]) -> List[str]:
-        """Convert routes to full URLs, sorted by priority. Filters parametric routes."""
+        """Convert routes to full URLs, sorted by priority. Filters parametric routes.
+
+        Routes may be bare paths (/about), paths with query strings
+        (/projects?category=foo), or absolute URLs (https://...).
+        Query strings are preserved — they represent distinct filterable
+        pages that differ in content (Katana gap fix).
+        """
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
         urls   = []
         for route in routes:
+            # _is_parametric_route only checks path segments — strip query first
+            path_only = route.split("?")[0]
             # Skip framework-level route definitions — they're not real URLs
-            if self._is_parametric_route(route):
+            if self._is_parametric_route(path_only):
                 logger.debug("Skipping parametric route: %s", route)
                 continue
             if route.startswith("http"):
@@ -4321,14 +4450,15 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("Worker/SW extraction error %s: %s", source_url, e)
 
-        # Iframes — add same-origin ones as routes
+        # Iframes — add same-origin ones as routes (preserve query string)
         try:
             iframe_urls = self._extract_iframe_urls(page)
             parsed = urlparse(self.target_url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
             for iframe_url in iframe_urls:
                 if iframe_url.startswith(origin):
-                    new_routes.add(urlparse(iframe_url).path or "/")
+                    _ip = urlparse(iframe_url)
+                    new_routes.add((_ip.path or "/") + (("?" + _ip.query) if _ip.query else ""))
                 elif iframe_url.startswith("/"):
                     new_routes.add(iframe_url)
         except Exception as e:
@@ -4725,7 +4855,11 @@ class HeadlessEngine:
                                     _trie_filtered_count += 1
                                     continue
                                 self._trie_seen.add(fp)
-                            self._add_route(urlparse(rp_url).path or "/")
+                            _rp_parsed  = urlparse(rp_url)
+                            _rp_route   = (_rp_parsed.path or "/") + (
+                                ("?" + _rp_parsed.query) if _rp_parsed.query else ""
+                            )
+                            self._add_route(_rp_route)
                             bfs_queue.append(rp_url)
                             _rp_added_count += 1
 
@@ -4742,7 +4876,11 @@ class HeadlessEngine:
                                 _trie_filtered_count += 1
                                 continue
                             self._trie_seen.add(js_fp)
-                        self._add_route(urlparse(js_nav_url).path or "/")
+                        _jn_parsed = urlparse(js_nav_url)
+                        _jn_route  = (_jn_parsed.path or "/") + (
+                            ("?" + _jn_parsed.query) if _jn_parsed.query else ""
+                        )
+                        self._add_route(_jn_route)
                         bfs_queue.append(js_nav_url)
                         _js_nav_count += 1
 
@@ -4905,7 +5043,13 @@ class HeadlessEngine:
                                     _trie_filtered_count += 1
                                     continue
                                 self._trie_seen.add(new_fp)
-                            self._add_route(urlparse(new_url).path or "/")
+                            # Preserve query string in route registration —
+                            # /projects?category=laravel is a distinct route from /projects
+                            _parsed_new = urlparse(new_url)
+                            _route_key  = (_parsed_new.path or "/") + (
+                                ("?" + _parsed_new.query) if _parsed_new.query else ""
+                            )
+                            self._add_route(_route_key)
                             bfs_queue.append(new_url)
                             bfs_depth[new_url] = current_depth + 1
 
