@@ -5432,14 +5432,23 @@ class HeadlessEngine:
                         except Exception:
                             pass
 
-                    # Session-loss detection — if we land on a login page for
-                    # a non-login URL the session cookie is gone server-side.
-                    if _is_login_page(slot_page) and not _is_login_url(url):
+                    # Session-loss detection — only meaningful when we actually
+                    # started authenticated (self._logged_in).  An unauthenticated
+                    # scan hitting a login form is normal; flagging it as session
+                    # loss would incorrectly stop the entire parallel BFS.
+                    #
+                    # Even when authenticated, _is_login_page() alone isn't proof
+                    # of session loss — the page may embed a login modal, password-
+                    # reset widget, or SPA auth overlay on a public route.  We set
+                    # the flag only when we have a logged-in state to lose.
+                    if self._logged_in and _is_login_page(slot_page) and not _is_login_url(url):
                         if self.hooks.on_login_detected:
                             try:
                                 self.hooks.on_login_detected(slot_page)
                             except Exception:
                                 pass
+                        # Drain responses before bailing — don't skip collected data.
+                        _browser_pool.drain_thread_responses(slot)
                         _session_lost.set()
                         return [], 0, False, True
 
@@ -5530,14 +5539,14 @@ class HeadlessEngine:
 
                     if _session_lost.is_set():
                         logger.warning(
-                            "Session lost mid-crawl — stopping BFS to avoid "
-                            "silent unauthenticated crawl"
+                            "Session lost mid-crawl — login wall detected on "
+                            "authenticated session; stopping BFS"
                         )
                         if self.auth_result is not None:
                             self.auth_result["authenticated"] = False
                             self.auth_result["reason"] = (
-                                "Session lost mid-crawl — "
-                                "server invalidated the session after login"
+                                "Login wall detected mid-crawl on an "
+                                "authenticated session — session may have expired"
                             )
                         self._logged_in = False
                         break
