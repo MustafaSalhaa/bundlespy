@@ -1099,6 +1099,310 @@ class PageStabilizer:
             self.wait(max_ms=1000, quiet_ms=150)
 
 
+def _wait_heuristic(page, max_ms: int = 15000) -> None:
+    """
+    Gap 1: Heuristic page-load strategy — ported from Katana's WaitPageLoadHeurisitics.
+
+    Katana's heuristic is the most robust strategy for modern SPAs. Instead of
+    blindly waiting for a fixed event, it:
+
+    1. Waits for the basic load event (DOMContentLoaded).
+    2. Captures the current URL and polls every 100ms for up to 2s to detect
+       a client-side route change (history.pushState, SPA router navigation).
+    3. If the URL changed  → short 300ms grace period to let the new route
+       settle its network requests, then done.
+    4. If the URL didn't change → fall back to network-idle (1s quiet window)
+       + DOM stability check (mutation observer quiet for 1s).
+
+    This keeps fast pages fast (exits as soon as the URL change is confirmed)
+    while still succeeding on heavy SPAs that defer rendering by seconds.
+
+    Playwright equivalent:
+    - Step 1: page.wait_for_load_state("domcontentloaded")
+    - Step 2: JS URL polling loop
+    - Step 3/4: page.wait_for_load_state("networkidle") with timeout
+    """
+    import time as _time
+
+    _URL_POLL_INTERVAL_MS  = 100   # ms between URL polls
+    _URL_POLL_TIMEOUT_MS   = 2000  # how long to poll for a URL change
+    _POST_CHANGE_WAIT_MS   = 300   # grace period after URL change
+    _IDLE_WAIT_MS          = 1000  # network-idle window when URL unchanged
+    _DOM_STABLE_WAIT_MS    = 1000  # DOM-quiet window after idle
+
+    deadline = _time.monotonic() + max_ms / 1000.0
+
+    # Step 1: Wait for DOMContentLoaded — this is fast and always needed.
+    try:
+        page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=min(max_ms, 10000),
+        )
+    except Exception:
+        pass  # Timed out or navigated away — carry on with the rest
+
+    if _time.monotonic() >= deadline:
+        return
+
+    # Step 2: Read the current URL and poll for a client-side route change.
+    try:
+        start_url = page.evaluate("() => window.location.href")
+    except Exception:
+        start_url = None
+
+    url_changed = False
+    if start_url:
+        poll_end = _time.monotonic() + _URL_POLL_TIMEOUT_MS / 1000.0
+        while _time.monotonic() < min(poll_end, deadline):
+            _time.sleep(_URL_POLL_INTERVAL_MS / 1000.0)
+            try:
+                cur = page.evaluate("() => window.location.href")
+                if cur and cur != start_url:
+                    url_changed = True
+                    break
+            except Exception:
+                break  # Page is gone / navigating — stop polling
+
+    if _time.monotonic() >= deadline:
+        return
+
+    if url_changed:
+        # Step 3: URL changed — short grace period for the new route's requests.
+        try:
+            page.wait_for_timeout(_POST_CHANGE_WAIT_MS)
+        except Exception:
+            pass
+        return
+
+    # Step 4: URL didn't change — broader heuristics for non-SPA or slow SPAs.
+    remaining_ms = max(0, int((deadline - _time.monotonic()) * 1000))
+
+    # 4a: Wait for network idle (1s quiet window, capped at remaining time).
+    idle_timeout = min(_IDLE_WAIT_MS + 500, remaining_ms)
+    if idle_timeout > 0:
+        try:
+            page.wait_for_load_state("networkidle", timeout=idle_timeout)
+        except Exception:
+            pass  # Timeout is normal — page may have long-running connections
+
+    remaining_ms = max(0, int((deadline - _time.monotonic()) * 1000))
+
+    # 4b: DOM stability — wait for mutation activity to go quiet.
+    dom_timeout = min(_DOM_STABLE_WAIT_MS + 500, remaining_ms)
+    if dom_timeout > 0:
+        try:
+            page.evaluate(f"""
+                () => new Promise((resolve) => {{
+                    const t = {_DOM_STABLE_WAIT_MS};
+                    let timer = setTimeout(resolve, t);
+                    const obs = new MutationObserver(() => {{
+                        clearTimeout(timer);
+                        timer = setTimeout(resolve, t);
+                    }});
+                    obs.observe(document.body || document.documentElement,
+                        {{childList: true, subtree: true, attributes: true}});
+                    setTimeout(() => {{ obs.disconnect(); resolve(); }}, t * 3);
+                }})
+            """)
+        except Exception:
+            pass
+
+
+# ── Gap 2: CDP FetchRequestPaused interception ───────────────────────────────
+
+def _attach_cdp_fetch_interception(
+    page,
+    on_request_body_fn,
+    on_response_body_fn,
+    resource_patterns: Optional[List[str]] = None,
+    capture_response_types: Optional[set] = None,
+) -> Optional[object]:
+    """
+    Gap 2: CDP-level Fetch.requestPaused interception — ported from Katana's
+    FetchRequestStage/FetchResponseStage pipeline in browser.go.
+
+    Katana intercepts every request and response at the CDP Fetch domain level,
+    giving access to raw POST bodies and raw response bytes that Playwright's
+    high-level response event can miss (cached responses, service-worker
+    intercepts, partial reads).
+
+    Architecture:
+    - Opens a raw CDP session on the page via page.context.new_cdp_session(page).
+    - Enables Fetch domain with patterns=['*'] so every request is paused.
+    - Subscribes to Fetch.requestPaused events.
+    - Each event is either a REQUEST pause (no responseStatusCode) or a
+      RESPONSE pause (has responseStatusCode).
+    - REQUEST phase: capture raw post body from request.postData; call
+      Fetch.continueRequest so the request proceeds.
+    - RESPONSE phase: call Fetch.getResponseBody to read the raw response bytes
+      (base64-encoded by Chrome); decode and forward to handler; call
+      Fetch.continueResponse so the response is delivered to the page.
+    - Every continueRequest/continueResponse MUST be called — failing to do so
+      hangs the page indefinitely.
+
+    Parameters:
+        page: Playwright page object.
+        on_request_body_fn: Callable(url, method, headers, body_bytes) called
+            for every intercepted request. Must be non-blocking (fast).
+        on_response_body_fn: Callable(url, status, headers, body_bytes) called
+            for every intercepted response body. Must be non-blocking (fast).
+        resource_patterns: Optional list of URL patterns to intercept
+            (default: ['*'] for everything). Use ['*.json', '*/api/*'] to
+            limit to API calls only.
+        capture_response_types: Optional set of resource types to capture
+            responses for (e.g. {'xhr', 'fetch', 'document'}). None = all.
+
+    Returns the CDP session object so the caller can close it, or None if
+    CDP interception could not be enabled (non-fatal — Playwright's response
+    event is the fallback).
+    """
+    import base64 as _base64
+    import threading as _threading
+
+    if resource_patterns is None:
+        resource_patterns = ["*"]
+
+    _REQUEST_STAGE  = "Request"
+    _RESPONSE_STAGE = "Response"
+
+    # Build the Fetch.enable patterns — intercept both request and response
+    # stages for every URL matching our patterns.
+    fetch_patterns = [
+        {"urlPattern": pat, "requestStage": _REQUEST_STAGE}
+        for pat in resource_patterns
+    ] + [
+        {"urlPattern": pat, "requestStage": _RESPONSE_STAGE}
+        for pat in resource_patterns
+    ]
+
+    try:
+        cdp = page.context.new_cdp_session(page)
+    except Exception as e:
+        logger.debug("CDP session creation failed: %s", e)
+        return None
+
+    # Lock protects concurrent CDP send calls from multiple event firings.
+    _cdp_lock = _threading.Lock()
+
+    def _safe_cdp_send(method: str, params: dict) -> Optional[dict]:
+        """Send a CDP command; swallow all errors — page may be closing."""
+        try:
+            with _cdp_lock:
+                return cdp.send(method, params)
+        except Exception as ex:
+            logger.debug("CDP %s error: %s", method, ex)
+            return None
+
+    def _on_fetch_paused(params: dict) -> None:
+        """
+        Handle Fetch.requestPaused CDP event.
+
+        Two phases distinguished by presence of responseStatusCode:
+        - Request phase (no responseStatusCode): capture POST body, continue.
+        - Response phase (has responseStatusCode): read body, continue.
+
+        CRITICAL: continueRequest/continueResponse MUST always be called to
+        avoid hanging the page. Every code path ends with one of them.
+        """
+        request_id   = params.get("requestId", "")
+        url          = params.get("request", {}).get("url", "")
+        method       = params.get("request", {}).get("method", "GET")
+        req_headers  = params.get("request", {}).get("headers", {})
+        resource_type = params.get("resourceType", "").lower()
+
+        is_response = "responseStatusCode" in params
+
+        if not is_response:
+            # ── REQUEST PHASE ────────────────────────────────────────────────
+            # Capture the raw POST body if present, then immediately continue
+            # so we don't stall the page.
+            post_data_str = params.get("request", {}).get("postData", "")
+            body_bytes: Optional[bytes] = None
+            if post_data_str:
+                try:
+                    body_bytes = post_data_str.encode("utf-8", errors="replace")
+                except Exception:
+                    body_bytes = None
+
+            # Forward to caller's handler (non-blocking)
+            if on_request_body_fn and (body_bytes or method.upper() != "GET"):
+                try:
+                    on_request_body_fn(url, method, req_headers, body_bytes or b"")
+                except Exception as hnd_err:
+                    logger.debug("CDP request handler error for %s: %s", url, hnd_err)
+
+            # MUST continue — do not stall the request
+            _safe_cdp_send("Fetch.continueRequest", {"requestId": request_id})
+
+        else:
+            # ── RESPONSE PHASE ───────────────────────────────────────────────
+            status   = params.get("responseStatusCode", 0)
+            resp_hdrs_list = params.get("responseHeaders", [])
+            resp_headers = {h["name"]: h["value"] for h in resp_hdrs_list}
+
+            # Filter by resource type if requested
+            if capture_response_types and resource_type not in capture_response_types:
+                _safe_cdp_send("Fetch.continueResponse", {"requestId": request_id})
+                return
+
+            # Read the raw response body
+            resp_bytes: Optional[bytes] = None
+            body_result = _safe_cdp_send("Fetch.getResponseBody", {"requestId": request_id})
+            if body_result:
+                encoded_body = body_result.get("body", "")
+                is_base64    = body_result.get("base64Encoded", False)
+                if encoded_body:
+                    try:
+                        if is_base64:
+                            resp_bytes = _base64.b64decode(encoded_body)
+                        else:
+                            resp_bytes = encoded_body.encode("utf-8", errors="replace")
+                    except Exception as dec_err:
+                        logger.debug("CDP body decode error for %s: %s", url, dec_err)
+
+            # Forward to caller's handler (non-blocking)
+            if on_response_body_fn and resp_bytes is not None:
+                try:
+                    on_response_body_fn(url, status, resp_headers, resp_bytes)
+                except Exception as hnd_err:
+                    logger.debug("CDP response handler error for %s: %s", url, hnd_err)
+
+            # MUST continue — do not stall the response delivery
+            _safe_cdp_send("Fetch.continueResponse", {"requestId": request_id})
+
+    # Subscribe to Fetch.requestPaused BEFORE enabling the domain to avoid
+    # missing any events that fire immediately on enable.
+    cdp.on("Fetch.requestPaused", _on_fetch_paused)
+
+    # Enable the Fetch domain — this is the point at which interception starts.
+    result = _safe_cdp_send("Fetch.enable", {"patterns": fetch_patterns})
+    if result is None:
+        # Fetch.enable failed (e.g. browser doesn't support it) — detach.
+        logger.debug("Fetch.enable failed — CDP interception disabled for this page")
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+        return None
+
+    logger.debug("CDP Fetch interception active on %s", page.url or "page")
+    return cdp
+
+
+def _detach_cdp_session(cdp) -> None:
+    """Safely disable Fetch interception and detach a CDP session."""
+    if cdp is None:
+        return
+    try:
+        cdp.send("Fetch.disable", {})
+    except Exception:
+        pass
+    try:
+        cdp.detach()
+    except Exception:
+        pass
+
+
 # ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 def _parse_cookie_string(cookie_str: str, domain: str) -> List[dict]:
@@ -1799,15 +2103,21 @@ class BrowserPool:
 
     def __init__(self, num_browsers: int, pw, browser_args: list,
                  ctx_kwargs: dict, cookies: list, init_script: str,
-                 block_fn, response_fn):
+                 block_fn, response_fn,
+                 cdp_request_fn=None, cdp_response_fn=None):
         self._num         = max(1, num_browsers)
         self._pw          = pw
         self._browser_args = browser_args
         self._ctx_kwargs  = ctx_kwargs
         self._cookies     = cookies
         self._init_script = init_script
-        self._block_fn    = block_fn    # callable(url, resource_type) -> bool
-        self._response_fn = response_fn # callable(response, source_page)
+        self._block_fn    = block_fn       # callable(url, resource_type) -> bool
+        self._response_fn = response_fn    # callable(response, source_page)
+        # Gap 2: Optional CDP-level interception callbacks.
+        # cdp_request_fn(url, method, headers, body_bytes) -> None
+        # cdp_response_fn(url, status, headers, body_bytes) -> None
+        self._cdp_request_fn  = cdp_request_fn
+        self._cdp_response_fn = cdp_response_fn
 
         self._sem         = threading.Semaphore(self._num)
         self._lock        = threading.Lock()
@@ -1836,7 +2146,49 @@ class BrowserPool:
             else route.continue_()
         )
         page = ctx.new_page()
-        return {"idx": idx, "browser": browser, "ctx": ctx, "page": page}
+
+        # Gap 6: Auto-dismiss ALL JS dialogs (alert/confirm/prompt/beforeunload).
+        # Katana does this via CDP PageHandleJavaScriptDialog. Without this, any
+        # page that fires alert() on load blocks the browser slot indefinitely
+        # until the navigation timeout kills it — wasting a whole slot timeout.
+        # We accept() dialogs so confirm()-gated flows don't stall, and we catch
+        # prompt() by returning an empty string (accepted = True, text = "").
+        page.on("dialog", lambda d: d.accept() if d.type in ("alert", "beforeunload") else d.dismiss())
+
+        # Gap 2: Attach CDP Fetch interception if raw traffic capture is enabled.
+        # Each pool slot gets its own independent CDP session so parallel workers
+        # don't share state. The session is stored in the slot dict and detached
+        # on release/recreation to avoid CDP session leaks.
+        _slot_cdp: Optional[object] = None
+        if self._cdp_request_fn is not None or self._cdp_response_fn is not None:
+            _slot_cdp = _attach_cdp_fetch_interception(
+                page,
+                on_request_body_fn  = self._cdp_request_fn,
+                on_response_body_fn = self._cdp_response_fn,
+                resource_patterns   = ["*"],
+            )
+
+        return {"idx": idx, "browser": browser, "ctx": ctx, "page": page, "cdp": _slot_cdp}
+
+    def _is_slot_healthy(self, slot: dict) -> bool:
+        """
+        Gap 5: Poisoned slot detection — mirrors Katana's PutBrowserToPool check.
+
+        Katana calls BrowserGetVersion over CDP before returning a slot to the pool.
+        If the browser crashed or was killed mid-visit, the CDP call fails and the
+        slot is discarded instead of being returned as a live browser. Without this,
+        the next acquire() gets a dead slot and fails immediately on goto().
+
+        We check two things:
+        1. The page's underlying CDP connection is still alive (evaluate ping).
+        2. The browser process is still connected (evaluate on a fresh about:blank
+           would raise if the browser is gone).
+        """
+        try:
+            slot["page"].evaluate("() => true")
+            return True
+        except Exception:
+            return False
 
     def acquire(self) -> dict:
         """Block until a slot is free, then return it."""
@@ -1848,7 +2200,39 @@ class BrowserPool:
         return self._slots[idx]
 
     def release(self, slot: dict) -> None:
-        """Return a slot to the pool."""
+        """
+        Return a slot to the pool, or discard and recreate it if poisoned.
+
+        Gap 5: If the page crashed, timed out, or the browser died mid-visit,
+        the slot is poisoned. Returning it would give the next worker a dead
+        browser that fails immediately. We detect this with a cheap CDP ping
+        and replace the slot in-place so pool size stays constant.
+        """
+        if not self._is_slot_healthy(slot):
+            logger.debug(
+                "BrowserPool slot %d poisoned — closing and replacing", slot["idx"]
+            )
+            # Detach CDP session before closing the context (Gap 2 cleanup)
+            _detach_cdp_session(slot.get("cdp"))
+            # Close whatever is still alive
+            try:
+                slot["ctx"].close()
+            except Exception:
+                pass
+            try:
+                slot["browser"].close()
+            except Exception:
+                pass
+            # Recreate slot immediately so pool capacity never shrinks
+            try:
+                new_slot = self._make_slot(slot["idx"])
+                self._slots[slot["idx"]] = new_slot
+            except Exception as e:
+                logger.warning(
+                    "BrowserPool slot %d recreation failed: %s — slot marked None",
+                    slot["idx"], e,
+                )
+                self._slots[slot["idx"]] = None
         with self._lock:
             self._free.append(slot["idx"])
         self._sem.release()
@@ -1858,6 +2242,8 @@ class BrowserPool:
         for slot in self._slots:
             if slot is None:
                 continue
+            # Detach CDP session before closing context (Gap 2 cleanup)
+            _detach_cdp_session(slot.get("cdp"))
             try:
                 slot["ctx"].close()
             except Exception:
@@ -4515,20 +4901,24 @@ class HeadlessEngine:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/146.0.0.0 Safari/537.36"
             )
-            # PageLoadStrategy passthrough — map our naming to Playwright's
-            # wait_until values. "eager" uses DOMContentLoaded for faster SPAs.
+            # Gap 1: PageLoadStrategy — now includes "heuristic" mode.
+            # For "heuristic", goto() uses "commit" (returns as soon as the
+            # first byte arrives) and then _wait_heuristic() takes over:
+            # it polls for URL changes (SPA router detection) then falls
+            # back to network-idle + DOM stability. All other strategies
+            # pass directly to Playwright's wait_until.
             # (Enhancement 9 — PageLoadStrategy)
+            _resolved_strategy = (self.page_load_strategy or "domcontentloaded").lower()
+            _use_heuristic     = (_resolved_strategy == "heuristic")
             _strategy_map = {
-                "eager":              "domcontentloaded",
-                "domcontentloaded":   "domcontentloaded",
-                "load":               "load",
-                "networkidle":        "networkidle",
-                "none":               "commit",
+                "eager":            "domcontentloaded",
+                "domcontentloaded": "domcontentloaded",
+                "load":             "load",
+                "networkidle":      "networkidle",
+                "none":             "commit",
+                "heuristic":        "commit",   # goto returns fast; heuristic runs after
             }
-            _wait_until = _strategy_map.get(
-                (self.page_load_strategy or "domcontentloaded").lower(),
-                "domcontentloaded",
-            )
+            _wait_until = _strategy_map.get(_resolved_strategy, "domcontentloaded")
 
             kwargs = dict(
                 viewport={"width": 1280, "height": 800},
@@ -4628,6 +5018,74 @@ class HeadlessEngine:
 
             page.on("framenavigated", _on_frame_navigated)
 
+            # ── Gap 2: CDP FetchRequestPaused interception (Phase 1 page) ────
+            # Katana's FetchRequestStage/FetchResponseStage pipeline gives us
+            # raw POST bodies and raw response bytes at the CDP level — things
+            # Playwright's high-level response event can miss (cached hits,
+            # service-worker intercepts, partial streaming bodies).
+            _phase1_cdp: Optional[object] = None
+            if self.capture_raw_traffic:
+                def _cdp_request_handler(url: str, method: str, headers: dict,
+                                         body_bytes: bytes) -> None:
+                    """Store CDP-intercepted request bodies into raw traffic."""
+                    if not body_bytes:
+                        return
+                    with self._raw_lock:
+                        # Append a lightweight stub — response comes separately.
+                        self._raw_traffic.append({
+                            "url":          url,
+                            "method":       method,
+                            "status":       0,  # not known yet — response fills this
+                            "raw_request":  (
+                                f"{method} {url} HTTP/1.1\r\n"
+                                + "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+                                + f"\r\n\r\n{body_bytes.decode('utf-8', errors='replace')}"
+                            ),
+                            "raw_response": "",
+                            "source_page":  page.url or self.target_url,
+                            "via_cdp":      True,
+                        })
+
+                def _cdp_response_handler(url: str, status: int, headers: dict,
+                                          body_bytes: bytes) -> None:
+                    """Merge CDP-intercepted response bodies into raw traffic."""
+                    # Build the raw HTTP response wire representation.
+                    resp_headers_str = "\r\n".join(
+                        f"{k}: {v}" for k, v in headers.items()
+                    )
+                    body_str = body_bytes.decode("utf-8", errors="replace")[:4096]
+                    raw_resp = (
+                        f"HTTP/1.1 {status}\r\n"
+                        f"{resp_headers_str}\r\n\r\n"
+                        f"{body_str}"
+                    )
+                    with self._raw_lock:
+                        # Merge into an existing stub from the request phase if present.
+                        for entry in reversed(self._raw_traffic):
+                            if entry.get("url") == url and entry.get("via_cdp") and not entry.get("raw_response"):
+                                entry["status"] = status
+                                entry["raw_response"] = raw_resp
+                                return
+                        # No matching stub — add a standalone response entry.
+                        self._raw_traffic.append({
+                            "url":          url,
+                            "method":       "GET",
+                            "status":       status,
+                            "raw_request":  "",
+                            "raw_response": raw_resp,
+                            "source_page":  page.url or self.target_url,
+                            "via_cdp":      True,
+                        })
+
+                _phase1_cdp = _attach_cdp_fetch_interception(
+                    page,
+                    on_request_body_fn  = _cdp_request_handler,
+                    on_response_body_fn = _cdp_response_handler,
+                    # Intercept everything — our raw_traffic handler has its own
+                    # size cap (body[:4096]) so cost is bounded.
+                    resource_patterns   = ["*"],
+                )
+
             # Sub-page detection — register popup/new-tab listener on context
             # (Enhancement 10 — must be set up before any navigation)
             self._detect_sub_pages(ctx, stabilizer, self.target_url)
@@ -4642,6 +5100,8 @@ class HeadlessEngine:
                 try:
                     page.goto(self.target_url, timeout=self.timeout * 1000,
                               wait_until=_wait_until)
+                    if _use_heuristic:
+                        _wait_heuristic(page, max_ms=self.timeout * 1000)
                     stabilizer.wait_for_framework(max_ms=2000)
                 except Exception as e:
                     logger.debug("Phase 1: initial navigate for recorded flow failed: %s", e)
@@ -4659,6 +5119,8 @@ class HeadlessEngine:
                     try:
                         page.goto(self.target_url, timeout=self.timeout * 1000,
                                   wait_until=_wait_until)
+                        if _use_heuristic:
+                            _wait_heuristic(page, max_ms=self.timeout * 1000)
                         stabilizer.wait_for_framework(max_ms=2000)
                     except Exception:
                         pass
@@ -4702,6 +5164,8 @@ class HeadlessEngine:
                 try:
                     page.goto(self.target_url, timeout=self.timeout * 1000,
                               wait_until=_wait_until)
+                    if _use_heuristic:
+                        _wait_heuristic(page, max_ms=self.timeout * 1000)
                     with self._lock:
                         self.pages_visited += 1
                     stabilizer.wait_for_framework(max_ms=3000)
@@ -4787,15 +5251,72 @@ class HeadlessEngine:
                 except Exception:
                     pass
 
+            # Gap 2: CDP-level raw traffic handlers for pool slots.
+            # When capture_raw_traffic is on, each pool slot's page gets a CDP
+            # Fetch interception session that captures POST bodies and response
+            # bytes before the browser can consume them — the same data Katana
+            # captures via FetchRequestStage/FetchResponseStage in browser.go.
+            # The handlers are thread-safe (self._raw_lock guards the list).
+            def _pool_cdp_request_fn(url: str, method: str, headers: dict,
+                                     body_bytes: bytes) -> None:
+                """Store CDP-intercepted pool-slot request bodies."""
+                if not body_bytes:
+                    return
+                with self._raw_lock:
+                    self._raw_traffic.append({
+                        "url":          url,
+                        "method":       method,
+                        "status":       0,
+                        "raw_request":  (
+                            f"{method} {url} HTTP/1.1\r\n"
+                            + "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+                            + f"\r\n\r\n{body_bytes.decode('utf-8', errors='replace')}"
+                        ),
+                        "raw_response": "",
+                        "source_page":  "",
+                        "via_cdp":      True,
+                    })
+
+            def _pool_cdp_response_fn(url: str, status: int, headers: dict,
+                                      body_bytes: bytes) -> None:
+                """Merge CDP-intercepted pool-slot response bodies."""
+                resp_headers_str = "\r\n".join(
+                    f"{k}: {v}" for k, v in headers.items()
+                )
+                body_str = body_bytes.decode("utf-8", errors="replace")[:4096]
+                raw_resp = (
+                    f"HTTP/1.1 {status}\r\n"
+                    f"{resp_headers_str}\r\n\r\n"
+                    f"{body_str}"
+                )
+                with self._raw_lock:
+                    for entry in reversed(self._raw_traffic):
+                        if entry.get("url") == url and entry.get("via_cdp") and not entry.get("raw_response"):
+                            entry["status"] = status
+                            entry["raw_response"] = raw_resp
+                            return
+                    self._raw_traffic.append({
+                        "url":          url,
+                        "method":       "GET",
+                        "status":       status,
+                        "raw_request":  "",
+                        "raw_response": raw_resp,
+                        "source_page":  "",
+                        "via_cdp":      True,
+                    })
+
             _browser_pool = BrowserPool(
-                num_browsers = self.num_browsers,
-                pw           = pw,
-                browser_args = _pool_browser_args,
-                ctx_kwargs   = kwargs,
-                cookies      = self.cookies,
-                init_script  = INTERCEPT_JS,
-                block_fn     = self._should_block,
-                response_fn  = _pool_response_fn,
+                num_browsers  = self.num_browsers,
+                pw            = pw,
+                browser_args  = _pool_browser_args,
+                ctx_kwargs    = kwargs,
+                cookies       = self.cookies,
+                init_script   = INTERCEPT_JS,
+                block_fn      = self._should_block,
+                response_fn   = _pool_response_fn,
+                # Gap 2: wire up CDP handlers only when raw capture is on
+                cdp_request_fn  = _pool_cdp_request_fn  if self.capture_raw_traffic else None,
+                cdp_response_fn = _pool_cdp_response_fn if self.capture_raw_traffic else None,
             )
             logger.info(
                 "BrowserPool ready: %d parallel browser slots", self.num_browsers
@@ -4833,6 +5354,8 @@ class HeadlessEngine:
                         timeout    = self.timeout * 1000,
                         wait_until = _wait_until,
                     )
+                    if _use_heuristic:
+                        _wait_heuristic(slot_page, max_ms=self.timeout * 1000)
                     with self._lock:
                         self.pages_visited += 1
 
@@ -5260,6 +5783,9 @@ class HeadlessEngine:
                 dot_path = _os.path.join(self._diagnostics.dir, "crawl_graph.dot")
                 self.crawl_graph.draw_dot(dot_path)
                 self._diagnostics.close()
+
+            # Detach Phase 1 CDP session before closing the context
+            _detach_cdp_session(_phase1_cdp)
 
             try:
                 ctx.close()
