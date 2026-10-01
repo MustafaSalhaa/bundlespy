@@ -89,6 +89,7 @@ def compute_coverage(
     headless_stats:      dict = None,
     sm_details:          dict = None,
     visited_pages:       set  = None,
+    max_pages:           int  = 0,
 ) -> CoverageReport:
     """
     Build a coverage report from real observed scan data.
@@ -160,8 +161,13 @@ def compute_coverage(
     routes_discovered = has_headless_routes if has_headless_routes else len(route_eps)
     routes_visited    = hs.get("pages", 0) if headless_used else pages_crawled
 
-    # Unvisited = discovered but not visited (max_pages limit or errors)
-    unvisited = max(0, routes_discovered - routes_visited)
+    # Unvisited = only meaningful if the max_pages cap was actually hit.
+    # A simple routes_discovered - routes_visited subtraction is misleading —
+    # routes can be "not visited" due to DOM dedup, trie filtering, scope checks,
+    # or because they were JS-extracted paths that don't map 1:1 to crawl pages.
+    # We only flag unvisited routes when the crawler actually hit its page cap.
+    _hit_page_cap = (max_pages > 0 and routes_visited >= max_pages)
+    unvisited = max(0, routes_discovered - routes_visited) if _hit_page_cap else 0
 
     routes = RouteStats(
         discovered    = routes_discovered,
@@ -250,12 +256,13 @@ def compute_coverage(
             mitigation  = "Re-run with --source-maps to attempt recovery of original pre-minification source.",
         ))
 
-    # Routes not visited due to max-pages
-    if routes.unvisited > 0:
+    # Routes not visited — only fire when the page cap was the actual cause.
+    # If the user set --max-pages 1000 and the site has 20 pages, this is silent.
+    if routes.unvisited > 0 and _hit_page_cap:
         blind_spots.append(BlindSpot(
             severity    = "LOW",
-            description = f"{routes.unvisited} discovered route(s) not visited — increase --max-pages",
-            mitigation  = f"Re-run with --max-pages {max(500, routes_discovered * 2)}",
+            description = f"{routes.unvisited} discovered route(s) not visited — page cap ({max_pages}) was reached",
+            mitigation  = f"Re-run with --max-pages {max(max_pages * 2, routes_discovered * 2)}",
         ))
 
     # No headless
