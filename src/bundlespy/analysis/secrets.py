@@ -231,13 +231,19 @@ _PARTIAL_SECRET_PREFIXES = [
     ("re_",          "RESEND_API_KEY",      "Resend API key prefix"),
     ("pk.eyJ1",      "MAPBOX_ACCESS_TOKEN", "Mapbox public token prefix"),
     ("sk.eyJ1",      "MAPBOX_SECRET_TOKEN", "Mapbox secret token prefix"),
+    ("hf_",          "HUGGINGFACE_TOKEN",    "Hugging Face API token prefix"),
+    ("r8_",          "REPLICATE_API_KEY",    "Replicate API token prefix"),
+    ("sk-ant-",      "ANTHROPIC_API_KEY",    "Anthropic API key prefix"),
+    ("glpat-",       "GITLAB_TOKEN",         "GitLab personal access token prefix"),
+    ("xoxb-",        "SLACK_BOT_TOKEN",      "Slack bot token prefix"),
+    ("xoxp-",        "SLACK_TOKEN",          "Slack user token prefix"),
+    ("SG.",          "SENDGRID_API_KEY",     "SendGrid API key prefix"),
+    ("pypi-",        "PYPI_TOKEN",           "PyPI API token prefix"),
+    ("npm_",         "NPM_TOKEN",            "npm access token prefix"),
+    ("pcsk_",        "PINECONE_API_KEY",     "Pinecone API key prefix"),
+    ("sk-or-",       "OPENROUTER_API_KEY",   "OpenRouter API key prefix"),
+    ("sk-svcacct-",  "OPENAI_SVCACCT_KEY",  "OpenAI service account key prefix"),
 ]
-
-# Pattern: prefix followed by concatenation with a variable (not a string literal)
-_RE_CONCAT = re.compile(
-    r'["\x27`]({prefix})["\x27`]\s*\+\s*(?:[A-Za-z_$][A-Za-z0-9_$]*|`\$\{{)'
-)
-
 
 def _find_partial_secrets(content: str, file_url: str, source_page: str) -> List[Finding]:
     """
@@ -250,18 +256,25 @@ def _find_partial_secrets(content: str, file_url: str, source_page: str) -> List
 
     for prefix, rule_id, description in _PARTIAL_SECRET_PREFIXES:
         pattern = re.compile(
+            r'(?:'
+            # String concat: "sk_live_" + varName
             r'["\x27`](' + re.escape(prefix) + r')["\x27`]\s*\+\s*'
             r'(?:[A-Za-z_$][A-Za-z0-9_$]*|\$\{[^}]+\})'
+            r'|'
+            # Template literal: `sk_live_${varName}`
+            r'`(' + re.escape(prefix) + r')\$\{[A-Za-z_$][A-Za-z0-9_$.]*\}`'
+            r')'
         )
         for m in pattern.finditer(content):
-            dedup_key = f"PARTIAL:{rule_id}:{m.group(1)}"
+            matched_prefix = m.group(1) or m.group(2)
+            dedup_key = f"PARTIAL:{rule_id}:{matched_prefix}"
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
 
             line_no = _get_line_number(content, m.start())
             context = _get_context(content, m.start())
-            finding_id = Finding.make_id(f"PARTIAL_{rule_id}", prefix, file_url)
+            finding_id = Finding.make_id(f"PARTIAL_{rule_id}", matched_prefix, file_url)
 
             findings.append(Finding(
                 id                   = finding_id,
@@ -274,11 +287,11 @@ def _find_partial_secrets(content: str, file_url: str, source_page: str) -> List
                 source_page          = source_page,
                 line_number          = line_no,
                 column               = m.start() - content.rfind("\n", 0, m.start()),
-                matched_value        = prefix,
-                redacted_value       = prefix,
-                sha256               = hashlib.sha256(f"PARTIAL_{rule_id}:{prefix}:{file_url}".encode()).hexdigest(),
+                matched_value        = matched_prefix,
+                redacted_value       = matched_prefix,
+                sha256               = hashlib.sha256(f"PARTIAL_{rule_id}:{matched_prefix}:{file_url}".encode()).hexdigest(),
                 context              = context,
-                description          = f"Secret prefix '{prefix}' found concatenated with a variable - full secret assembled at runtime.",
+                description          = f"Secret prefix '{matched_prefix}' found concatenated with a variable - full secret assembled at runtime.",
                 impact               = "",
                 remediation          = "Trace the variable to find the full secret. Runtime-assembled secrets are still secrets.",
                 false_positive_notes = "Prefix concatenation is deliberate obfuscation in some cases.",
@@ -357,13 +370,34 @@ def load_rules(rules_path: Optional[str] = None) -> List[SecretRule]:
         except re.error as e:
             logger.warning("Invalid regex in rule %s: %s", raw.get("id"), e)
 
+    # Deduplicate: warn on duplicate rule IDs, keep last definition (most specific)
+    seen_ids: Dict[str, int] = {}
+    deduped: List[SecretRule] = []
+    for rule in rules:
+        if rule.id in seen_ids:
+            logger.warning(
+                "Duplicate rule ID '%s' — keeping later definition (line ~%d overrides line ~%d)",
+                rule.id, len(deduped), seen_ids[rule.id],
+            )
+            # Replace earlier entry
+            deduped[seen_ids[rule.id]] = rule
+        else:
+            seen_ids[rule.id] = len(deduped)
+            deduped.append(rule)
+    rules = deduped
+
     logger.info("Loaded %d secret detection rules", len(rules))
     return rules
 
 
-# Pattern to detect process.env.SECRET_NAME references
+# Pattern to detect env var references across Node.js, Vite/SvelteKit/Astro, and Deno
 _RE_ENV_NAME = re.compile(
-    r'process\.env\.([A-Z][A-Z0-9_]{2,})',
+    r'(?:'
+    r'process\.env\.([A-Z][A-Z0-9_]{2,})'                    # Node.js: process.env.SECRET
+    r'|process\.env\[["\x27]([A-Z][A-Z0-9_]{2,})["\x27]\]'  # Node.js bracket: process.env["SECRET"]
+    r'|import\.meta\.env\.([A-Z][A-Z0-9_]{2,})'              # Vite/SvelteKit/Astro: import.meta.env.VITE_KEY
+    r'|Deno\.env\.get\(["\x27]([A-Z][A-Z0-9_]{2,})["\x27]\)'# Deno: Deno.env.get("SECRET")
+    r')',
 )
 
 # ENV_NAME finding rule_id constant
@@ -385,7 +419,10 @@ def _decode_b64_chunks(content: str) -> List[Tuple[str, int]]:
         if len(raw) % 4 not in (0, 2, 3):
             continue
         try:
-            decoded = base64.b64decode(raw + "==").decode("utf-8", errors="strict")
+            try:
+                decoded = base64.b64decode(raw + "==").decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                decoded = base64.b64decode(raw + "==").decode("latin-1", errors="ignore")
             if decoded and len(decoded) >= 20:
                 results.append((decoded, m.start()))
         except Exception:
@@ -532,7 +569,9 @@ class SecretScanner:
 
         # ENV_NAME detection: flag process.env.SECRET_NAME references
         for match in _RE_ENV_NAME.finditer(content):
-            env_name = match.group(1)
+            env_name = match.group(1) or match.group(2) or match.group(3) or match.group(4)
+            if not env_name:
+                continue
             sha256 = hashlib.sha256(f"{_ENV_NAME_RULE_ID}:{env_name}".encode()).hexdigest()
             if sha256 in seen:
                 continue
