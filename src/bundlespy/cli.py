@@ -123,8 +123,8 @@ other:
                      help="Click buttons and fill forms to trigger lazy-loaded JS (default: on)")
     _hg.add_argument("--no-interact", dest="interact", action="store_false",
                      help="Disable page interaction - safer for production-sensitive targets")
-    _hg.add_argument("--workers",     type=int, default=3, metavar="N",
-                     help="Concurrent browser workers for headless scan (default: 3)")
+    _hg.add_argument("--workers",     type=int, default=5, metavar="N",
+                     help="Parallel browser instances for headless scan (default: 5; lower to 1-2 if WAF is active)")
     _hg.add_argument("--forms",       dest="forms_mode", action="store_true", default=False,
                      help=(
                          "Tier 2 form interaction: fill POST forms classified as safe\n"
@@ -812,7 +812,8 @@ def run_scan(args) -> int:
             external_seen = crawler_seen,
             seed_urls     = all_seed_urls,
             interact      = getattr(args, "interact", True),
-            workers       = getattr(args, "workers", 3),
+            workers       = getattr(args, "workers", 5),
+            num_browsers  = getattr(args, "workers", 5),
             cookies       = _playwright_cookies,
             extra_headers = extra_headers,
             seen_hashes   = _crawler_js_hashes,
