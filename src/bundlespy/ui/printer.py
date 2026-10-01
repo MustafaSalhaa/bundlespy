@@ -61,7 +61,7 @@ def print_header(target, mode="Active", scope="Strict", version="1.0.0", author=
     _p()
     _p(f"  {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
     _p(f"  {A.GREY}{_line()}{A.RESET}")
-    _p(f"  {_label('Target')}{A.CYAN}{target[:_w()-22]}{A.RESET}")
+    _p(f"  {_label('Target')}{A.CYAN}{target}{A.RESET}")
     _p(f"  {_label('Mode')}{mode}")
     _p(f"  {_label('Scope')}{scope}")
     _p(f"  {_label('Started')}{A.GREY}{ts}{A.RESET}")
@@ -447,7 +447,7 @@ def _print_intelligence(intel):
     if intel.sitemap_urls:
         _p(f"  {_label('Sitemap URLs')}{len(intel.sitemap_urls)}")
         for url in intel.sitemap_urls[:8]:
-            _p(f"  {A.GREY}  • {url[:_w()-8]}{A.RESET}")
+            _p(f"  {A.GREY}  • {url}{A.RESET}")
         if len(intel.sitemap_urls) > 8:
             _p(f"  {A.GREY}  ... and {len(intel.sitemap_urls)-8} more{A.RESET}")
 
@@ -551,7 +551,7 @@ def _print_finding(f, verbose=False):
     _p(f"  {sc}{f.severity:<8}{A.RESET}  {A.WHITE}{A.BOLD}{f.title}{A.RESET}  {A.GREY}({f.rule_id}){A.RESET}")
     _p()
 
-    url = f.file_url[:_w()-6]
+    url = f.file_url
     occ = getattr(f, "occurrences", None) or []
     if len(occ) > 1:
         _p(f"  {_label('Location')}{url}  {A.GREY}line {f.line_number}{A.RESET}  {A.YELLOW}(+{len(occ)-1} more pages){A.RESET}")
@@ -852,7 +852,7 @@ def print_attack_surface(surface):
             return
         _p(f"  {color}{A.BOLD}{title}{A.RESET}  {A.GREY}({len(items)}){A.RESET}")
         for it in items[:15]:
-            path = it.endpoint_url[:_w()-30]
+            path = it.endpoint_url
             _p(f"  {A.GREY}  {it.method:<6}{A.RESET} {path}")
             _p(f"  {A.GREY}         param: {A.RESET}{color}{it.param_name}{A.RESET}  {A.GREY}{it.reason}{A.RESET}")
         if len(items) > 15:
@@ -871,7 +871,7 @@ def print_attack_surface(surface):
         _p(f"  {A.PURPLE}{A.BOLD}STATE-CHANGING ENDPOINTS{A.RESET}  {A.GREY}({len(sc)}){A.RESET}")
         for ep in sc[:15]:
             mc = A.RED if ep.method in ("DELETE", "PUT") else A.ORANGE
-            _p(f"  {mc}  {ep.method:<6}{A.RESET} {ep.url[:_w()-14]}")
+            _p(f"  {mc}  {ep.method:<6}{A.RESET} {ep.url}")
         if len(sc) > 15:
             _p(f"  {A.GREY}  ... and {len(sc)-15} more{A.RESET}")
         _p()
@@ -915,7 +915,7 @@ def print_endpoints(endpoints, validation_results=None, verbose=False):
             if shown >= limit:
                 break
             method = (ep.method or "?").ljust(6)
-            url    = ep.url[:_w()-20]
+            url    = ep.url
             vr     = val_map.get(ep.url)
 
             # Color method by type
@@ -1063,7 +1063,7 @@ def print_graphql(schemas):
     _p(f"  {_label('Queries')}{sum(len(s.queries) for s in schemas if not s.error)}")
     _p(f"  {_label('Mutations')}{sum(len(s.mutations) for s in schemas if not s.error)}")
     for schema in schemas:
-        _p(f"\n  {A.WHITE}{schema.endpoint[:_w()-4]}{A.RESET}")
+        _p(f"\n  {A.WHITE}{schema.endpoint}{A.RESET}")
         if schema.error:
             _p(f"  {A.GREY}  {schema.error}{A.RESET}")
             continue
@@ -1118,7 +1118,7 @@ def print_validation_results(results):
         sc = (A.GREEN if r.status_code == 200 else
               A.YELLOW if r.status_code in (301,302,307) else
               A.RED if r.status_code in (401,403) else A.GREY)
-        url   = r.endpoint[:_w()-20]
+        url   = r.endpoint
         notes = " | ".join(r.notes[:2]) if r.notes else ""
         _p(f"  {sc}{r.status_code}{A.RESET}  {url}  {A.GREY}{notes}{A.RESET}")
     _p()
