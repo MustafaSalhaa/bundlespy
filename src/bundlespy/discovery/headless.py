@@ -2392,6 +2392,14 @@ class HeadlessEngine:
         self._rp_discovered: List[str] = []
         self._rp_lock: threading.Lock  = threading.Lock()
 
+        # Background JS fetch threads — _flush_page_intel() spawns daemon threads
+        # to fetch <script src>, ES modules, workers, and service workers off the
+        # Playwright thread.  We track every thread here so run() can join them all
+        # after Phase 3 before taking the final js_files snapshot, preventing the
+        # "0 JS" race where threads finish after the stats are already logged.
+        self._bg_fetch_threads: List[threading.Thread] = []
+        self._bg_fetch_lock:    threading.Lock          = threading.Lock()
+
         self.registry    = AssetRegistry(external_seen)
         # Pre-seed content hash registry with hashes from crawler
         for h in self.seen_hashes:
@@ -4793,9 +4801,15 @@ class HeadlessEngine:
             sw_urls     = self._extract_sw_urls(page)
             import threading as _t
             for w_url in worker_urls:
-                _t.Thread(target=self._fetch_worker_js, args=(w_url, source_url), daemon=True).start()
+                _th = _t.Thread(target=self._fetch_worker_js, args=(w_url, source_url), daemon=True)
+                _th.start()
+                with self._bg_fetch_lock:
+                    self._bg_fetch_threads.append(_th)
             for sw_url in sw_urls:
-                _t.Thread(target=self._fetch_service_worker, args=(sw_url, source_url), daemon=True).start()
+                _th = _t.Thread(target=self._fetch_service_worker, args=(sw_url, source_url), daemon=True)
+                _th.start()
+                with self._bg_fetch_lock:
+                    self._bg_fetch_threads.append(_th)
         except Exception as e:
             logger.debug("Worker/SW extraction error %s: %s", source_url, e)
 
@@ -4839,11 +4853,14 @@ class HeadlessEngine:
             _dom_script_urls = self._collect_dom_script_urls(page)
             if _dom_script_urls:
                 import threading as _t
-                _t.Thread(
+                _th = _t.Thread(
                     target=self._fetch_dom_scripts,
                     args=(_dom_script_urls, source_url),
                     daemon=True,
-                ).start()
+                )
+                _th.start()
+                with self._bg_fetch_lock:
+                    self._bg_fetch_threads.append(_th)
         except Exception as e:
             logger.debug("DOM scrape error %s: %s", source_url, e)
 
@@ -4854,11 +4871,14 @@ class HeadlessEngine:
             if _module_urls:
                 import threading as _t
                 for _murl in _module_urls:
-                    _t.Thread(
+                    _th = _t.Thread(
                         target=self._fetch_es_module,
                         args=(_murl, source_url, 0),
                         daemon=True,
-                    ).start()
+                    )
+                    _th.start()
+                    with self._bg_fetch_lock:
+                        self._bg_fetch_threads.append(_th)
         except Exception as e:
             logger.debug("ES module collection error %s: %s", source_url, e)
 
@@ -5871,6 +5891,22 @@ class HeadlessEngine:
                 dot_path = _os.path.join(self._diagnostics.dir, "crawl_graph.dot")
                 self.crawl_graph.draw_dot(dot_path)
                 self._diagnostics.close()
+
+            # Join all background JS fetch threads before taking the stats
+            # snapshot.  _flush_page_intel() fires daemon threads to fetch
+            # <script src>, ES modules, workers, and service workers off the
+            # Playwright thread.  Without this barrier those threads can still
+            # be running when len(self.js_files) is read, producing "0 JS" in
+            # the headless summary while the JS analysis stage sees all 5 files
+            # ~300ms later.
+            with self._bg_fetch_lock:
+                _pending_threads = list(self._bg_fetch_threads)
+            for _bgt in _pending_threads:
+                try:
+                    _bgt.join(timeout=15)
+                except Exception:
+                    pass
+            logger.debug("Background JS fetch barrier: joined %d threads", len(_pending_threads))
 
             # Detach Phase 1 CDP session before closing the context
             _detach_cdp_session(_phase1_cdp)
