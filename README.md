@@ -41,22 +41,23 @@ BundleSpy brings crawling, JavaScript analysis, browser-based discovery, source-
 
 ---
 
-## What it finds
+## What It Finds
 
-| What | Examples |
-|------|---------|
-| Cloud credentials | AWS keys, Azure secrets, GCP tokens, GitHub tokens, GitLab tokens |
-| Payment and messaging | Stripe keys, Slack tokens, Twilio, SendGrid |
-| JWT tokens | Decoded locally - algorithm, expiry, claims |
-| Private keys | RSA, EC, OpenSSH |
-| Database strings | PostgreSQL, MySQL, MongoDB, Redis connection URLs |
-| Cloud storage | S3 bucket URLs, Azure Blob, Google Cloud Storage |
-| API endpoints | Internal routes, admin paths, hidden API surfaces |
-| Infrastructure | Private IPs, internal hostnames, staging environments |
-| GraphQL | Full schema via introspection - queries, mutations, sensitive fields |
-| Subdomains | Extracted from JS content and CT logs via crt.sh |
-| Historical secrets | Old JS from Wayback Machine and CommonCrawl |
-| Live traffic | XHR, fetch, WebSocket calls intercepted from real browser session |
+| Category                | What BundleSpy Looks For                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Cloud credentials**   | AWS keys, Azure credentials, GCP tokens, GitHub tokens, GitLab tokens, and other cloud or source-control credentials.                                  |
+| **Payment & messaging** | Stripe keys, Slack tokens, Twilio credentials, SendGrid API keys, and other third-party service credentials.                                           |
+| **JWT tokens**          | JWTs decoded locally to inspect the algorithm, expiration, claims, and other metadata.                                                                 |
+| **Private keys**        | RSA, EC, OpenSSH, and other exposed private-key material.                                                                                              |
+| **Database strings**    | PostgreSQL, MySQL, MongoDB, Redis, and other database connection strings and URLs.                                                                     |
+| **Cloud storage**       | S3 buckets, Azure Blob Storage, Google Cloud Storage, and other cloud storage references.                                                              |
+| **API endpoints**       | Internal APIs, admin routes, hidden endpoints, parameters, and other API surfaces referenced by the application.                                       |
+| **Infrastructure**      | Private IP addresses, internal hostnames, staging/development environments, service URLs, and other infrastructure details.                            |
+| **GraphQL**             | GraphQL endpoints and, when introspection is available, schemas, queries, mutations, types, arguments, and fields.                                     |
+| **Subdomains**          | Subdomains discovered from JavaScript content and certificate transparency sources such as `crt.sh`.                                                   |
+| **Historical assets**   | Older JavaScript and application files from the Wayback Machine and Common Crawl, including potentially forgotten routes, configurations, and secrets. |
+| **Live traffic**        | XHR, fetch, WebSocket, dynamically loaded resources, and other requests observed during a real browser session.                                        |
+
 
 <img width="1263" height="971" alt="Demo sc" src="https://github.com/user-attachments/assets/af12e926-2c76-4dc6-ab1f-83725f6b0bcd" />
 
