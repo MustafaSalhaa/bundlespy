@@ -31,6 +31,7 @@ class Fetcher:
         user_agent: str = USER_AGENT,
         stealth: bool = False,
         extra_headers: dict = None,
+        verify_ssl: bool = False,
     ):
         self.timeout           = timeout
         self.max_response_size = max_response_size
@@ -42,6 +43,10 @@ class Fetcher:
         self.extra_headers     = extra_headers or {}
         self._last_request     = 0.0
         self._current_ua       = random_ua() if stealth else user_agent
+        # SSL verification: on by default. Pass verify_ssl=False for targets with
+        # self-signed certs (--no-verify CLI flag). Warnings suppressed regardless
+        # since urllib3 warns even for verify=True on some cert chains.
+        self.verify_ssl        = verify_ssl
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -104,7 +109,7 @@ class Fetcher:
             resp = self.session.get(
                 url,
                 timeout=self.timeout,
-                verify=False,
+                verify=self.verify_ssl,
                 allow_redirects=True,
                 stream=True,
                 headers=headers,
@@ -135,6 +140,10 @@ class Fetcher:
 
         except requests.exceptions.SSLError as e:
             logger.warning("SSL error for %s: %s", url, e)
+            if self.verify_ssl:
+                logger.info(
+                    "Hint: if this target uses a self-signed cert, retry with --no-verify"
+                )
             return None, 0, "", ""
         except requests.exceptions.ConnectionError as e:
             logger.warning("Connection error for %s: %s", url, e)
@@ -177,7 +186,7 @@ class Fetcher:
             resp = self.session.get(
                 url,
                 timeout=self.timeout,
-                verify=False,
+                verify=self.verify_ssl,
                 allow_redirects=True,
                 stream=True,
                 headers=headers,
