@@ -831,14 +831,30 @@ def print_attack_surface(surface):
     total = surface.get("total_items", 0)
     _section("ATTACK SURFACE", str(total), A.RED)
 
-    # Summary bar
+    # Summary bar - all categories
     parts = []
     for key, label, color in [
-        ("idor", "IDOR", A.RED),
-        ("injection", "Injection", A.ORANGE),
-        ("file_ops", "LFI/Path", A.ORANGE),
-        ("ssrf", "SSRF", A.YELLOW),
-        ("open_redirect", "Open Redirect", A.YELLOW),
+        ("idor",            "IDOR",             A.RED),
+        ("injection",       "Injection",        A.ORANGE),
+        ("file_ops",        "LFI/Path",         A.ORANGE),
+        ("ssrf",            "SSRF",             A.YELLOW),
+        ("open_redirect",   "Open Redirect",    A.YELLOW),
+        ("mass_assign",     "Mass Assign",      A.ORANGE),
+        ("privilege_surface","Privilege",       A.RED),
+        ("graphql_surface", "GraphQL",          A.PURPLE),
+        ("websocket_surface","WebSocket",       A.CYAN),
+        ("infra_surface",   "Infra",            A.YELLOW),
+        ("import_export",   "Import/Export",    A.ORANGE),
+        ("payment_surface", "Payment",          A.RED),
+        ("proto_pollution", "Proto Pollution",  A.RED),
+        ("xxe_surface",     "XXE",              A.ORANGE),
+        ("business_logic",  "Business Logic",   A.RED),
+        ("oauth_surface",   "OAuth",            A.ORANGE),
+        ("session_fixation","Session Fixation", A.YELLOW),
+        ("method_override", "Method Override",  A.YELLOW),
+        ("exposed_files",   "Exposed Files",    A.RED),
+        ("deserialization", "Deserial",         A.RED),
+        ("privesc_chain",   "Privesc Chain",    A.RED),
     ]:
         n = len(surface.get(key, []))
         if n:
@@ -859,11 +875,32 @@ def print_attack_surface(surface):
             _p(f"  {A.GREY}  ... and {len(items)-15} more{A.RESET}")
         _p()
 
-    _print_group(surface.get("idor", []), "IDOR CANDIDATES", A.RED)
-    _print_group(surface.get("injection", []), "INJECTION CANDIDATES", A.ORANGE)
-    _print_group(surface.get("file_ops", []), "PATH TRAVERSAL / LFI", A.ORANGE)
-    _print_group(surface.get("ssrf", []), "SSRF CANDIDATES", A.YELLOW)
-    _print_group(surface.get("open_redirect", []), "OPEN REDIRECT", A.YELLOW)
+    # Original categories
+    _print_group(surface.get("idor", []),           "IDOR CANDIDATES",          A.RED)
+    _print_group(surface.get("injection", []),       "INJECTION CANDIDATES",     A.ORANGE)
+    _print_group(surface.get("file_ops", []),        "PATH TRAVERSAL / LFI",     A.ORANGE)
+    _print_group(surface.get("ssrf", []),            "SSRF CANDIDATES",          A.YELLOW)
+    _print_group(surface.get("open_redirect", []),   "OPEN REDIRECT",            A.YELLOW)
+
+    # First-wave additive categories
+    _print_group(surface.get("mass_assign", []),      "MASS ASSIGNMENT",         A.ORANGE)
+    _print_group(surface.get("privilege_surface", []),"PRIVILEGE ESCALATION",    A.RED)
+    _print_group(surface.get("graphql_surface", []),  "GRAPHQL SURFACE",         A.PURPLE)
+    _print_group(surface.get("websocket_surface", []),"WEBSOCKET SURFACE",       A.CYAN)
+    _print_group(surface.get("infra_surface", []),    "INFRASTRUCTURE",          A.YELLOW)
+    _print_group(surface.get("import_export", []),    "IMPORT / EXPORT",         A.ORANGE)
+    _print_group(surface.get("payment_surface", []),  "PAYMENT SURFACE",         A.RED)
+
+    # New passive detectors
+    _print_group(surface.get("proto_pollution", []),  "PROTOTYPE POLLUTION",     A.RED)
+    _print_group(surface.get("xxe_surface", []),      "XXE SURFACE",             A.ORANGE)
+    _print_group(surface.get("business_logic", []),   "BUSINESS LOGIC",          A.RED)
+    _print_group(surface.get("oauth_surface", []),    "OAUTH MISCONFIG",         A.ORANGE)
+    _print_group(surface.get("session_fixation", []), "SESSION FIXATION",        A.YELLOW)
+    _print_group(surface.get("method_override", []),  "HTTP METHOD OVERRIDE",    A.YELLOW)
+    _print_group(surface.get("exposed_files", []),    "EXPOSED FILES",           A.RED)
+    _print_group(surface.get("deserialization", []),  "DESERIALIZATION",         A.RED)
+    _print_group(surface.get("privesc_chain", []),    "PRIVESC CHAIN",           A.RED)
 
     # State-changing endpoints
     sc = surface.get("state_change", [])
