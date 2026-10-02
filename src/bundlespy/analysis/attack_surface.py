@@ -196,6 +196,97 @@ _GRAPHQL_PATH_SEGS: Set[str] = {"graphql", "gql"}
 # WebSocket indicators
 _WS_KINDS: Set[str] = {"websocket", "ws"}
 
+# Prototype pollution - dangerous keys that modify object prototypes
+_PROTO_POLLUTION_KEYS: Set[str] = {_norm(x) for x in {
+    "__proto__", "constructor", "prototype",
+    "__defineGetter__", "__defineSetter__",
+    "__lookupGetter__", "__lookupSetter__",
+}}
+
+# XXE - XML/SOAP content types and path markers
+_XXE_CONTENT_TYPES: Set[str] = {
+    "text/xml", "application/xml", "application/soap+xml",
+    "application/xhtml+xml", "application/atom+xml",
+}
+_XXE_PATH_SEGS: Set[str] = {
+    "soap", "wsdl", "xml", "xmlrpc", "xmlapi",
+}
+
+# Business logic - price/quantity params on checkout/cart endpoints
+_PRICE_PARAM_HINTS: Set[str] = {_norm(x) for x in {
+    "price", "amount", "total", "subtotal", "cost",
+    "unitprice", "finalprice", "charge",
+}}
+_QTY_PARAM_HINTS: Set[str] = {_norm(x) for x in {
+    "qty", "quantity", "count", "units",
+}}
+_COUPON_PARAM_HINTS: Set[str] = {_norm(x) for x in {
+    "coupon", "couponcode", "promo", "promocode", "voucher",
+    "vouchercode", "discount", "discountcode", "referral",
+    "giftcard", "redeemcode",
+}}
+_CHECKOUT_PATH_SEGS: Set[str] = {
+    "checkout", "cart", "order", "orders", "purchase",
+    "payment", "pay", "billing", "basket",
+}
+
+# OAuth - redirect_uri and state patterns
+_OAUTH_REDIRECT_HINTS: Set[str] = {_norm(x) for x in {
+    "redirect_uri", "redirecturi", "redirect_url", "redirecturl",
+    "callback_url", "callbackurl",
+}}
+_OAUTH_PATH_SEGS: Set[str] = {
+    "oauth", "oauth2", "authorize", "auth", "connect",
+    "callback", "token",
+}
+
+# Session fixation - session IDs in URL query/path params (not cookies)
+_SESSION_PARAM_HINTS: Set[str] = {_norm(x) for x in {
+    "sessionid", "session_id", "sid", "jsessionid",
+    "phpsessid", "aspsessionid", "auth_token", "authtoken",
+    "access_token", "accesstoken",
+}}
+
+# HTTP method override - header-based method override
+_METHOD_OVERRIDE_HEADERS: Set[str] = {
+    "x-http-method-override", "x-method-override",
+    "x-http-method", "_method",
+}
+
+# Exposed sensitive files - backup/git/env path patterns
+_BACKUP_EXTENSIONS: Set[str] = {
+    ".bak", ".old", ".backup", ".swp", ".orig",
+    ".copy", ".tmp", ".save", "~",
+}
+_GIT_EXPOSE_PATHS: Set[str] = {
+    ".git", ".svn", ".hg", ".bzr", "cvs",
+}
+_ENV_EXPOSE_PATHS: Set[str] = {
+    ".env", ".env.local", ".env.production", ".env.development",
+    "config.json", "config.yaml", "config.yml",
+    "secrets.yaml", "secrets.yml", "secrets.json",
+    ".aws/credentials", "database.yml", "settings.py",
+    "appsettings.json", "web.config",
+}
+
+# Deserialization - content-type patterns and param names
+_DESER_CONTENT_TYPES: Set[str] = {
+    "application/x-java-serialized-object",
+    "application/x-www-form-urlencoded",  # PHP/Java serialize in POST body
+}
+_DESER_PARAM_HINTS: Set[str] = {_norm(x) for x in {
+    "viewstate", "__viewstate", "__viewstategenerator",
+    "serialized", "data", "payload", "object",
+    "session", "token", "blob", "pickle", "jar",
+}}
+_DESER_VALUE_PATTERNS = [
+    re.compile(r"^rO0[A-Za-z0-9+/=]{4,}"),   # Java serialized (base64 rO0)
+    re.compile(r"^a:[0-9]+:\{"),              # PHP serialize array
+    re.compile(r"^O:[0-9]+:\""),              # PHP serialize object
+    re.compile(r"^gASV"),                     # Python pickle base64
+    re.compile(r"^AAEAAAD"),                  # .NET BinaryFormatter base64
+]
+
 # Sensitive operation verbs
 _SENSITIVE_VERBS: Set[str] = {
     "delete", "remove", "destroy", "drop", "purge", "wipe",
@@ -1227,6 +1318,525 @@ def _detect_payment_surface(
     )
 
 
+# ── New detectors ─────────────────────────────────────────────────────────────
+
+def _detect_prototype_pollution(
+    ep, method: str, path: str,
+    params: List[Tuple[str, str, Optional[str]]],
+    sources: List[str], seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """Prototype pollution - __proto__, constructor, prototype in params."""
+    items: List[AttackSurfaceItem] = []
+    for location, pname, pvalue in params:
+        norm = _norm_name(pname)
+        if norm not in _PROTO_POLLUTION_KEYS:
+            continue
+        key = _dedup_key("PROTO_POLLUTION", path, pname, location, method)
+        if key in seen:
+            continue
+        seen.add(key)
+        base_confidence = 75  # any of these keys is almost certainly intentional
+        confidence = min(base_confidence + _source_confidence_boost(sources), 92)
+        items.append(AttackSurfaceItem(
+            endpoint_url=ep.url,
+            method=method,
+            param_name=pname,
+            vuln_class="PROTOTYPE_POLLUTION",
+            reason=f"{location} param '{pname}': prototype-polluting key in request - object property injection surface",
+            priority=_confidence_to_priority(confidence),
+            source_file=getattr(ep, "source_file", "") or "",
+            param_location=location,
+            sub_class="PROTO_KEY_IN_REQUEST",
+            confidence=confidence,
+            status=SurfaceStatus.CANDIDATE,
+            evidence_sources=list(sources),
+            provenance=",".join(sources),
+        ))
+    return items
+
+
+def _detect_xxe_surface(
+    ep, method: str, path: str, segs: List[str],
+    sources: List[str], seen: Set[str],
+) -> Optional[AttackSurfaceItem]:
+    """XXE - XML content-type endpoints and SOAP/XML path markers."""
+    content_type = (getattr(ep, "content_type", "") or "").lower().strip()
+    # Also check request_headers dict for Content-Type
+    req_headers = getattr(ep, "request_headers", None) or {}
+    if isinstance(req_headers, dict):
+        ct_header = req_headers.get("Content-Type", "") or req_headers.get("content-type", "")
+        if ct_header:
+            content_type = ct_header.lower().strip()
+
+    has_xml_ct   = any(ct in content_type for ct in _XXE_CONTENT_TYPES)
+    # Check exact segment match OR segment contains an XXE keyword (e.g. service.wsdl, xmlrpc.php)
+    has_xml_path = _path_contains_any(segs, _XXE_PATH_SEGS) or any(
+        any(kw in seg for kw in _XXE_PATH_SEGS) for seg in segs
+    )
+
+    if not (has_xml_ct or has_xml_path):
+        return None
+
+    key = f"xxe:{method}:{path}"
+    if key in seen:
+        return None
+    seen.add(key)
+
+    base_confidence = 70 if has_xml_ct else 55
+    if has_xml_ct and has_xml_path:
+        base_confidence = 78
+    confidence = min(base_confidence + _source_confidence_boost(sources), 90)
+
+    reason = "XML content-type endpoint" if has_xml_ct else f"SOAP/XML path segment '/{segs[-1]}'"
+    return AttackSurfaceItem(
+        endpoint_url=ep.url,
+        method=method,
+        param_name="(xml body)",
+        vuln_class="XXE",
+        reason=f"{reason} - external entity injection surface",
+        priority=_confidence_to_priority(confidence),
+        source_file=getattr(ep, "source_file", "") or "",
+        param_location="body",
+        sub_class="XXE_CANDIDATE",
+        confidence=confidence,
+        status=SurfaceStatus.CANDIDATE,
+        evidence_sources=list(sources),
+        provenance=",".join(sources),
+    )
+
+
+def _detect_business_logic(
+    ep, method: str, path: str, segs: List[str],
+    params: List[Tuple[str, str, Optional[str]]],
+    sources: List[str], seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """Price/quantity tampering, coupon abuse, negative value surface."""
+    items: List[AttackSurfaceItem] = []
+    on_checkout_path = _path_contains_any(segs, _CHECKOUT_PATH_SEGS)
+
+    for location, pname, pvalue in params:
+        norm = _norm_name(pname)
+
+        sub_class      = ""
+        base_confidence = 0
+        reason_str     = ""
+
+        if norm in _PRICE_PARAM_HINTS:
+            sub_class = "PRICE_TAMPERING"
+            base_confidence = 55 if on_checkout_path else 38
+            reason_str = f"{location} param '{pname}': price/amount field - tampering and negative-value surface"
+            # Negative value signal
+            if pvalue and re.match(r"^-\d+", pvalue.strip()):
+                base_confidence += 15
+                reason_str += " (observed negative value)"
+                sub_class = "NEGATIVE_VALUE"
+        elif norm in _QTY_PARAM_HINTS and on_checkout_path:
+            sub_class = "PRICE_TAMPERING"
+            base_confidence = 52
+            reason_str = f"{location} param '{pname}': quantity field on checkout - manipulation surface"
+            if pvalue and re.match(r"^-\d+", pvalue.strip()):
+                base_confidence += 12
+                sub_class = "NEGATIVE_VALUE"
+        elif norm in _COUPON_PARAM_HINTS:
+            sub_class = "COUPON_ABUSE"
+            base_confidence = 58 if on_checkout_path else 42
+            reason_str = f"{location} param '{pname}': coupon/promo/discount code - abuse and stacking surface"
+        else:
+            continue
+
+        key = _dedup_key("BUSINESS_LOGIC", path, pname, location, method)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        confidence = min(base_confidence + _source_confidence_boost(sources), 88)
+        items.append(AttackSurfaceItem(
+            endpoint_url=ep.url,
+            method=method,
+            param_name=pname,
+            vuln_class="BUSINESS_LOGIC",
+            reason=reason_str,
+            priority=_confidence_to_priority(confidence),
+            source_file=getattr(ep, "source_file", "") or "",
+            param_location=location,
+            sub_class=sub_class,
+            confidence=confidence,
+            status=SurfaceStatus.CANDIDATE,
+            evidence_sources=list(sources),
+            provenance=",".join(sources),
+        ))
+    return items
+
+
+def _detect_oauth_misconfig(
+    ep, method: str, path: str, segs: List[str],
+    params: List[Tuple[str, str, Optional[str]]],
+    sources: List[str], seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """OAuth misconfig - redirect_uri without strict matching, missing state, implicit flow."""
+    items: List[AttackSurfaceItem] = []
+    on_oauth_path = _path_contains_any(segs, _OAUTH_PATH_SEGS)
+
+    # Check for redirect_uri param
+    for location, pname, pvalue in params:
+        norm = _norm_name(pname)
+
+        if norm in _OAUTH_REDIRECT_HINTS:
+            key = _dedup_key("OAUTH_MISCONFIG", path, pname, location, method)
+            if key in seen:
+                continue
+            seen.add(key)
+            base_confidence = 65 if on_oauth_path else 48
+            reason_str = f"{location} param '{pname}': OAuth redirect_uri - open redirect and authorization code interception surface"
+            if pvalue and _RE_URL_VALUE.match(pvalue):
+                base_confidence += 12
+            confidence = min(base_confidence + _source_confidence_boost(sources), 88)
+            items.append(AttackSurfaceItem(
+                endpoint_url=ep.url,
+                method=method,
+                param_name=pname,
+                vuln_class="OAUTH_MISCONFIG",
+                reason=reason_str,
+                priority=_confidence_to_priority(confidence),
+                source_file=getattr(ep, "source_file", "") or "",
+                param_location=location,
+                sub_class="REDIRECT_URI_PARAM",
+                confidence=confidence,
+                status=SurfaceStatus.CANDIDATE,
+                evidence_sources=list(sources),
+                provenance=",".join(sources),
+            ))
+
+    # Missing state param on OAuth authorize endpoint - emit endpoint-level signal
+    if on_oauth_path and "authorize" in segs:
+        param_names_norm = {_norm_name(p) for _, p, _ in params}
+        has_state = "state" in param_names_norm
+        if not has_state:
+            key = f"oauth_nostate:{method}:{path}"
+            if key not in seen:
+                seen.add(key)
+                confidence = min(60 + _source_confidence_boost(sources), 82)
+                items.append(AttackSurfaceItem(
+                    endpoint_url=ep.url,
+                    method=method,
+                    param_name="(missing state param)",
+                    vuln_class="OAUTH_MISCONFIG",
+                    reason="OAuth authorize endpoint missing 'state' parameter - CSRF on authorization flow",
+                    priority=_confidence_to_priority(confidence),
+                    source_file=getattr(ep, "source_file", "") or "",
+                    param_location="query",
+                    sub_class="MISSING_STATE_PARAM",
+                    confidence=confidence,
+                    status=SurfaceStatus.CANDIDATE,
+                    evidence_sources=list(sources),
+                    provenance=",".join(sources),
+                ))
+
+    # Implicit flow (response_type=token)
+    for location, pname, pvalue in params:
+        if _norm_name(pname) == "responsetype" and pvalue and pvalue.lower() == "token":
+            key = f"oauth_implicit:{method}:{path}"
+            if key not in seen:
+                seen.add(key)
+                confidence = min(68 + _source_confidence_boost(sources), 85)
+                items.append(AttackSurfaceItem(
+                    endpoint_url=ep.url,
+                    method=method,
+                    param_name=pname,
+                    vuln_class="OAUTH_MISCONFIG",
+                    reason=f"response_type=token signals implicit OAuth flow - access token in URL fragment, no PKCE",
+                    priority=_confidence_to_priority(confidence),
+                    source_file=getattr(ep, "source_file", "") or "",
+                    param_location=location,
+                    sub_class="IMPLICIT_FLOW",
+                    confidence=confidence,
+                    status=SurfaceStatus.CANDIDATE,
+                    evidence_sources=list(sources),
+                    provenance=",".join(sources),
+                ))
+    return items
+
+
+def _detect_session_fixation(
+    ep, method: str, path: str,
+    params: List[Tuple[str, str, Optional[str]]],
+    sources: List[str], seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """Session fixation - session/auth tokens appearing in URL params (not cookies)."""
+    items: List[AttackSurfaceItem] = []
+    for location, pname, pvalue in params:
+        # Only flag when token is in query or path - NOT body (body tokens are expected)
+        if location == "body":
+            continue
+        norm = _norm_name(pname)
+        if norm not in _SESSION_PARAM_HINTS:
+            continue
+        key = _dedup_key("SESSION_FIXATION", path, pname, location, method)
+        if key in seen:
+            continue
+        seen.add(key)
+        # URL-based session tokens are HIGH risk - they leak in logs, referrer, etc.
+        base_confidence = 70 if location == "query" else 60
+        confidence = min(base_confidence + _source_confidence_boost(sources), 88)
+        items.append(AttackSurfaceItem(
+            endpoint_url=ep.url,
+            method=method,
+            param_name=pname,
+            vuln_class="SESSION_FIXATION",
+            reason=f"{location} param '{pname}': session/auth token in URL - fixation, log exposure, referrer leak surface",
+            priority=_confidence_to_priority(confidence),
+            source_file=getattr(ep, "source_file", "") or "",
+            param_location=location,
+            sub_class="TOKEN_IN_URL",
+            confidence=confidence,
+            status=SurfaceStatus.CANDIDATE,
+            evidence_sources=list(sources),
+            provenance=",".join(sources),
+        ))
+    return items
+
+
+def _detect_method_override(
+    ep, method: str, path: str, segs: List[str],
+    sources: List[str], seen: Set[str],
+) -> Optional[AttackSurfaceItem]:
+    """HTTP method override - X-HTTP-Method-Override accepted (PUT/DELETE via POST)."""
+    req_headers = getattr(ep, "request_headers", None) or {}
+    if not isinstance(req_headers, dict):
+        return None
+
+    # Check both header names and values for override signals
+    header_keys_norm = {k.lower() for k in req_headers.keys()}
+    has_override = any(h in header_keys_norm for h in _METHOD_OVERRIDE_HEADERS)
+
+    # Also detect _method query/body param pattern (Rails, etc.)
+    # We check params via a secondary pass only if not already seen
+    if not has_override:
+        # Check for _method in query params via request_headers hint
+        # If explicitly listed as an accepted header, flag it
+        return None
+
+    key = f"method_override:{method}:{path}"
+    if key in seen:
+        return None
+    seen.add(key)
+
+    confidence = min(65 + _source_confidence_boost(sources), 85)
+    return AttackSurfaceItem(
+        endpoint_url=ep.url,
+        method=method,
+        param_name="(X-HTTP-Method-Override)",
+        vuln_class="METHOD_OVERRIDE",
+        reason="Endpoint accepts X-HTTP-Method-Override header - PUT/DELETE tunneled via POST, filter bypass surface",
+        priority=_confidence_to_priority(confidence),
+        source_file=getattr(ep, "source_file", "") or "",
+        param_location="header",
+        sub_class="METHOD_OVERRIDE_HEADER",
+        confidence=confidence,
+        status=SurfaceStatus.CANDIDATE,
+        evidence_sources=list(sources),
+        provenance=",".join(sources),
+    )
+
+
+def _detect_exposed_files(
+    ep, method: str, path: str,
+    sources: List[str], seen: Set[str],
+) -> Optional[AttackSurfaceItem]:
+    """Backup files, git exposure, environment file exposure via path patterns."""
+    path_lower = path.lower()
+
+    # Check for git/SVN/VCS exposure
+    for marker in _GIT_EXPOSE_PATHS:
+        if f"/{marker}" in path_lower or path_lower.startswith(marker):
+            key = f"git_expose:{path}"
+            if key in seen:
+                return None
+            seen.add(key)
+            confidence = min(80 + _source_confidence_boost(sources), 95)
+            return AttackSurfaceItem(
+                endpoint_url=ep.url,
+                method=method,
+                param_name=f"({marker} exposure)",
+                vuln_class="GIT_EXPOSURE",
+                reason=f"VCS directory '{marker}' reachable via HTTP - source code and history disclosure",
+                priority=_confidence_to_priority(confidence),
+                source_file=getattr(ep, "source_file", "") or "",
+                param_location="path",
+                sub_class="VCS_EXPOSURE",
+                confidence=confidence,
+                status=SurfaceStatus.CANDIDATE,
+                evidence_sources=list(sources),
+                provenance=",".join(sources),
+            )
+
+    # Check for env/config file exposure
+    for marker in _ENV_EXPOSE_PATHS:
+        if path_lower.endswith(marker) or f"/{marker}" in path_lower:
+            key = f"env_expose:{path}"
+            if key in seen:
+                return None
+            seen.add(key)
+            confidence = min(82 + _source_confidence_boost(sources), 95)
+            return AttackSurfaceItem(
+                endpoint_url=ep.url,
+                method=method,
+                param_name=f"({marker})",
+                vuln_class="ENV_EXPOSURE",
+                reason=f"Environment/config file '{marker}' reachable - secrets, credentials, database config disclosure",
+                priority=_confidence_to_priority(confidence),
+                source_file=getattr(ep, "source_file", "") or "",
+                param_location="path",
+                sub_class="ENV_FILE_EXPOSURE",
+                confidence=confidence,
+                status=SurfaceStatus.CANDIDATE,
+                evidence_sources=list(sources),
+                provenance=",".join(sources),
+            )
+
+    # Check for backup file extensions
+    for ext in _BACKUP_EXTENSIONS:
+        if path_lower.endswith(ext):
+            key = f"backup_expose:{path}"
+            if key in seen:
+                return None
+            seen.add(key)
+            confidence = min(72 + _source_confidence_boost(sources), 90)
+            return AttackSurfaceItem(
+                endpoint_url=ep.url,
+                method=method,
+                param_name=f"(backup file {ext})",
+                vuln_class="BACKUP_EXPOSURE",
+                reason=f"Backup file with extension '{ext}' reachable - source code or data disclosure",
+                priority=_confidence_to_priority(confidence),
+                source_file=getattr(ep, "source_file", "") or "",
+                param_location="path",
+                sub_class="BACKUP_FILE",
+                confidence=confidence,
+                status=SurfaceStatus.CANDIDATE,
+                evidence_sources=list(sources),
+                provenance=",".join(sources),
+            )
+
+    return None
+
+
+def _detect_deserialization(
+    ep, method: str, path: str,
+    params: List[Tuple[str, str, Optional[str]]],
+    sources: List[str], seen: Set[str],
+) -> Optional[AttackSurfaceItem]:
+    """Deserialization - Java serialized objects, pickle, PHP serialize patterns."""
+    content_type = (getattr(ep, "content_type", "") or "").lower().strip()
+    req_headers = getattr(ep, "request_headers", None) or {}
+    if isinstance(req_headers, dict):
+        ct_header = req_headers.get("Content-Type", "") or req_headers.get("content-type", "")
+        if ct_header:
+            content_type = ct_header.lower().strip()
+
+    has_java_ct = "java-serialized" in content_type or "x-java" in content_type
+
+    # Check param values for serialized object patterns
+    deser_param = None
+    for location, pname, pvalue in params:
+        norm = _norm_name(pname)
+        if norm not in _DESER_PARAM_HINTS:
+            continue
+        if pvalue:
+            for pat in _DESER_VALUE_PATTERNS:
+                if pat.search(pvalue):
+                    deser_param = (location, pname, pvalue)
+                    break
+        # ViewState is always suspicious regardless of value
+        if norm in ("viewstate", "__viewstate", "__viewstategenerator"):
+            deser_param = (location, pname, pvalue)
+            break
+
+    if not has_java_ct and deser_param is None:
+        return None
+
+    key = f"deser:{method}:{path}"
+    if key in seen:
+        return None
+    seen.add(key)
+
+    if deser_param:
+        location, pname, _ = deser_param
+        base_confidence = 72
+        reason = f"{location} param '{pname}': serialized object pattern detected - deserialization RCE surface"
+    else:
+        pname = "(java serialized body)"
+        base_confidence = 68
+        reason = "Java-serialized content-type - deserialization attack surface"
+
+    confidence = min(base_confidence + _source_confidence_boost(sources), 90)
+    return AttackSurfaceItem(
+        endpoint_url=ep.url,
+        method=method,
+        param_name=pname,
+        vuln_class="DESERIALIZATION",
+        reason=reason,
+        priority=_confidence_to_priority(confidence),
+        source_file=getattr(ep, "source_file", "") or "",
+        param_location="body",
+        sub_class="DESER_CANDIDATE",
+        confidence=confidence,
+        status=SurfaceStatus.CANDIDATE,
+        evidence_sources=list(sources),
+        provenance=",".join(sources),
+    )
+
+
+def _detect_privesc_chain(
+    ep, method: str, path: str, segs: List[str],
+    params: List[Tuple[str, str, Optional[str]]],
+    idor_items: List[AttackSurfaceItem],
+    sources: List[str], seen: Set[str],
+) -> Optional[AttackSurfaceItem]:
+    """
+    Privilege escalation chain - IDOR + privilege param on the same endpoint.
+    Only fires when the endpoint already has at least one IDOR item AND
+    at least one privilege-sensitive param.
+    """
+    if not idor_items:
+        return None
+
+    has_priv_param = any(
+        _norm_name(p) in _PRIVILEGE_HINTS
+        for _, p, _ in params
+    )
+    has_priv_path = _path_contains_any(segs, _PRIVILEGE_PATH_SEGS)
+
+    if not (has_priv_param or has_priv_path):
+        return None
+
+    key = f"privesc_chain:{method}:{path}"
+    if key in seen:
+        return None
+    seen.add(key)
+
+    # This is a chained signal - inherently high value
+    confidence = min(75 + _source_confidence_boost(sources) + _auth_context_boost(ep), 92)
+    priv_signal = "privilege-sensitive path segment" if has_priv_path else "privilege param in body"
+    idor_param = idor_items[0].param_name
+
+    return AttackSurfaceItem(
+        endpoint_url=ep.url,
+        method=method,
+        param_name=f"{idor_param} + privilege",
+        vuln_class="PRIVESC_CHAIN",
+        reason=f"IDOR param '{idor_param}' combined with {priv_signal} - chained object-level privilege escalation surface",
+        priority=_confidence_to_priority(confidence),
+        source_file=getattr(ep, "source_file", "") or "",
+        param_location="mixed",
+        sub_class="IDOR_PRIV_CHAIN",
+        confidence=confidence,
+        status=SurfaceStatus.CANDIDATE,
+        evidence_sources=list(sources),
+        provenance=",".join(sources),
+    )
+
+
 # ── Main analysis function ────────────────────────────────────────────────────
 
 def analyze_attack_surface(endpoints: List) -> Dict:
@@ -1252,6 +1862,16 @@ def analyze_attack_surface(endpoints: List) -> Dict:
     infra_surface:      List[AttackSurfaceItem] = []
     import_export:      List[AttackSurfaceItem] = []
     payment_surface:    List[AttackSurfaceItem] = []
+    # New detectors
+    proto_pollution:    List[AttackSurfaceItem] = []
+    xxe_surface:        List[AttackSurfaceItem] = []
+    business_logic:     List[AttackSurfaceItem] = []
+    oauth_surface:      List[AttackSurfaceItem] = []
+    session_fixation:   List[AttackSurfaceItem] = []
+    method_override:    List[AttackSurfaceItem] = []
+    exposed_files:      List[AttackSurfaceItem] = []
+    deserialization:    List[AttackSurfaceItem] = []
+    privesc_chain:      List[AttackSurfaceItem] = []
     # Diagnostic: endpoints that raised exceptions
     analysis_errors:    List[Dict] = []
 
@@ -1267,6 +1887,16 @@ def analyze_attack_surface(endpoints: List) -> Dict:
     seen_infra : Set[str] = set()
     seen_impexp: Set[str] = set()
     seen_pay   : Set[str] = set()
+    # New detector dedup sets
+    seen_proto : Set[str] = set()
+    seen_xxe   : Set[str] = set()
+    seen_bizlog: Set[str] = set()
+    seen_oauth : Set[str] = set()
+    seen_sesfix: Set[str] = set()
+    seen_methov: Set[str] = set()
+    seen_expfil: Set[str] = set()
+    seen_deser : Set[str] = set()
+    seen_priesc: Set[str] = set()
     # State-change / auth / admin / privilege dedup by method+path
     seen_sc    : Set[str] = set()
     seen_auth  : Set[str] = set()
@@ -1381,6 +2011,46 @@ def analyze_attack_surface(endpoints: List) -> Dict:
             # ── Mass assignment ───────────────────────────────────────────────
             mass_assign.extend(_detect_mass_assignment(ep, method, path, segs, params, sources, seen_mass))
 
+            # ── Prototype pollution ───────────────────────────────────────────
+            proto_pollution.extend(_detect_prototype_pollution(ep, method, path, params, sources, seen_proto))
+
+            # ── XXE surface ───────────────────────────────────────────────────
+            xxe_item = _detect_xxe_surface(ep, method, path, segs, sources, seen_xxe)
+            if xxe_item:
+                xxe_surface.append(xxe_item)
+
+            # ── Business logic ────────────────────────────────────────────────
+            business_logic.extend(_detect_business_logic(ep, method, path, segs, params, sources, seen_bizlog))
+
+            # ── OAuth misconfig ───────────────────────────────────────────────
+            oauth_surface.extend(_detect_oauth_misconfig(ep, method, path, segs, params, sources, seen_oauth))
+
+            # ── Session fixation ──────────────────────────────────────────────
+            ep_idor = _detect_idor(ep, method, path, segs, params, sources, set())  # read-only pass for chain check
+            session_fixation.extend(_detect_session_fixation(ep, method, path, params, sources, seen_sesfix))
+
+            # ── Method override ───────────────────────────────────────────────
+            mo_item = _detect_method_override(ep, method, path, segs, sources, seen_methov)
+            if mo_item:
+                method_override.append(mo_item)
+
+            # ── Exposed files ─────────────────────────────────────────────────
+            ef_item = _detect_exposed_files(ep, method, path, sources, seen_expfil)
+            if ef_item:
+                exposed_files.append(ef_item)
+
+            # ── Deserialization ───────────────────────────────────────────────
+            deser_item = _detect_deserialization(ep, method, path, params, sources, seen_deser)
+            if deser_item:
+                deserialization.append(deser_item)
+
+            # ── Privilege escalation chain ────────────────────────────────────
+            # Use already-collected IDOR items for this endpoint
+            ep_idor_items = [it for it in idor if it.endpoint_url == ep.url]
+            privesc_item = _detect_privesc_chain(ep, method, path, segs, params, ep_idor_items, sources, seen_priesc)
+            if privesc_item:
+                privesc_chain.append(privesc_item)
+
         except Exception as exc:
             # Log at WARNING so the user can see skipped endpoints - silent omission
             # is worse than noise in a recon tool.
@@ -1389,15 +2059,20 @@ def analyze_attack_surface(endpoints: List) -> Dict:
             analysis_errors.append({"url": ep_url, "error": str(exc)})
             continue
 
-    # total_items: counts all intelligence items including new categories
-    # Legacy categories that contain raw endpoints (not AttackSurfaceItems)
-    # are excluded from this count to avoid double-counting.
+    # total_items: counts all AttackSurfaceItem-typed categories.
+    # Legacy categories that contain raw endpoints (state_change, auth_surface,
+    # admin_surface) are excluded to avoid double-counting.
     total_items = (
         len(idor) + len(injection) + len(file_ops)
         + len(ssrf) + len(open_redirect)
         + len(mass_assign) + len(graphql_surface) + len(websocket_surface)
         + len(privilege_surface) + len(infra_surface)
         + len(import_export) + len(payment_surface)
+        + len(proto_pollution) + len(xxe_surface)
+        + len(business_logic) + len(oauth_surface)
+        + len(session_fixation) + len(method_override)
+        + len(exposed_files) + len(deserialization)
+        + len(privesc_chain)
     )
 
     return {
@@ -1411,7 +2086,7 @@ def analyze_attack_surface(endpoints: List) -> Dict:
         "auth_surface":  auth_surface,
         "admin_surface": admin_surface,
         "total_items":   total_items,
-        # Additive keys
+        # Additive keys (first wave)
         "mass_assign":       mass_assign,
         "privilege_surface": privilege_surface,
         "graphql_surface":   graphql_surface,
@@ -1419,5 +2094,15 @@ def analyze_attack_surface(endpoints: List) -> Dict:
         "infra_surface":     infra_surface,
         "import_export":     import_export,
         "payment_surface":   payment_surface,
+        # New detectors
+        "proto_pollution":   proto_pollution,
+        "xxe_surface":       xxe_surface,
+        "business_logic":    business_logic,
+        "oauth_surface":     oauth_surface,
+        "session_fixation":  session_fixation,
+        "method_override":   method_override,
+        "exposed_files":     exposed_files,
+        "deserialization":   deserialization,
+        "privesc_chain":     privesc_chain,
         "analysis_errors":   analysis_errors,
     }
