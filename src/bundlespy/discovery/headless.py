@@ -564,28 +564,152 @@ window.__bundlespy_sse         = [];   // EventSource endpoints
 window.__bundlespy_nav         = [];   // history.pushState / replaceState URLs
 window.__bundlespy_listeners   = [];   // dynamically registered event listeners
 
-// ── Helper: build a stable CSS selector for an element ───────────────────────
-function __bspyCssPath(el) {
+// ── CSS selector helpers ──────────────────────────────────────────────────────
+
+// Returns true if c is valid unescaped in a CSS identifier
+function __bspyIsCSSIdentChar(c) {
+    if (/[a-zA-Z0-9_-]/.test(c)) return true;
+    return c.charCodeAt(0) >= 0xa0;
+}
+function __bspyIsCSSIdent(v) {
+    return /^-{0,2}[a-zA-Z_][a-zA-Z0-9_-]*$/.test(v);
+}
+function __bspyEscAscii(c, isLast) {
+    return '\\\\' + c.charCodeAt(0).toString(16).padStart(2, '0') + (isLast ? '' : ' ');
+}
+function __bspyEscIdent(ident) {
+    if (__bspyIsCSSIdent(ident)) return ident;
+    var shouldEscFirst = /^(?:[0-9]|-[0-9-]?)/.test(ident);
+    var last = ident.length - 1;
+    return ident.replace(/./g, function(c, i) {
+        return (shouldEscFirst && i === 0) || !__bspyIsCSSIdentChar(c)
+            ? __bspyEscAscii(c, i === last) : c;
+    });
+}
+function __bspyPrefixedClasses(node) {
+    var cls = node.getAttribute('class');
+    if (!cls) return [];
+    return cls.split(/\\s+/g).filter(Boolean).map(function(n) { return '$' + n; });
+}
+
+// Build a stable CSS selector - Chrome DevTools algorithm
+function __bspyCssPath(node) {
     try {
-        if (el.id) return '#' + CSS.escape(el.id);
-        var parts = [];
-        var cur = el;
-        var depth = 0;
-        while (cur && cur.nodeType === 1 && cur.tagName && depth < 6) {
-            var tag  = cur.tagName.toLowerCase();
-            var par  = cur.parentElement;
-            if (!par) { parts.unshift(tag); break; }
-            var siblings = Array.from(par.children).filter(function(c) { return c.tagName === cur.tagName; });
-            if (siblings.length > 1) {
-                var idx = siblings.indexOf(cur) + 1;
-                parts.unshift(tag + ':nth-of-type(' + idx + ')');
-            } else {
-                parts.unshift(tag);
+        if (!node || node.nodeType !== 1) return '';
+        var steps = [];
+        var cur   = node;
+        while (cur) {
+            var id = cur.getAttribute && cur.getAttribute('id');
+            if (id) {
+                steps.push(cur.nodeName + '#' + __bspyEscIdent(id));
+                break;
             }
-            cur = par;
-            depth++;
+            var nodeName = cur.nodeName;
+            var parent   = cur.parentNode;
+            if (!parent || parent.nodeType === 9) {
+                steps.push(nodeName);
+                break;
+            }
+            var siblings = parent.children;
+            var prefixedOwn = __bspyPrefixedClasses(cur);
+            var needsClass  = false;
+            var needsNth    = false;
+            var ownIdx      = -1;
+            var elIdx       = -1;
+            for (var i = 0; (ownIdx === -1 || !needsNth) && i < siblings.length; i++) {
+                var sib = siblings[i];
+                if (sib.nodeType !== 1) continue;
+                elIdx++;
+                if (sib === cur) { ownIdx = elIdx; continue; }
+                if (needsNth) continue;
+                if (sib.nodeName.toLowerCase() !== nodeName.toLowerCase()) continue;
+                needsClass = true;
+                var ownSet = new Set(prefixedOwn);
+                if (!ownSet.size) { needsNth = true; continue; }
+                var sibCls = __bspyPrefixedClasses(sib);
+                for (var j = 0; j < sibCls.length; j++) {
+                    if (!ownSet.has(sibCls[j])) continue;
+                    ownSet.delete(sibCls[j]);
+                    if (!ownSet.size) { needsNth = true; break; }
+                }
+            }
+            var result = nodeName;
+            // For input elements, include type when there's no id/class to differentiate
+            if (cur === node && nodeName.toLowerCase() === 'input' &&
+                cur.getAttribute('type') && !cur.getAttribute('id') && !cur.getAttribute('class')) {
+                result += '[type="' + cur.getAttribute('type') + '"]';
+            }
+            if (needsNth) {
+                result += ':nth-child(' + (ownIdx + 1) + ')';
+            } else if (needsClass) {
+                for (var k = 0; k < prefixedOwn.length; k++) {
+                    result += '.' + __bspyEscIdent(prefixedOwn[k].substr(1));
+                }
+            }
+            steps.push(result);
+            cur = parent;
         }
-        return parts.join(' > ');
+        steps.reverse();
+        return steps.join(' > ');
+    } catch(e) { return ''; }
+}
+
+// ── XPath helper ──────────────────────────────────────────────────────────────
+
+function __bspyXPathIndex(node) {
+    function similar(a, b) {
+        if (a === b) return true;
+        if (a.nodeType === 1 && b.nodeType === 1) return a.localName === b.localName;
+        if (a.nodeType === b.nodeType) return true;
+        var at = a.nodeType === 4 ? 3 : a.nodeType;
+        var bt = b.nodeType === 4 ? 3 : b.nodeType;
+        return at === bt;
+    }
+    var siblings = node.parentNode ? node.parentNode.childNodes : null;
+    if (!siblings) return 0;
+    var hasSame = false;
+    for (var i = 0; i < siblings.length; i++) {
+        if (similar(node, siblings[i]) && siblings[i] !== node) { hasSame = true; break; }
+    }
+    if (!hasSame) return 0;
+    var own = 1;
+    for (var j = 0; j < siblings.length; j++) {
+        if (similar(node, siblings[j])) {
+            if (siblings[j] === node) return own;
+            own++;
+        }
+    }
+    return -1;
+}
+
+// Build an XPath for any element
+function __bspyXPath(node) {
+    try {
+        if (!node) return '';
+        if (node.nodeType === 9) return '/';
+        var steps = [];
+        var cur   = node;
+        while (cur) {
+            if (cur.nodeType === 9) { steps.push(''); break; }
+            if (cur.nodeType !== 1) { cur = cur.parentNode; continue; }
+            var attrId = cur.getAttribute && cur.getAttribute('id');
+            if (attrId) {
+                // id is unique - short-circuit with absolute path and stop walking
+                steps = ['//*[@id="' + attrId + '"]'];
+                break;
+            }
+            var idx = __bspyXPathIndex(cur);
+            if (idx === -1) break;
+            var tag = (cur.localName || cur.nodeName || '').toLowerCase();
+            var val = tag;
+            if (idx > 0) val += '[' + idx + ']';
+            steps.push(val);
+            cur = cur.parentNode;
+        }
+        steps.reverse();
+        // if steps[0] is already an absolute //*[@id=...] path, return it directly
+        if (steps.length === 1 && steps[0].startsWith('//*')) return steps[0];
+        return '/' + steps.filter(Boolean).join('/');
     } catch(e) { return ''; }
 }
 
@@ -616,12 +740,48 @@ EventTarget.prototype.addEventListener = function(type, listener, options) {
                 hidden:      el.hidden || false,
                 eventType:   type,
                 cssSelector: __bspyCssPath(el),
+                xpath:       __bspyXPath(el),
             };
             window.__bundlespy_listeners.push(rec);
         }
     } catch(e) {}
     return _origAEL.call(this, type, listener, options);
 };
+
+// ── Inline on* handler scan - captures onclick/onchange/etc attributes ────────
+// Runs once at inject time to snapshot elements that have inline handlers
+// but won't trigger addEventListener (e.g. <div onclick="...">)
+(function() {
+    try {
+        var _ON_EVENTS = ['onclick','onchange','onsubmit','oninput','onmousedown','onkeydown','onkeypress','onpointerdown','ontouchstart'];
+        document.querySelectorAll('*').forEach(function(el) {
+            if (!el || !el.tagName) return;
+            if (_BSPY_SKIP_TAGS.has(el.tagName)) return;
+            if (window.__bundlespy_listeners.length >= 500) return;
+            for (var ei = 0; ei < _ON_EVENTS.length; ei++) {
+                var evName = _ON_EVENTS[ei];
+                var handler = el[evName] || el.getAttribute(evName);
+                if (!handler) continue;
+                var txt = '';
+                try { txt = (el.textContent || '').replace(/\\s+/g,' ').trim().substring(0, 120); } catch(e2) {}
+                window.__bundlespy_listeners.push({
+                    tagName:     el.tagName,
+                    id:          el.id || '',
+                    classes:     el.className || '',
+                    textContent: txt,
+                    type:        el.type || '',
+                    name:        el.name || '',
+                    hidden:      el.hidden || false,
+                    eventType:   evName.replace('on', ''),
+                    cssSelector: __bspyCssPath(el),
+                    xpath:       __bspyXPath(el),
+                    source:      'inline',
+                });
+                break; // one entry per element is enough
+            }
+        });
+    } catch(e) {}
+})();
 
 // ── history API hook - captures SPA client-side route transitions ─────────────
 (function() {
@@ -3509,18 +3669,24 @@ class HeadlessEngine:
             forms = page.evaluate("""
                 (function() {
                     var results = [];
-                    document.querySelectorAll('form').forEach(function(f, i) {
+                    // Real <form> tags + div.form pseudo-forms (common on React/Vue apps)
+                    var real   = Array.from(document.querySelectorAll('form'));
+                    var pseudo = Array.from(document.querySelectorAll('div.form, [role="form"]'));
+                    // Deduplicate - pseudo might overlap with real
+                    var seen = new Set();
+                    var all  = real.concat(pseudo.filter(function(el) { return !seen.has(el) && !seen.add(el); }));
+                    all.forEach(function(f, i) {
                         var action = f.getAttribute('action') || '';
                         var id     = f.getAttribute('id')     || '';
                         var cls    = f.getAttribute('class')  || '';
-                        // Skip payment/destructive forms
-                        var ctx = (action + id + cls).toLowerCase();
+                        var ctx    = (action + id + cls).toLowerCase();
                         results.push({
                             idx:    i,
                             action: action,
                             id:     id,
                             cls:    cls,
                             ctx:    ctx,
+                            pseudo: f.tagName !== 'FORM',
                         });
                     });
                     return results;
@@ -3534,7 +3700,15 @@ class HeadlessEngine:
             ctx = f.get("ctx", "")
             if any(kw in ctx for kw in skip_kws):
                 continue
-            selector = f"form:nth-of-type({f['idx'] + 1})"
+            # pseudo-forms (div.form, role=form) use a different selector
+            if f.get("pseudo"):
+                fid = f.get("id", "")
+                if fid:
+                    selector = f"#{fid}"
+                else:
+                    selector = f"div.form:nth-of-type({f['idx'] + 1})"
+            else:
+                selector = f"form:nth-of-type({f['idx'] + 1})"
             action = CrawlAction(
                 action_type=ActionType.FILL_FORM,
                 url=source_url,
