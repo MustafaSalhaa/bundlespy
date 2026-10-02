@@ -98,8 +98,8 @@ other:
     _cg = scan.add_argument_group("crawl")
     _cg.add_argument("--depth",        type=int, default=5,    metavar="N", help="Max crawl depth from the target root (default: 5)")
     _cg.add_argument("--max-pages",    type=int, default=500,  metavar="N", help="Max pages to visit during crawl (default: 500)")
-    _cg.add_argument("--max-js",       type=int, default=10000, metavar="N", help="Max JS files to collect (default: 1000)")
-    _cg.add_argument("--rate",         type=int, default=4,    metavar="N", help="Requests per second (default: 3)")
+    _cg.add_argument("--max-js",       type=int, default=1000, metavar="N", help="Max JS files to collect (default: 1000)")
+    _cg.add_argument("--rate",         type=int, default=3,    metavar="N", help="Requests per second (default: 3)")
     _cg.add_argument("--timeout",      type=int, default=10,   metavar="S", help="Per-request timeout in seconds (default: 10)")
     _cg.add_argument("--common-paths", action="store_true",                  help="Probe common paths (/robots.txt, /sitemap.xml, etc.)")
     _cg.add_argument("--subdomains",   action="store_true",                  help="Follow links to subdomains of the target")
@@ -1462,33 +1462,42 @@ def run_scan(args) -> int:
     extras["coverage"] = coverage
 
     # ── Stage 5: Passive Validation + Coverage Ledger ─────────────────────────
+    # Passive validation runs in a background thread so report generation can
+    # start immediately. We join the thread before printing the terminal report.
     passive_report  = None
     coverage_ledger = None
+    _passive_thread = None
+    _passive_result: list = [None]   # mutable container for thread return value
 
     try:
         from .analysis.passive_validator import run_passive_validation
         from .analysis.coverage import build_coverage_ledger
 
-        # Run passive probes on HIGH/CRITICAL findings when network available
-        # and passive-validate not explicitly disabled
         if not getattr(args, "no_passive_validate", False):
-            phase("Stage 5 — passive validation of HIGH/CRITICAL findings")
-            passive_report = run_passive_validation(
-                findings  = all_findings,
-                scope     = scope,
-                stealth   = args.stealth,
-                rate      = min(args.rate, 3),
-                max_probes = 50,
-            )
-            if passive_report.probed:
-                phase_done(
-                    "Passive validation",
-                    f"{passive_report.confirmed} confirmed  "
-                    f"{passive_report.unreachable} unreachable  "
-                    f"{passive_report.probed} probed",
-                )
+            phase("Stage 5 — passive validation of HIGH/CRITICAL findings (background)")
 
-        # Build coverage ledger (provenance counts across all findings + endpoints)
+            def _run_validation():
+                try:
+                    _passive_result[0] = run_passive_validation(
+                        findings   = all_findings,
+                        scope      = scope,
+                        stealth    = args.stealth,
+                        rate       = min(args.rate, 3),
+                        max_probes = 50,
+                    )
+                except Exception as _ve:
+                    import logging as _vl
+                    _vl.getLogger("bundlespy.cli").debug("Passive validation error: %s", _ve)
+
+            import threading as _threading
+            _passive_thread = _threading.Thread(
+                target  = _run_validation,
+                name    = "passive-validator",
+                daemon  = True,
+            )
+            _passive_thread.start()
+
+        # Build coverage ledger now - doesn't depend on passive validation
         coverage_ledger = build_coverage_ledger(all_findings, all_endpoints)
     except Exception as _s5e:
         import logging as _s5l
@@ -1530,6 +1539,20 @@ def run_scan(args) -> int:
                                     report_name=getattr(args, "report_name", ""),
                                     extras=extras, validation_results=validation_results,
                                     graphql_schemas=graphql_schemas, subdomains=subdomains)
+
+    # Join the background passive validation thread before printing so the
+    # terminal report shows validated/confirmed statuses.
+    if _passive_thread is not None:
+        _passive_thread.join(timeout=30)   # at most 30s extra wait
+        passive_report = _passive_result[0]
+        extras["passive_report"] = passive_report
+        if passive_report is not None and passive_report.probed:
+            phase_done(
+                "Passive validation",
+                f"{passive_report.confirmed} confirmed  "
+                f"{passive_report.unreachable} unreachable  "
+                f"{passive_report.probed} probed",
+            )
 
     if "terminal" in formats and not args.quiet and not getattr(args, "silent", False):
         print_report(
