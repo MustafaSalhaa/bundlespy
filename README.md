@@ -11,8 +11,6 @@
 
 **JavaScript attack surface scanner**
 
-**BundleSpy - JavaScript Attack Surface Scanner**
-
 BundleSpy is a security-focused JavaScript attack surface scanner designed to help penetration testers and security teams understand what a web application is really exposing through its frontend code and browser behavior.
 
 Instead of only crawling links and scanning the JavaScript files it finds, BundleSpy digs deeper into the application. It discovers JavaScript and HTML assets, follows application routes, analyzes dynamically loaded resources, and looks for information that can reveal hidden functionality, APIs, infrastructure, credentials, and other security-relevant data.
@@ -27,7 +25,7 @@ BundleSpy also builds an inventory of the application's attack surface by collec
 
 The tool is designed to continuously expand its discovery process. When analysis of one asset reveals a new route, JavaScript chunk, endpoint, or resource, that information can be fed back into the discovery pipeline so BundleSpy can continue exploring the newly discovered attack surface.
 
-The overall workflow is essentially:
+_**The overall workflow is essentially:**_
 
 **Discover → Collect → Analyze → Expand → Correlate → Validate → Report**
 
