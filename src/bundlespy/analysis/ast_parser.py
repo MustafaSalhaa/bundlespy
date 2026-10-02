@@ -266,7 +266,17 @@ def augment_env_and_extract(
     except Exception as exc:
         logger.debug("AST walk error for %s: %s", file_url, exc)
 
-    return walker.env, walker.endpoints, walker.secret_hits
+    # dedup secret hits by (key_name, value) - keep highest severity
+    _sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+    _seen_hits: Dict[Tuple[str, str], "ASTSecretHit"] = {}
+    for hit in walker.secret_hits:
+        k = (hit.key_name, hit.value)
+        existing = _seen_hits.get(k)
+        if existing is None or _sev_rank.get(hit.severity, 0) > _sev_rank.get(existing.severity, 0):
+            _seen_hits[k] = hit
+    deduped_hits = list(_seen_hits.values())
+
+    return walker.env, walker.endpoints, deduped_hits
 
 
 # ── Augmented environment ─────────────────────────────────────────────────────
@@ -644,17 +654,43 @@ class _ASTWalker:
 
             # $.ajax / $.get / $.post
             if obj_text in _JQUERY_OBJ and prop_text.lower() in _HTTP_METHODS | {"ajax"}:
-                method = "GET" if prop_text.lower() == "get" else (
-                         "POST" if prop_text.lower() == "post" else "UNKNOWN")
+                _jq_method = "GET" if prop_text.lower() == "get" else (
+                             "POST" if prop_text.lower() == "post" else "UNKNOWN")
                 if args:
                     first = args[0]
+
+                    # settings-object-only: $.ajax({ url: "...", method: "POST", ... })
                     if first.type == "object":
-                        url, m = self._jquery_config_obj(first)
+                        url, m, params, hdrs = self._jquery_config_obj(first)
                         if url:
-                            self._add(url, m or method, node, confidence=0.85)
+                            ev_extra = self._jquery_evidence(params, hdrs)
+                            self._add_with_evidence(
+                                url, m or _jq_method, node,
+                                confidence=0.85, extra=ev_extra,
+                            )
+
+                    # url-first: $.ajax("/api/x", { ... }) or $.get("/api/x", data, cb)
                     else:
-                        for url in self._resolve_url_arg(first):
-                            self._add(url, method, node, confidence=0.85)
+                        resolved_urls = self._resolve_url_arg(first)
+                        # find a trailing object arg - may be settings (ajax) or raw data (get/post)
+                        second_obj = next(
+                            (a for a in args[1:] if a.type == "object"), None
+                        )
+                        params: List[str] = []
+                        hdrs: List[str] = []
+                        if second_obj is not None:
+                            if prop_text.lower() == "ajax":
+                                # second arg is a full settings object
+                                _, _, params, hdrs = self._jquery_config_obj(second_obj)
+                            else:
+                                # $.get/.post: second arg is the data payload directly
+                                params = self._extract_object_keys(second_obj)
+                        ev_extra = self._jquery_evidence(params, hdrs)
+                        for url in resolved_urls:
+                            self._add_with_evidence(
+                                url, _jq_method, node,
+                                confidence=0.85, extra=ev_extra,
+                            )
                 return
 
             # xhr.open("POST", url)
@@ -1089,10 +1125,21 @@ class _ASTWalker:
                 method = (self._string_from_node(val_node) or "").upper() or None
         return url, method
 
-    def _jquery_config_obj(self, obj_node) -> Tuple[Optional[str], Optional[str]]:
-        """Extract url and type from $.ajax({ url: "...", type: "POST" })."""
-        url    = None
-        method = None
+    def _jquery_config_obj(
+        self, obj_node
+    ) -> Tuple[Optional[str], Optional[str], List[str], List[str]]:
+        """Parse a jQuery settings object - returns (url, method, params, headers).
+
+        Handles all three surface areas:
+          - url / type / method keys
+          - data: { key: val } -> body/query param names
+          - headers: { Authorization: "..." } -> header names (flags hardcoded auth)
+        """
+        url: Optional[str] = None
+        method: Optional[str] = None
+        params: List[str] = []
+        headers: List[str] = []
+
         for pair in obj_node.named_children:
             if pair.type != "pair":
                 continue
@@ -1101,13 +1148,135 @@ class _ASTWalker:
             if not key_node or not val_node:
                 continue
             key = self._text(key_node).strip("'\"` ")
+
             if key == "url":
                 resolved = self._resolve_url_arg(val_node)
                 if resolved:
                     url = resolved[0]
+
             elif key in ("type", "method"):
                 method = (self._string_from_node(val_node) or "").upper() or None
-        return url, method
+
+            elif key == "data" and val_node.type == "object":
+                # collect param names from data object
+                for p in val_node.named_children:
+                    if p.type != "pair":
+                        continue
+                    pk = p.child_by_field_name("key")
+                    if pk:
+                        pname = self._text(pk).strip("'\"` ")
+                        if pname:
+                            params.append(pname)
+
+            elif key == "headers" and val_node.type == "object":
+                # collect header names; note any hardcoded auth values
+                _auth_headers = {"authorization", "x-api-key", "x-auth-token",
+                                 "x-access-token", "token", "api-key", "apikey"}
+                for h in val_node.named_children:
+                    if h.type != "pair":
+                        continue
+                    hk = h.child_by_field_name("key")
+                    hv = h.child_by_field_name("value")
+                    if not hk:
+                        continue
+                    hname = self._text(hk).strip("'\"` ")
+                    if not hname:
+                        continue
+                    headers.append(hname)
+                    # if a sensitive header has a hardcoded string value, emit a secret hit
+                    if hname.lower() in _auth_headers and hv is not None:
+                        hval = self._string_from_node(hv)
+                        if hval and len(hval) >= 8:
+                            # skip if already recorded by the pair-level scan
+                            already = any(
+                                s.key_name == hname and s.value == hval
+                                for s in self.secret_hits
+                            )
+                            if not already:
+                                hit = ASTSecretHit(
+                                    key_name   = hname,
+                                    value      = hval,
+                                    line       = h.start_point[0] + 1,
+                                    context    = f"jQuery header: {hname}",
+                                    severity   = "HIGH",
+                                    confidence = 0.88,
+                                )
+                                self.secret_hits.append(hit)
+
+        return url, method, params, headers
+
+    def _extract_object_keys(self, obj_node) -> List[str]:
+        """Return all top-level key names from an object literal node."""
+        keys: List[str] = []
+        for pair in obj_node.named_children:
+            if pair.type != "pair":
+                continue
+            kn = pair.child_by_field_name("key")
+            if kn:
+                k = self._text(kn).strip("'\"` ")
+                if k:
+                    keys.append(k)
+        return keys
+
+    def _jquery_evidence(self, params: List[str], headers: List[str]) -> str:
+        """Build an evidence suffix string for jQuery param/header info."""
+        parts: List[str] = []
+        if params:
+            parts.append("params: " + ",".join(params))
+        if headers:
+            parts.append("headers: " + ",".join(headers))
+        return " | ".join(parts)
+
+    def _add_with_evidence(
+        self,
+        path: str,
+        method: str,
+        node,
+        confidence: float = 0.80,
+        extra: str = "",
+    ) -> None:
+        """Wrapper around _add that appends extra context to the evidence field."""
+        if not path or not self._is_url_like(path) or self._is_skip(path):
+            return
+        if path == "{dynamic}":
+            return
+
+        import re
+        path = re.sub(r'\$\{[^}]+\}', '{dynamic}', path)
+        path = path.rstrip("/") or "/"
+
+        dedup_key = re.sub(r'\{[^}]+\}', '*', path.lower().split("?")[0])
+        if dedup_key in self._seen:
+            return
+        self._seen.add(dedup_key)
+
+        from ..storage.models import Endpoint
+        category = self._categorize(path, method)
+        line_no  = node.start_point[0] + 1
+
+        start = max(0, node.start_byte - 10)
+        end   = min(len(self._src), node.end_byte + 20)
+        ev    = self._src[start:end].decode("utf-8", errors="replace").replace("\n", " ").strip()[:180]
+        if extra:
+            ev = (ev + " | " + extra)[:200]
+
+        ep = Endpoint(
+            url         = path,
+            path        = path,
+            method      = method,
+            category    = category,
+            source_file = self.file_url,
+            line_number = line_no,
+            confidence  = confidence,
+            evidence    = ev,
+        )
+        try:
+            ep.source_type = "static"
+        except Exception:
+            pass
+        self.endpoints.append(ep)
+        logger.debug("AST endpoint: %s %s (line %d, conf=%.2f)",
+                     method, path, line_no, confidence)
 
     # ── URL validation / endpoint creation ───────────────────────────────────
 
