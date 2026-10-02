@@ -825,11 +825,12 @@ class FormInteractor:
 
         # Multi-step wizard loop
         for _step in range(self.MAX_STEPS):
-            filled = self._fill_fields(form_el, intent, stabilizer)
-            result.field_count   += filled[0]
-            result.filled_count  += filled[1]
+            filled  = self._fill_fields(form_el, intent, stabilizer)
+            selects = self._fill_selects(form_el, stabilizer)
+            result.field_count   += filled[0]  + selects[0]
+            result.filled_count  += filled[1] + selects[1]
 
-            if filled[1] == 0 and _step > 0:
+            if (filled[1] + selects[1]) == 0 and _step > 0:
                 break  # No new fields appeared — wizard is done
 
             # Tab through to trigger conditional reveals
@@ -867,20 +868,22 @@ class FormInteractor:
     ) -> Tuple[int, int]:
         """
         Fill visible, enabled fields in this form that pass classification.
+        Handles text/email/url/tel/number/textarea via .fill(), and
+        checkbox/radio via .click() (correct DOM interaction for those types).
         Returns (fields_seen, fields_filled).
         """
         seen   = 0
         filled = 0
 
+        # ── Text-like inputs + textarea ───────────────────────────────────────
         try:
             inputs = form_el.query_selector_all(
                 "input:not([type='hidden']):not([type='submit'])"
-                ":not([type='radio']):not([type='checkbox'])"
                 ":not([type='button']):not([type='image']),"
                 "textarea"
             )[: self.MAX_FIELDS]
         except Exception:
-            return 0, 0
+            inputs = []
 
         for inp in inputs:
             try:
@@ -888,6 +891,25 @@ class FormInteractor:
                     continue
 
                 itype = (inp.get_attribute("type") or "text").strip().lower()
+
+                # Checkbox / radio: use .click() — .fill() does nothing on these
+                if itype in ("checkbox", "radio"):
+                    token = _field_token(inp)
+                    # Never click sensitive / destructive fields
+                    if any(p in token for p in _FIELD_SKIP_PATTERNS):
+                        continue
+                    # Only click if unchecked (avoid toggling something already on)
+                    try:
+                        if inp.is_checked():
+                            continue
+                        seen += 1
+                        inp.scroll_into_view_if_needed(timeout=300)
+                        inp.click(timeout=500)
+                        stabilizer.wait_after_interaction(max_ms=200)
+                        filled += 1
+                    except Exception as e:
+                        logger.debug("%s click error: %s", itype, e)
+                    continue
 
                 # Skip non-text input types we never want to fill
                 if itype in ("file", "date", "datetime-local", "time", "color",
@@ -903,8 +925,6 @@ class FormInteractor:
                     continue
 
                 # Gap 7: Smart fill value — type+autocomplete+token-aware.
-                # _smart_fill_value() picks the best realistic-looking fake
-                # value for this specific field; overrides the generic fallback.
                 fill_val = _smart_fill_value(inp, itype)
 
                 # Sanity fallback: field_res.fill_value is still valid when set
@@ -919,6 +939,106 @@ class FormInteractor:
                     filled += 1
                 except Exception as e:
                     logger.debug("field fill error (%s): %s", fill_val, e)
+
+            except Exception:
+                pass
+
+        return seen, filled
+
+    def _fill_selects(
+        self,
+        form_el,
+        stabilizer,
+    ) -> Tuple[int, int]:
+        """
+        Handle <select> elements by enumerating real <option> values and
+        picking the first non-empty, non-disabled, non-placeholder option.
+
+        Uses select_option(value=...) — not fill() — which is the correct
+        Playwright API for <select> elements. .fill() silently does nothing.
+
+        Returns (selects_seen, selects_filled).
+        """
+        seen   = 0
+        filled = 0
+
+        try:
+            selects = form_el.query_selector_all("select")[: self.MAX_FIELDS]
+        except Exception:
+            return 0, 0
+
+        for sel_el in selects:
+            try:
+                if not sel_el.is_visible() or not sel_el.is_enabled():
+                    continue
+
+                # Skip selects whose name/id token looks sensitive
+                token = _field_token(sel_el)
+                if any(p in token for p in _FIELD_SKIP_PATTERNS):
+                    continue
+
+                seen += 1
+
+                # Walk <option> children to find a real value
+                try:
+                    options = sel_el.query_selector_all("option")
+                except Exception:
+                    options = []
+
+                picked = None
+                for opt in options:
+                    try:
+                        opt_value = opt.get_attribute("value") or ""
+                        opt_text  = (opt.inner_text() or "").strip()
+                        disabled  = opt.get_attribute("disabled")
+
+                        if disabled is not None:
+                            continue
+
+                        # Skip empty / placeholder options (value="" or text is
+                        # a generic placeholder like "Select...", "Choose...", "--")
+                        if not opt_value and not opt_text:
+                            continue
+
+                        text_lower = opt_text.lower()
+                        if text_lower in (
+                            "", "select", "choose", "pick", "--", "---",
+                            "please select", "please choose", "select one",
+                            "select an option", "choose an option",
+                        ):
+                            continue
+
+                        # Prefer a non-empty value attribute; fall back to text
+                        picked = opt_value if opt_value else opt_text
+                        break
+                    except Exception:
+                        continue
+
+                if not picked:
+                    # No real option found — fall back to index 1 (skip index 0,
+                    # which is almost always the placeholder)
+                    if len(options) > 1:
+                        try:
+                            picked = options[1].get_attribute("value") or (
+                                options[1].inner_text() or ""
+                            ).strip()
+                        except Exception:
+                            pass
+
+                if not picked:
+                    continue
+
+                # Select by value first; if that fails, try by label text
+                try:
+                    sel_el.scroll_into_view_if_needed(timeout=300)
+                    try:
+                        sel_el.select_option(value=picked, timeout=500)
+                    except Exception:
+                        sel_el.select_option(label=picked, timeout=500)
+                    stabilizer.wait_after_interaction(max_ms=200)
+                    filled += 1
+                except Exception as e:
+                    logger.debug("select fill error (value=%s): %s", picked, e)
 
             except Exception:
                 pass
@@ -1077,8 +1197,10 @@ class FormInteractor:
     def _clear_fields(self, form_el) -> None:
         """
         Clear all visible text-type inputs in the form after interacting.
-        Leaves no data behind in the page state.
+        Also unchecks any checkboxes we may have clicked, and resets selects
+        back to their first option. Leaves no data behind in the page state.
         """
+        # ── Text-like inputs ──────────────────────────────────────────────────
         try:
             inputs = form_el.query_selector_all(
                 "input:not([type='hidden'])"
@@ -1091,6 +1213,36 @@ class FormInteractor:
                 try:
                     if inp.is_visible():
                         inp.fill("", timeout=300)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ── Checkboxes — uncheck any we clicked ──────────────────────────────
+        try:
+            checkboxes = form_el.query_selector_all(
+                "input[type='checkbox']"
+            )[: self.MAX_FIELDS]
+            for cb in checkboxes:
+                try:
+                    if cb.is_visible() and cb.is_checked():
+                        cb.click(timeout=300)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ── Selects — reset to first option ──────────────────────────────────
+        try:
+            selects = form_el.query_selector_all("select")[: self.MAX_FIELDS]
+            for sel_el in selects:
+                try:
+                    if not sel_el.is_visible():
+                        continue
+                    options = sel_el.query_selector_all("option")
+                    if options:
+                        first_val = options[0].get_attribute("value") or ""
+                        sel_el.select_option(value=first_val, timeout=300)
                 except Exception:
                     pass
         except Exception:
