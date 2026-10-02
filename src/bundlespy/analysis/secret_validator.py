@@ -14,6 +14,9 @@ Supported providers (25):
 
 import logging
 import hashlib
+import random
+import time
+import threading
 from typing import Optional, Dict, Callable
 from dataclasses import dataclass, field
 
@@ -26,6 +29,15 @@ logger = logging.getLogger("bundlespy.analysis.secret_validator")
 REQUEST_TIMEOUT = 8
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+
+# Semaphore caps concurrent outbound validation requests.
+# 3 is enough for real throughput; beyond that we look like a scanner.
+_VALIDATION_SEMAPHORE = threading.Semaphore(3)
+
+# Per-request minimum delay range (seconds). Applied inside _req() so
+# every provider call is rate-limited, even when called from a thread pool.
+_DELAY_MIN = 0.3
+_DELAY_MAX = 0.8
 
 
 @dataclass
@@ -41,16 +53,25 @@ class ValidationResult:
 
 
 def _req(method: str, url: str, **kwargs) -> Optional[requests.Response]:
-    """Single safe request wrapper - strict timeout, no retries."""
-    try:
-        kwargs.setdefault("timeout", REQUEST_TIMEOUT)
-        kwargs.setdefault("verify", False)
-        kwargs.setdefault("allow_redirects", True)
-        resp = requests.request(method, url, **kwargs)
-        return resp
-    except Exception as e:
-        logger.debug("Validation request failed [%s %s]: %s", method, url, e)
-        return None
+    """Single safe request wrapper - strict timeout, no retries, rate-limited.
+
+    Acquires the shared concurrency semaphore before sending and releases it
+    after the response is received (or on error). Also injects a random jitter
+    delay before each request so bursting all validators at once looks like
+    normal browser traffic rather than an API scanner.
+    """
+    with _VALIDATION_SEMAPHORE:
+        # Jitter before each outbound call - avoids hitting provider rate limits
+        time.sleep(random.uniform(_DELAY_MIN, _DELAY_MAX))
+        try:
+            kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+            kwargs.setdefault("verify", False)
+            kwargs.setdefault("allow_redirects", True)
+            resp = requests.request(method, url, **kwargs)
+            return resp
+        except Exception as e:
+            logger.debug("Validation request failed [%s %s]: %s", method, url, e)
+            return None
 
 
 # ── AWS ────────────────────────────────────────────────────────────────────────
