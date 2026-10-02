@@ -12,6 +12,11 @@ AST and produces two outputs:
    cannot reach (computed member access, ternary-selected URLs, destructured
    variables used directly in fetch/axios).
 
+3. A list of ASTSecretHit objects from key/value object property pairs where
+   the key name is a known secret indicator. This is separate from the regex
+   scanner — it runs on the parsed tree so it only matches actual string
+   literals assigned to sensitive keys, never comments or random strings.
+
 The regex layer (ast_endpoints.py) still runs after this pass -- it covers
 minified bundles where tree-sitter produces flat, unstructured trees, and it
 catches patterns this pass doesn't model. The two lists are merged by the
@@ -20,7 +25,7 @@ caller (deduplicated by path key).
 Design constraints
 ------------------
 - Never makes network calls.
-- Fails silently: any parse or walk error returns (env, []) so callers are
+- Fails silently: any parse or walk error returns (env, [], []) so callers are
   unaffected.
 - Hard time limit: AST_MAX_SECONDS (default 5s). Files that exceed it return
   whatever was collected up to that point.
@@ -31,7 +36,9 @@ Design constraints
 """
 
 import logging
+import re
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("bundlespy.analysis.ast_parser")
@@ -40,6 +47,22 @@ logger = logging.getLogger("bundlespy.analysis.ast_parser")
 
 AST_MAX_SECONDS = 5.0
 AST_MAX_MB      = 3
+
+# ── AST secret hit dataclass ──────────────────────────────────────────────────
+
+@dataclass
+class ASTSecretHit:
+    """
+    A key/value pair from the AST where the key name looks like a secret.
+    Produced by the pair-walking pass; consumed by SecretScanner.scan_with_env()
+    to create boosted-confidence findings.
+    """
+    key_name:   str   # e.g. "apiKey", "password", "STRIPE_SECRET"
+    value:      str   # the literal string value
+    line:       int   # 1-indexed line in the source file
+    context:    str   # ~120 char surrounding snippet
+    severity:   str   # pre-computed severity hint: HIGH / MEDIUM / LOW
+    confidence: float # base confidence before entropy filtering
 
 # HTTP methods that appear as axios/jQuery method-call names
 _HTTP_METHODS = frozenset({"get", "post", "put", "delete", "patch", "head", "options", "request"})
@@ -58,6 +81,101 @@ _HTTP_CLIENTS  = frozenset({"request", "superagent", "got", "ky", "http", "https
 _EVENTSOURCE   = "EventSource"
 _WEBSOCKET     = "WebSocket"
 _APP_ROUTER    = frozenset({"app", "router", "express"})
+
+# ── Secret key-name tables ────────────────────────────────────────────────────
+# Key names that strongly indicate a secret assignment. Matched case-insensitively
+# against the property name in object literals and variable assignments.
+
+# HIGH severity — these are almost certainly credentials or keys
+_SECRET_KEY_HIGH = frozenset({
+    "password", "passwd", "pass", "secret", "private_key", "privatekey",
+    "private_key_id", "privatekeyid", "client_secret", "clientsecret",
+    "access_secret", "accesssecret", "api_secret", "apisecret",
+    "auth_secret", "authsecret", "db_password", "dbpassword",
+    "database_password", "databasepassword", "master_key", "masterkey",
+    "encryption_key", "encryptionkey", "signing_key", "signingkey",
+    "jwt_secret", "jwtsecret", "cookie_secret", "cookiesecret",
+    "session_secret", "sessionsecret", "webhook_secret", "webhooksecret",
+    "stripe_secret", "stripesecret", "stripe_secret_key", "stripesecretkey",
+    "stripe_api_key", "stripeapikey",
+})
+
+# MEDIUM severity — likely credentials, could be public identifiers
+_SECRET_KEY_MEDIUM = frozenset({
+    "api_key", "apikey", "access_key", "accesskey", "auth_key", "authkey",
+    "token", "auth_token", "authtoken", "access_token", "accesstoken",
+    "api_token", "apitoken", "bearer_token", "bearertoken",
+    "refresh_token", "refreshtoken", "id_token", "idtoken",
+    "aws_secret_key", "awssecretkey", "aws_access_key", "awsaccesskey",
+    "gcp_api_key", "gcpapikey", "firebase_api_key", "firebaseapikey",
+    "google_api_key", "googleapikey", "azure_key", "azurekey",
+    "github_token", "githubtoken", "gitlab_token", "gitlabtoken",
+    "slack_token", "slacktoken", "slack_bot_token", "slackbottoken",
+    "sendgrid_key", "sendgridkey", "mailgun_key", "mailgunkey",
+    "twilio_auth", "twilioauth", "openai_key", "openaiapikey",
+    "anthropic_key", "anthropicapikey", "huggingface_token",
+    "mapbox_token", "mapboxtoken", "algolia_key", "algoliakey",
+    "cloudinary_key", "cloudinarykey", "pusher_key", "pusherkey",
+    "recaptcha_secret", "recaptchasecret", "recaptcha_key", "recaptchakey",
+    "oauth_secret", "oauthsecret", "consumer_secret", "consumersecret",
+    "app_secret", "appsecret", "client_key", "clientkey",
+    "credentials", "credential",
+})
+
+# LOW severity — could be public-facing identifiers, still worth flagging
+_SECRET_KEY_LOW = frozenset({
+    "api_id", "apiid", "app_id", "appid", "client_id", "clientid",
+    "consumer_key", "consumerkey", "publishable_key", "publishablekey",
+    "public_key", "publickey", "account_id", "accountid",
+    "project_id", "projectid", "tenant_id", "tenantid",
+    "subscription_id", "subscriptionid", "workspace_id", "workspaceid",
+    "measurement_id", "measurementid", "tracking_id", "trackingid",
+    "gtm_id", "gtmid", "fb_pixel", "fbpixel",
+})
+
+# Keys that produce low-confidence downgrade regardless of value
+_BENIGN_KEY_FRAGMENTS = frozenset({
+    "version", "build", "label", "name", "title", "description",
+    "url", "endpoint", "host", "port", "path", "prefix", "suffix",
+    "timeout", "retry", "limit", "max", "min", "count", "size",
+    "color", "theme", "font", "icon", "image", "logo",
+    "locale", "language", "lang", "region", "country", "timezone",
+    "debug", "verbose", "log", "level", "mode", "env",
+})
+
+
+def _classify_key(key: str) -> Tuple[Optional[str], float]:
+    """
+    Return (severity, base_confidence) for a property key name,
+    or (None, 0.0) if the key is not a secret indicator.
+    """
+    normalized = key.lower().replace("-", "_").replace(".", "_")
+
+    # Downgrade benign keys immediately
+    if normalized in _BENIGN_KEY_FRAGMENTS:
+        return None, 0.0
+    for frag in _BENIGN_KEY_FRAGMENTS:
+        if normalized == frag:
+            return None, 0.0
+
+    if normalized in _SECRET_KEY_HIGH:
+        return "HIGH", 0.90
+    if normalized in _SECRET_KEY_MEDIUM:
+        return "MEDIUM", 0.82
+    if normalized in _SECRET_KEY_LOW:
+        return "LOW", 0.70
+
+    # Partial match: key contains a HIGH indicator as a substring
+    for k in _SECRET_KEY_HIGH:
+        if k in normalized and len(k) >= 6:
+            return "HIGH", 0.85
+
+    # Partial match: key contains a MEDIUM indicator
+    for k in _SECRET_KEY_MEDIUM:
+        if k in normalized and len(k) >= 5:
+            return "MEDIUM", 0.75
+
+    return None, 0.0
 
 
 # ── Lazy-loaded tree-sitter ───────────────────────────────────────────────────
@@ -88,33 +206,36 @@ def augment_env_and_extract(
     content: str,
     file_url: str,
     base_origin: str = "",
-) -> Tuple["DataFlowEnvAugmented", List]:
+) -> Tuple["DataFlowEnvAugmented", List, List["ASTSecretHit"]]:
     """
     Parse *content* with tree-sitter and return:
-      (augmented_env, ast_endpoints)
+      (augmented_env, ast_endpoints, ast_secret_hits)
 
-    augmented_env  -- a DataFlowEnvAugmented; merge into the regex-layer env
-                      via env.update(augmented_env.vars) before calling
-                      extract_all_endpoints().
-    ast_endpoints  -- List[Endpoint] found by the AST walk that the regex layer
-                      would likely miss.
+    augmented_env    -- a DataFlowEnvAugmented; merge into the regex-layer env
+                        via env.update(augmented_env.vars) before calling
+                        extract_all_endpoints().
+    ast_endpoints    -- List[Endpoint] found by the AST walk that the regex
+                        layer would likely miss.
+    ast_secret_hits  -- List[ASTSecretHit] from key/value pairs where the key
+                        name is a known secret indicator. Pass these to
+                        SecretScanner.scan_with_env() for boosted findings.
 
-    Both outputs are empty/no-op on any error.
+    All outputs are empty/no-op on any error.
     """
     parser = _get_parser()
     if parser is None:
-        return DataFlowEnvAugmented(), []
+        return DataFlowEnvAugmented(), [], []
 
     content_bytes = content.encode("utf-8", errors="replace")
     if len(content_bytes) > AST_MAX_MB * 1_048_576:
         logger.debug("AST pass skipped: file too large (%d bytes)", len(content_bytes))
-        return DataFlowEnvAugmented(), []
+        return DataFlowEnvAugmented(), [], []
 
     try:
         tree = parser.parse(content_bytes)
     except Exception as exc:
         logger.debug("tree-sitter parse failed for %s: %s", file_url, exc)
-        return DataFlowEnvAugmented(), []
+        return DataFlowEnvAugmented(), [], []
 
     walker = _ASTWalker(content_bytes, file_url, base_origin)
     try:
@@ -122,7 +243,7 @@ def augment_env_and_extract(
     except Exception as exc:
         logger.debug("AST walk error for %s: %s", file_url, exc)
 
-    return walker.env, walker.endpoints
+    return walker.env, walker.endpoints, walker.secret_hits
 
 
 # ── Augmented environment ─────────────────────────────────────────────────────
@@ -192,13 +313,15 @@ class _ASTWalker:
     """
 
     def __init__(self, content_bytes: bytes, file_url: str, base_origin: str):
-        self._src      = content_bytes
-        self.file_url  = file_url
+        self._src        = content_bytes
+        self.file_url    = file_url
         self.base_origin = base_origin
-        self.env       = DataFlowEnvAugmented()
-        self.endpoints: List = []
-        self._seen: Set[str] = set()
-        self._t_start  = time.monotonic()
+        self.env         = DataFlowEnvAugmented()
+        self.endpoints:    List = []
+        self.secret_hits:  List["ASTSecretHit"] = []
+        self._seen:        Set[str] = set()
+        self._seen_secret: Set[str] = set()  # dedup key/value pairs
+        self._t_start    = time.monotonic()
 
     def _elapsed(self) -> float:
         return time.monotonic() - self._t_start
@@ -214,11 +337,13 @@ class _ASTWalker:
         return node.start_point[0] + 1
 
     def walk(self, root) -> None:
-        """Two-pass walk: collect vars, then extract endpoints."""
+        """Three-pass walk: collect vars, extract endpoints, find secret pairs."""
         # Pass 1 - variable bindings
         self._collect_vars(root)
         # Pass 2 - call sites
         self._extract_calls(root)
+        # Pass 3 - key/value secret pairs
+        self._extract_secret_pairs(root)
 
     # ── Pass 1: variable collection ───────────────────────────────────────────
 
@@ -543,6 +668,160 @@ class _ASTWalker:
         elif ctor_text == _EVENTSOURCE and args:
             for url in self._resolve_url_arg(args[0]):
                 self._add(url, "GET", node, confidence=0.90)
+
+    # ── Pass 3: secret key/value pair extraction ─────────────────────────────
+
+    def _extract_secret_pairs(self, node) -> None:
+        """
+        Walk every `pair` node in the AST (object properties and assignments).
+        When the key name matches a known secret indicator and the value is a
+        non-empty string literal, record an ASTSecretHit.
+
+        This catches patterns the regex scanner misses: object literals with
+        computed keys, keys with unusual quoting, and split assignments where
+        the key name is only visible in the AST structure.
+        """
+        if self._elapsed() > AST_MAX_SECONDS:
+            return
+
+        t = node.type
+
+        if t == "pair":
+            self._handle_secret_pair(node)
+
+        # Also catch: const apiKey = "..." / this.apiKey = "..." / config.apiKey = "..."
+        elif t in ("variable_declarator", "assignment_expression"):
+            self._handle_secret_assignment(node)
+
+        for child in node.named_children:
+            self._extract_secret_pairs(child)
+
+    def _handle_secret_pair(self, node) -> None:
+        """Handle a `pair` node: { key: "value" }."""
+        key_node = node.child_by_field_name("key")
+        val_node = node.child_by_field_name("value")
+        if not key_node or not val_node:
+            return
+
+        key_raw = self._text(key_node).strip("'\"` \t\n")
+        if not key_raw:
+            return
+
+        severity, confidence = _classify_key(key_raw)
+        if severity is None:
+            return
+
+        # Only flag string literal values - skip variables, function calls etc.
+        value = self._extract_string_value(val_node)
+        if not value:
+            # Try env resolution if it's a variable name
+            if val_node.type == "identifier":
+                resolved = self.env.resolve(self._text(val_node))
+                if resolved and len(resolved) >= 8:
+                    value = resolved
+                    confidence = max(0.60, confidence - 0.15)  # lower conf for resolved
+            if not value:
+                return
+
+        if len(value) < 8:
+            return
+
+        dedup = f"{key_raw.lower()}:{value}"
+        if dedup in self._seen_secret:
+            return
+        self._seen_secret.add(dedup)
+
+        line = key_node.start_point[0] + 1
+        start = max(0, node.start_byte - 40)
+        end   = min(len(self._src), node.end_byte + 40)
+        ctx   = self._src[start:end].decode("utf-8", errors="replace").replace("\n", " ").strip()[:200]
+
+        self.secret_hits.append(ASTSecretHit(
+            key_name   = key_raw,
+            value      = value,
+            line       = line,
+            context    = ctx,
+            severity   = severity,
+            confidence = confidence,
+        ))
+        logger.debug("AST secret pair: key=%r severity=%s line=%d", key_raw, severity, line)
+
+    def _handle_secret_assignment(self, node) -> None:
+        """
+        Handle variable declarators and bare assignments where the variable
+        name itself looks like a secret key.
+
+        Covers:
+          const apiKey = "..."
+          this.apiKey = "..."
+          config.apiKey = "..."
+        """
+        children = node.named_children
+        if len(children) < 2:
+            return
+
+        lhs = children[0]
+        rhs = children[1]
+
+        # Pull the rightmost identifier from the LHS (the property name)
+        if lhs.type == "identifier":
+            key_raw = self._text(lhs)
+        elif lhs.type == "member_expression":
+            prop = lhs.child_by_field_name("property")
+            key_raw = self._text(prop) if prop else ""
+        else:
+            return
+
+        key_raw = key_raw.strip()
+        if not key_raw:
+            return
+
+        severity, confidence = _classify_key(key_raw)
+        if severity is None:
+            return
+
+        value = self._extract_string_value(rhs)
+        if not value:
+            if rhs.type == "identifier":
+                resolved = self.env.resolve(self._text(rhs))
+                if resolved and len(resolved) >= 8:
+                    value = resolved
+                    confidence = max(0.60, confidence - 0.15)
+            if not value:
+                return
+
+        if len(value) < 8:
+            return
+
+        dedup = f"{key_raw.lower()}:{value}"
+        if dedup in self._seen_secret:
+            return
+        self._seen_secret.add(dedup)
+
+        line = lhs.start_point[0] + 1
+        start = max(0, node.start_byte - 40)
+        end   = min(len(self._src), node.end_byte + 40)
+        ctx   = self._src[start:end].decode("utf-8", errors="replace").replace("\n", " ").strip()[:200]
+
+        self.secret_hits.append(ASTSecretHit(
+            key_name   = key_raw,
+            value      = value,
+            line       = line,
+            context    = ctx,
+            severity   = severity,
+            confidence = confidence,
+        ))
+        logger.debug("AST secret assignment: key=%r severity=%s line=%d", key_raw, severity, line)
+
+    def _extract_string_value(self, node) -> Optional[str]:
+        """Return the decoded string value from a string/template node, or None."""
+        if node.type == "string":
+            return self._string_value(node)
+        if node.type == "template_string":
+            val = self._template_value(node)
+            # Only keep if no dynamic parts - a dynamic template is not a literal
+            return val if val and "{dynamic}" not in val else None
+        return None
 
     # ── Resolution helpers ────────────────────────────────────────────────────
 
