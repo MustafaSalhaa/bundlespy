@@ -11,7 +11,33 @@
 
 **JavaScript attack surface scanner**
 
-BundleSpy crawls a target web application, collects JavaScript files, and extracts secrets, endpoints, credentials, and infrastructure details that developers accidentally left in the code. It goes beyond a standard crawler by recovering original source from source maps, discovering hidden webpack chunks, pulling historical JS from web archives, intercepting real browser network traffic, and validating findings against provider APIs.
+**BundleSpy - JavaScript Attack Surface Scanner**
+
+BundleSpy is a security-focused JavaScript attack surface scanner designed to help penetration testers and security teams understand what a web application is really exposing through its frontend code and browser behavior.
+
+Instead of only crawling links and scanning the JavaScript files it finds, BundleSpy digs deeper into the application. It discovers JavaScript and HTML assets, follows application routes, analyzes dynamically loaded resources, and looks for information that can reveal hidden functionality, APIs, infrastructure, credentials, and other security-relevant data.
+
+BundleSpy can recover and analyze source maps, discover Webpack and dynamically loaded chunks, identify client-side routes and API endpoints, inspect WebSockets and browser-generated requests, and use historical web archives to find older JavaScript and application assets that may no longer be directly accessible.
+
+It also combines static analysis with real browser activity. This allows BundleSpy to see requests and resources that only appear after JavaScript executes or after users interact with the application, including XHR/fetch requests, dynamically loaded scripts, lazy-loaded functionality, WebSockets, workers, and other runtime behavior.
+
+One of the main focuses of BundleSpy is finding security-sensitive information inside frontend code. It analyzes JavaScript and HTML for exposed API keys, tokens, credentials, cloud identifiers, configuration values, internal URLs, endpoints, infrastructure references, and other potentially sensitive information. Findings are analyzed with context and confidence rather than treating every matching string as a confirmed secret.
+
+BundleSpy also builds an inventory of the application's attack surface by collecting discovered pages, routes, APIs, endpoints, WebSockets, JavaScript files, source maps, chunks, domains, subdomains, third-party services, and infrastructure references.
+
+The tool is designed to continuously expand its discovery process. When analysis of one asset reveals a new route, JavaScript chunk, endpoint, or resource, that information can be fed back into the discovery pipeline so BundleSpy can continue exploring the newly discovered attack surface.
+
+The overall workflow is essentially:
+
+**Discover → Collect → Analyze → Expand → Correlate → Validate → Report**
+
+This allows BundleSpy to go beyond traditional JavaScript URL extraction and provide a much more complete picture of what can be discovered from a modern web application's frontend.
+
+BundleSpy is built for modern applications where important functionality is often hidden behind client-side routing, API calls, lazy-loaded components, dynamic imports, code splitting, source maps, WebSockets, and browser-side logic.
+
+The goal is simple: **find the attack surface that is easy to miss.**
+
+BundleSpy brings crawling, JavaScript analysis, browser-based discovery, source-map recovery, dynamic chunk discovery, historical asset collection, endpoint extraction, secret detection, infrastructure discovery, and finding validation together into one security-focused reconnaissance tool.
 
 ---
 
