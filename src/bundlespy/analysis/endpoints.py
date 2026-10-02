@@ -30,6 +30,36 @@ RE_API_PATH = re.compile(
     re.IGNORECASE,
 )
 
+# Generic path regex - catches paths that don't start with known prefixes
+# but look like API endpoints: /data/users, /service/payments, /users/profile
+# Filter: must have at least two path segments, no static asset extensions.
+# This fills the gap RE_API_PATH leaves for non-prefixed but clearly server-side paths.
+RE_GENERIC_PATH = re.compile(
+    r'["\x27`]'
+    r'(/[a-zA-Z0-9_\-]+/[a-zA-Z0-9/_\-{}:?=&%#.]{2,80})'
+    r'["\x27`]',
+    re.IGNORECASE,
+)
+
+# Extensions that mark a generic path as a static asset (skip it)
+_STATIC_EXTENSIONS = frozenset([
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".css", ".scss", ".less",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pdf", ".zip", ".gz", ".tar", ".mp4", ".mp3", ".avi", ".webm",
+    ".map", ".json", ".xml", ".yaml", ".yml", ".txt", ".md",
+    ".html", ".htm",
+])
+
+# Path segments that are clearly framework/tooling internals (not endpoints)
+_INTERNAL_SEGMENTS = frozenset([
+    "_next", "_nuxt", "_app", "_astro", "__webpack",
+    "static", "assets", "images", "img", "fonts", "icons",
+    "public", "dist", "build", "vendor",
+    "node_modules", "chunk", "chunks",
+])
+
 RE_FULL_URL = re.compile(
     r'["\x27`]((?:https?|wss?|ws)://[^\s"\x27`<>{}]{10,})["\x27`]',
     re.IGNORECASE,
@@ -146,6 +176,71 @@ SKIP_PATH_PATTERNS = frozenset([
     "/assets/images/", "/static/images/", "/media/",
     "/fonts/", "/icons/",
 ])
+
+
+def _is_generic_path_interesting(path: str) -> bool:
+    """
+    Return True if a generic two-segment path is worth keeping as an endpoint.
+
+    Filters out:
+    - Static asset paths (any known file extension)
+    - Framework-internal paths (_next/, _app/, static/, assets/, etc.)
+    - Paths that are clearly just navigation links (/about, /contact, /blog/post-slug)
+      identified by: only one dynamic segment, no parameter pattern, no verb segment
+
+    Keeps:
+    - Paths with path parameters: /users/{id}, /orders/:id
+    - Paths whose last segment matches a known API verb
+    - Paths whose second segment looks like a resource with an ID (numeric or UUID-style)
+    - Paths with 3+ segments (deeper = more likely API)
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed   = urlparse(path)
+        raw_path = parsed.path
+    except Exception:
+        raw_path = path
+
+    # Strip trailing slash
+    raw_path = raw_path.rstrip("/")
+    if not raw_path:
+        return False
+
+    # Extension check: last path segment
+    last_seg = raw_path.split("/")[-1].split("?")[0].split("#")[0]
+    dot_pos  = last_seg.rfind(".")
+    if dot_pos > 0:
+        ext = last_seg[dot_pos:].lower()
+        if ext in _STATIC_EXTENSIONS:
+            return False
+
+    # Internal framework segment check
+    segments = [s.lower() for s in raw_path.split("/") if s]
+    if not segments:
+        return False
+    if any(seg in _INTERNAL_SEGMENTS for seg in segments):
+        return False
+
+    # Keep paths with explicit parameter patterns: {id}, :id, <id>
+    if re.search(r'[{:<][a-zA-Z_][a-zA-Z0-9_]*[}>:]', raw_path):
+        return True
+
+    # Keep 3+ segment paths (e.g. /api/v2/users or /service/payments/history)
+    if len(segments) >= 3:
+        return True
+
+    # 2-segment path: keep if last segment looks like an ID or verb
+    last_lower = segments[-1].split("?")[0].split("-")
+    if any(part in _API_VERBS for part in last_lower):
+        return True
+    # Numeric ID: /users/123
+    if re.fullmatch(r'\d+', segments[-1]):
+        return True
+    # UUID-style: /items/a1b2c3d4-e5f6-...
+    if re.fullmatch(r'[a-f0-9\-]{8,}', segments[-1], re.IGNORECASE):
+        return True
+
+    return False
 
 
 def _is_skip_url(url: str) -> bool:
@@ -271,5 +366,16 @@ def extract_endpoints(content: str, file_url: str) -> List[Endpoint]:
 
     for match in RE_WEBSOCKET.finditer(content):
         add(match.group(1), "WS", _get_line_number(content, match.start()))
+
+    # Generic path scan — catches /data/users, /service/payments, /users/{id} etc.
+    # that RE_API_PATH misses because they don't start with a known prefix.
+    # Filtered by _is_generic_path_interesting() to suppress static asset noise.
+    for match in RE_GENERIC_PATH.finditer(content):
+        path = match.group(1)
+        # Skip anything RE_API_PATH would have already matched
+        if RE_API_PATH.match(f'"{path}"'):
+            continue
+        if _is_generic_path_interesting(path):
+            add(path, "UNKNOWN", _get_line_number(content, match.start()))
 
     return endpoints
