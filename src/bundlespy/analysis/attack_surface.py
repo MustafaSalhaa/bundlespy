@@ -2026,7 +2026,6 @@ def analyze_attack_surface(endpoints: List) -> Dict:
             oauth_surface.extend(_detect_oauth_misconfig(ep, method, path, segs, params, sources, seen_oauth))
 
             # ── Session fixation ──────────────────────────────────────────────
-            ep_idor = _detect_idor(ep, method, path, segs, params, sources, set())  # read-only pass for chain check
             session_fixation.extend(_detect_session_fixation(ep, method, path, params, sources, seen_sesfix))
 
             # ── Method override ───────────────────────────────────────────────
