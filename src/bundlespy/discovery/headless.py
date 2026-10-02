@@ -6755,34 +6755,20 @@ class HeadlessEngine:
             # processed here while the context is still valid.
             _drain_phase1_responses()
 
-            # Navigate to blank before close - stops pending route handlers
-            # that can block ctx.close() when Phase 3 left the page mid-navigation.
+            # Navigate to blank before close - drains pending route handlers
+            # so ctx.close() doesn't block on a mid-navigation page.
             try:
                 page.goto("about:blank", timeout=3000, wait_until="commit")
             except Exception:
                 pass
 
+            # ctx.close() implicitly closes all pages and the browser context.
+            # Calling browser.close() afterwards raises TargetClosedError because
+            # the context (and effectively the browser) is already gone.
             try:
                 ctx.close()
             except Exception:
                 pass
-
-            # browser.close() can hang if CDP has un-flushed events; run it in
-            # a daemon thread with a hard timeout so the process always exits.
-            import threading as _bt
-            _close_done = _bt.Event()
-
-            def _do_browser_close():
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-                finally:
-                    _close_done.set()
-
-            _bt.Thread(target=_do_browser_close, daemon=True).start()
-            if not _close_done.wait(timeout=10):
-                logger.debug("browser.close() timed out (10s) — skipping")
 
         # ── Phase 4: Build endpoints ──────────────────────────────────────────
         self.timer.start("endpoint_build")
