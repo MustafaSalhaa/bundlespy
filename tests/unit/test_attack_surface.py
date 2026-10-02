@@ -1352,3 +1352,540 @@ class TestAuditFileOpsNoParams:
         result = _run([ep])
         file_items = result["file_ops"]
         assert file_items
+
+
+# ── New detector tests ────────────────────────────────────────────────────────
+
+class TestPrototypePollution:
+    """Prototype-polluting keys in params surface as PROTOTYPE_POLLUTION."""
+
+    def test_proto_key_in_body(self):
+        ep = _ep(url="https://x.com/api/settings",
+                 path="/api/settings",
+                 method="POST",
+                 body_fields=[{"name": "__proto__", "example": '{"admin":true}'}])
+        result = _run([ep])
+        proto = result.get("proto_pollution", [])
+        assert proto, "Expected prototype pollution item"
+        assert proto[0].vuln_class == "PROTOTYPE_POLLUTION"
+
+    def test_constructor_key_in_query(self):
+        ep = _ep(url="https://x.com/api/data",
+                 path="/api/data",
+                 query_params=[{"name": "constructor", "example": "{}"}])
+        result = _run([ep])
+        proto = result.get("proto_pollution", [])
+        assert proto
+
+    def test_prototype_key_body(self):
+        ep = _ep(url="https://x.com/api/merge",
+                 path="/api/merge",
+                 method="PATCH",
+                 body_fields=[{"name": "prototype"}])
+        result = _run([ep])
+        proto = result.get("proto_pollution", [])
+        assert proto
+
+    def test_normal_key_not_flagged(self):
+        ep = _ep(url="https://x.com/api/items",
+                 path="/api/items",
+                 query_params=[{"name": "name"}, {"name": "value"}])
+        result = _run([ep])
+        proto = result.get("proto_pollution", [])
+        assert not proto
+
+    def test_priority_high(self):
+        ep = _ep(url="https://x.com/api/obj",
+                 path="/api/obj",
+                 method="PUT",
+                 body_fields=[{"name": "__proto__"}])
+        result = _run([ep])
+        proto = result.get("proto_pollution", [])
+        assert proto
+        assert proto[0].priority == "HIGH"
+
+
+class TestXXESurface:
+    """XXE detection via content-type and SOAP/XML path markers."""
+
+    def test_xml_content_type_endpoint(self):
+        ep = _ep(url="https://x.com/api/data",
+                 path="/api/data",
+                 method="POST",
+                 request_headers={"Content-Type": "text/xml"})
+        result = _run([ep])
+        xxe = result.get("xxe_surface", [])
+        assert xxe, "Expected XXE surface item for text/xml content-type"
+        assert xxe[0].vuln_class == "XXE"
+
+    def test_soap_path_segment(self):
+        ep = _ep(url="https://x.com/api/soap",
+                 path="/api/soap",
+                 method="POST")
+        result = _run([ep])
+        xxe = result.get("xxe_surface", [])
+        assert xxe
+
+    def test_wsdl_path(self):
+        ep = _ep(url="https://x.com/service.wsdl",
+                 path="/service.wsdl",
+                 method="GET")
+        result = _run([ep])
+        xxe = result.get("xxe_surface", [])
+        assert xxe
+
+    def test_application_xml_content_type(self):
+        ep = _ep(url="https://x.com/api/feed",
+                 path="/api/feed",
+                 method="POST",
+                 request_headers={"Content-Type": "application/xml"})
+        result = _run([ep])
+        xxe = result.get("xxe_surface", [])
+        assert xxe
+
+    def test_json_content_type_not_flagged(self):
+        ep = _ep(url="https://x.com/api/data",
+                 path="/api/data",
+                 method="POST",
+                 request_headers={"Content-Type": "application/json"})
+        result = _run([ep])
+        xxe = result.get("xxe_surface", [])
+        assert not xxe
+
+
+class TestBusinessLogic:
+    """Price tampering, coupon abuse, and negative value surface."""
+
+    def test_price_param_on_checkout(self):
+        ep = _ep(url="https://x.com/api/checkout",
+                 path="/api/checkout",
+                 method="POST",
+                 body_fields=[{"name": "price", "example": "99.99"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz, "Expected business logic item for price on checkout"
+        assert any(it.sub_class == "PRICE_TAMPERING" for it in biz)
+
+    def test_amount_param_on_payment(self):
+        ep = _ep(url="https://x.com/api/payment",
+                 path="/api/payment",
+                 method="POST",
+                 body_fields=[{"name": "amount", "example": "100"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+
+    def test_negative_price_boosts_confidence(self):
+        ep = _ep(url="https://x.com/checkout",
+                 path="/checkout",
+                 method="POST",
+                 body_fields=[{"name": "price", "example": "-10"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+        assert any(it.sub_class == "NEGATIVE_VALUE" for it in biz)
+
+    def test_coupon_param_flagged(self):
+        ep = _ep(url="https://x.com/api/cart",
+                 path="/api/cart",
+                 method="POST",
+                 body_fields=[{"name": "coupon", "example": "SAVE10"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+        assert any(it.sub_class == "COUPON_ABUSE" for it in biz)
+
+    def test_discount_code_flagged(self):
+        ep = _ep(url="https://x.com/api/orders",
+                 path="/api/orders",
+                 method="POST",
+                 body_fields=[{"name": "discountCode"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+
+    def test_voucher_param_flagged(self):
+        ep = _ep(url="https://x.com/api/purchase",
+                 path="/api/purchase",
+                 method="POST",
+                 body_fields=[{"name": "voucher"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+
+    def test_price_off_checkout_lower_confidence(self):
+        # price param on non-checkout path still flagged but lower confidence
+        ep = _ep(url="https://x.com/api/products",
+                 path="/api/products",
+                 method="GET",
+                 query_params=[{"name": "price"}])
+        result = _run([ep])
+        biz = result.get("business_logic", [])
+        assert biz
+        # Confidence lower than when on checkout path
+        assert all(it.confidence < 70 for it in biz)
+
+
+class TestOAuthMisconfig:
+    """OAuth redirect_uri, missing state, and implicit flow detection."""
+
+    def test_redirect_uri_param_flagged(self):
+        ep = _ep(url="https://x.com/oauth/authorize",
+                 path="/oauth/authorize",
+                 method="GET",
+                 query_params=[
+                     {"name": "redirect_uri", "example": "https://app.com/cb"},
+                     {"name": "client_id"},
+                     {"name": "state"},
+                 ])
+        result = _run([ep])
+        oauth = result.get("oauth_surface", [])
+        assert oauth, "Expected OAuth misconfig item for redirect_uri"
+        assert any(it.vuln_class == "OAUTH_MISCONFIG" for it in oauth)
+
+    def test_missing_state_on_authorize(self):
+        ep = _ep(url="https://x.com/oauth/authorize",
+                 path="/oauth/authorize",
+                 method="GET",
+                 query_params=[
+                     {"name": "redirect_uri"},
+                     {"name": "client_id"},
+                     # no 'state' param
+                 ])
+        result = _run([ep])
+        oauth = result.get("oauth_surface", [])
+        missing = [it for it in oauth if it.sub_class == "MISSING_STATE_PARAM"]
+        assert missing, "Missing state param should be flagged on /authorize"
+
+    def test_implicit_flow_flagged(self):
+        ep = _ep(url="https://x.com/oauth/authorize",
+                 path="/oauth/authorize",
+                 method="GET",
+                 query_params=[
+                     {"name": "response_type", "example": "token"},
+                     {"name": "client_id"},
+                 ])
+        result = _run([ep])
+        oauth = result.get("oauth_surface", [])
+        implicit = [it for it in oauth if it.sub_class == "IMPLICIT_FLOW"]
+        assert implicit, "Implicit flow (response_type=token) should be flagged"
+
+    def test_redirect_uri_high_confidence_on_oauth_path(self):
+        ep = _ep(url="https://x.com/oauth/authorize",
+                 path="/oauth/authorize",
+                 method="GET",
+                 query_params=[{"name": "redirect_uri"}])
+        result = _run([ep])
+        oauth = result.get("oauth_surface", [])
+        redir = [it for it in oauth if it.sub_class == "REDIRECT_URI_PARAM"]
+        assert redir
+        assert all(it.confidence >= 60 for it in redir)
+
+
+class TestSessionFixation:
+    """Session/auth tokens in URL params (not cookies) flagged as fixation surface."""
+
+    def test_session_id_in_query(self):
+        ep = _ep(url="https://x.com/api/data?sessionId=abc123",
+                 path="/api/data",
+                 query_params=[{"name": "sessionId", "example": "abc123"}])
+        result = _run([ep])
+        sf = result.get("session_fixation", [])
+        assert sf, "sessionId in query param should be flagged"
+        assert sf[0].vuln_class == "SESSION_FIXATION"
+
+    def test_jsessionid_in_query(self):
+        ep = _ep(url="https://x.com/app",
+                 path="/app",
+                 query_params=[{"name": "JSESSIONID"}])
+        result = _run([ep])
+        sf = result.get("session_fixation", [])
+        assert sf
+
+    def test_access_token_in_query(self):
+        ep = _ep(url="https://x.com/api/resource",
+                 path="/api/resource",
+                 query_params=[{"name": "access_token", "example": "eyJhbG"}])
+        result = _run([ep])
+        sf = result.get("session_fixation", [])
+        assert sf
+
+    def test_session_id_in_body_not_flagged(self):
+        # Session tokens in the body (e.g. refresh_token endpoint) are expected
+        ep = _ep(url="https://x.com/api/token/refresh",
+                 path="/api/token/refresh",
+                 method="POST",
+                 body_fields=[{"name": "sessionId"}])
+        result = _run([ep])
+        sf = result.get("session_fixation", [])
+        assert not sf, "Session token in POST body should not be flagged as fixation"
+
+    def test_session_fixation_high_priority_in_query(self):
+        ep = _ep(url="https://x.com/login",
+                 path="/login",
+                 query_params=[{"name": "sid"}])
+        result = _run([ep])
+        sf = result.get("session_fixation", [])
+        assert sf
+        assert any(it.priority == "HIGH" for it in sf)
+
+
+class TestMethodOverride:
+    """X-HTTP-Method-Override header detection."""
+
+    def test_method_override_header_flagged(self):
+        ep = _ep(url="https://x.com/api/resource",
+                 path="/api/resource",
+                 method="POST",
+                 request_headers={"X-HTTP-Method-Override": "DELETE"})
+        result = _run([ep])
+        mo = result.get("method_override", [])
+        assert mo, "X-HTTP-Method-Override header should be flagged"
+        assert mo[0].vuln_class == "METHOD_OVERRIDE"
+
+    def test_x_method_override_header(self):
+        ep = _ep(url="https://x.com/api/users/1",
+                 path="/api/users/1",
+                 method="POST",
+                 request_headers={"X-Method-Override": "PUT"})
+        result = _run([ep])
+        mo = result.get("method_override", [])
+        assert mo
+
+    def test_no_override_header_not_flagged(self):
+        ep = _ep(url="https://x.com/api/users",
+                 path="/api/users",
+                 method="POST",
+                 request_headers={"Content-Type": "application/json"})
+        result = _run([ep])
+        mo = result.get("method_override", [])
+        assert not mo
+
+
+class TestExposedFiles:
+    """Backup files, git exposure, env file exposure via path patterns."""
+
+    def test_git_directory_exposed(self):
+        ep = _ep(url="https://x.com/.git/config",
+                 path="/.git/config",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef, "/.git/ path should be flagged"
+        assert ef[0].vuln_class == "GIT_EXPOSURE"
+
+    def test_svn_directory_exposed(self):
+        ep = _ep(url="https://x.com/.svn/entries",
+                 path="/.svn/entries",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef
+
+    def test_env_file_exposed(self):
+        ep = _ep(url="https://x.com/.env",
+                 path="/.env",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef, ".env file should be flagged"
+        assert ef[0].vuln_class == "ENV_EXPOSURE"
+
+    def test_env_local_exposed(self):
+        ep = _ep(url="https://x.com/.env.local",
+                 path="/.env.local",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef
+
+    def test_config_json_exposed(self):
+        ep = _ep(url="https://x.com/config.json",
+                 path="/config.json",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef
+
+    def test_backup_bak_extension(self):
+        ep = _ep(url="https://x.com/index.php.bak",
+                 path="/index.php.bak",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef, ".bak file should be flagged"
+        assert ef[0].vuln_class == "BACKUP_EXPOSURE"
+
+    def test_swp_backup(self):
+        ep = _ep(url="https://x.com/config.py.swp",
+                 path="/config.py.swp",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef
+
+    def test_normal_api_path_not_flagged(self):
+        ep = _ep(url="https://x.com/api/users",
+                 path="/api/users",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert not ef
+
+    def test_git_high_confidence(self):
+        ep = _ep(url="https://x.com/.git/HEAD",
+                 path="/.git/HEAD",
+                 method="GET")
+        result = _run([ep])
+        ef = result.get("exposed_files", [])
+        assert ef
+        assert ef[0].confidence >= 75
+
+
+class TestDeserialization:
+    """Deserialization surface via ViewState and serialized value patterns."""
+
+    def test_viewstate_param_flagged(self):
+        ep = _ep(url="https://x.com/WebForm.aspx",
+                 path="/WebForm.aspx",
+                 method="POST",
+                 body_fields=[{"name": "__VIEWSTATE", "example": "dGVzdA=="}])
+        result = _run([ep])
+        deser = result.get("deserialization", [])
+        assert deser, "ViewState param should trigger deserialization detection"
+        assert deser[0].vuln_class == "DESERIALIZATION"
+
+    def test_java_serialized_base64_value(self):
+        ep = _ep(url="https://x.com/api/session",
+                 path="/api/session",
+                 method="POST",
+                 body_fields=[{"name": "data", "example": "rO0ABXNyABpqYXZhLm"}])
+        result = _run([ep])
+        deser = result.get("deserialization", [])
+        assert deser, "Java serialized base64 value should be flagged"
+
+    def test_php_serialize_array_value(self):
+        ep = _ep(url="https://x.com/api/object",
+                 path="/api/object",
+                 method="POST",
+                 body_fields=[{"name": "payload", "example": 'a:2:{s:4:"name";s:4:"test";}'}])
+        result = _run([ep])
+        deser = result.get("deserialization", [])
+        assert deser
+
+    def test_php_serialize_object_value(self):
+        ep = _ep(url="https://x.com/api/token",
+                 path="/api/token",
+                 method="POST",
+                 body_fields=[{"name": "token", "example": 'O:8:"stdClass":1:{s:4:"data";s:4:"test";}'}])
+        result = _run([ep])
+        deser = result.get("deserialization", [])
+        assert deser
+
+    def test_normal_param_not_flagged(self):
+        ep = _ep(url="https://x.com/api/login",
+                 path="/api/login",
+                 method="POST",
+                 body_fields=[{"name": "username"}, {"name": "password"}])
+        result = _run([ep])
+        deser = result.get("deserialization", [])
+        assert not deser
+
+
+class TestPrivescChain:
+    """IDOR + privilege param on same endpoint = chained privesc surface."""
+
+    def test_idor_plus_role_param_chains(self):
+        ep = _ep(url="https://x.com/api/users/5/settings",
+                 path="/api/users/5/settings",
+                 method="PATCH",
+                 body_fields=[{"name": "role", "example": "admin"}])
+        result = _run([ep])
+        chain = result.get("privesc_chain", [])
+        assert chain, "IDOR path ID + role param should trigger privesc chain"
+        assert chain[0].vuln_class == "PRIVESC_CHAIN"
+
+    def test_no_idor_no_chain(self):
+        # Path with no IDs and no IDOR signal - no chain
+        ep = _ep(url="https://x.com/api/settings",
+                 path="/api/settings",
+                 method="PATCH",
+                 body_fields=[{"name": "theme"}])
+        result = _run([ep])
+        chain = result.get("privesc_chain", [])
+        assert not chain
+
+    def test_idor_without_priv_param_no_chain(self):
+        # IDOR in path but no privilege param - should NOT chain
+        ep = _ep(url="https://x.com/api/users/5/profile",
+                 path="/api/users/5/profile",
+                 method="PATCH",
+                 body_fields=[{"name": "bio"}, {"name": "avatar"}])
+        result = _run([ep])
+        chain = result.get("privesc_chain", [])
+        assert not chain
+
+    def test_chain_vuln_class_and_sub_class(self):
+        ep = _ep(url="https://x.com/api/users/42/permissions",
+                 path="/api/users/42/permissions",
+                 method="PUT",
+                 body_fields=[{"name": "permissions", "example": "[admin]"}])
+        result = _run([ep])
+        chain = result.get("privesc_chain", [])
+        assert chain
+        assert chain[0].sub_class == "IDOR_PRIV_CHAIN"
+
+    def test_chain_confidence_high(self):
+        ep = _ep(url="https://x.com/api/accounts/99/roles",
+                 path="/api/accounts/99/roles",
+                 method="PUT",
+                 body_fields=[{"name": "role"}])
+        result = _run([ep])
+        chain = result.get("privesc_chain", [])
+        assert chain
+        assert any(it.confidence >= 70 for it in chain)
+
+
+class TestNewDetectorKeys:
+    """All new return dict keys are present and contain lists."""
+
+    def test_all_new_keys_present(self):
+        result = _run([])
+        new_keys = [
+            "proto_pollution", "xxe_surface", "business_logic",
+            "oauth_surface", "session_fixation", "method_override",
+            "exposed_files", "deserialization", "privesc_chain",
+        ]
+        for key in new_keys:
+            assert key in result, f"Missing new key: {key}"
+
+    def test_all_new_keys_are_lists(self):
+        result = _run([])
+        new_keys = [
+            "proto_pollution", "xxe_surface", "business_logic",
+            "oauth_surface", "session_fixation", "method_override",
+            "exposed_files", "deserialization", "privesc_chain",
+        ]
+        for key in new_keys:
+            assert isinstance(result[key], list), f"Key {key} should be a list"
+
+    def test_new_items_count_in_total(self):
+        ep = _ep(url="https://x.com/.git/config",
+                 path="/.git/config",
+                 method="GET")
+        result = _run([ep])
+        # .git exposure should show in total_items
+        ef = result.get("exposed_files", [])
+        assert ef
+        assert result["total_items"] >= len(ef)
+
+    def test_new_items_are_attack_surface_items(self):
+        from bundlespy.analysis.attack_surface import AttackSurfaceItem
+        ep = _ep(url="https://x.com/api/checkout",
+                 path="/api/checkout",
+                 method="POST",
+                 body_fields=[{"name": "price", "example": "9.99"},
+                               {"name": "coupon"}])
+        result = _run([ep])
+        for item in result.get("business_logic", []):
+            assert isinstance(item, AttackSurfaceItem)
