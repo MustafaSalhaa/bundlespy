@@ -606,3 +606,243 @@ class SecretScanner:
         # Sort by severity score: CRITICAL confirmed_live first, INFO FP last
         findings.sort(key=_severity_score, reverse=True)
         return findings
+
+    def scan_with_env(
+        self,
+        content: str,
+        file_url: str,
+        source_page: str = "",
+        ast_env=None,
+        ast_secret_hits=None,
+    ) -> List[Finding]:
+        """
+        Full scan combining:
+          1. The standard regex pass (identical to scan()).
+          2. DataFlowEnv variable resolution: matched values that look like
+             variable names are looked up in ast_env before scoring, so a
+             split assignment like `const k = "AUTH_..."; config.apiKey = k`
+             is caught even when the regex only sees the variable name `k`.
+          3. ASTSecretHit ingestion: key/value pairs from the AST walk are
+             converted to findings with boosted confidence and key-name-aware
+             severity, skipping the regex layer entirely for these.
+
+        ast_env          -- DataFlowEnvAugmented from augment_env_and_extract(),
+                            or None to skip env resolution.
+        ast_secret_hits  -- list of ASTSecretHit objects, or None to skip.
+
+        The regex layer always runs; the AST paths add on top of it.
+        Findings are deduplicated across all three paths by sha256 key.
+        """
+        # Run standard regex scan first - this is the foundation, never removed
+        findings = self.scan(content, file_url, source_page)
+        seen: Dict[str, Finding] = {f.sha256: f for f in findings}
+
+        # ── Path 2: env variable resolution ──────────────────────────────────
+        # For each regex finding whose matched_value looks like a JS identifier
+        # (no spaces, no special chars, not a known secret pattern itself),
+        # try to resolve it via the env and re-scan the resolved value.
+        if ast_env is not None:
+            _ident_re = re.compile(r'^[A-Za-z_$][A-Za-z0-9_$.]*$')
+            for existing_finding in list(findings):
+                raw = existing_finding.matched_value
+                if not raw or len(raw) > 60:
+                    continue
+                if not _ident_re.match(raw):
+                    continue
+                resolved = ast_env.resolve(raw)
+                if not resolved or resolved == raw or len(resolved) < 8:
+                    continue
+                # Re-run all rules against the resolved value
+                _env_findings: List[Finding] = []
+                _env_seen: Dict[str, Finding] = {}
+                self._scan_content(resolved, file_url, source_page, _env_findings, _env_seen)
+                for ef in _env_findings:
+                    if ef.sha256 in seen:
+                        continue
+                    # Carry the context from the original finding so analysts
+                    # see where the variable was used, not just where it was defined
+                    ef.context = existing_finding.context or ef.context
+                    ef.false_positive_notes = (
+                        f"Value resolved via AST variable '{raw}'. "
+                        + (ef.false_positive_notes or "")
+                    ).strip()
+                    seen[ef.sha256] = ef
+                    findings.append(ef)
+
+        # ── Path 3: AST secret hit ingestion ─────────────────────────────────
+        if ast_secret_hits:
+            for hit in ast_secret_hits:
+                findings.extend(
+                    _ast_hit_to_findings(hit, file_url, source_page, seen, self.rules)
+                )
+
+        findings.sort(key=_severity_score, reverse=True)
+        return findings
+
+
+def _ast_hit_to_findings(
+    hit,
+    file_url: str,
+    source_page: str,
+    seen: Dict[str, "Finding"],
+    rules: List["SecretRule"],
+) -> List["Finding"]:
+    """
+    Convert one ASTSecretHit into zero or more Finding objects.
+
+    Strategy:
+    - Run the matched string value through all existing rules first - if any
+      rule already matches, boost that finding's confidence and add key-name
+      context rather than creating a duplicate.
+    - If no rule matched but the value has sufficient entropy, synthesize a
+      GENERIC_SECRET finding using the AST-derived severity/confidence.
+    - Placeholder/FP checks still apply - AST context does not override entropy.
+    """
+    new_findings: List[Finding] = []
+    value = hit.value
+    if not value or len(value) < 8:
+        return new_findings
+
+    # Entropy check - AST context doesn't override obviously fake values
+    is_fp, fp_reason = _is_likely_fp(value, min_entropy=2.5)
+    if is_fp:
+        return new_findings
+
+    # Try existing rules against the raw value
+    matched_by_rule = False
+    for rule in rules:
+        m = rule.pattern.search(value)
+        if not m:
+            continue
+        raw_value = m.group(1) if (m.lastindex and m.lastindex >= 1) else m.group(0)
+        if not raw_value:
+            continue
+
+        # Compute SHA against rule+value
+        sha256 = hashlib.sha256(f"{rule.id}:{raw_value}".encode()).hexdigest()
+        if sha256 in seen:
+            # Boost existing finding - the AST key context confirms it
+            existing = seen[sha256]
+            existing.confidence = min(0.99, existing.confidence * 1.15)
+            existing.confidence_label = _confidence_label(existing.confidence)
+            if hit.key_name not in existing.context:
+                existing.context = f"[key: {hit.key_name}] " + existing.context
+            matched_by_rule = True
+            continue
+
+        # Apply key-name severity override
+        severity  = _key_severity_override(hit.key_name, rule.severity)
+        # Confidence: take the higher of rule baseline and AST hit confidence,
+        # then multiply for the structural bonus
+        confidence = min(0.99, max(rule.confidence, hit.confidence) * 1.10)
+        if is_fp:
+            confidence = min(confidence * 0.3, 0.3)
+        label = _confidence_label(confidence)
+
+        finding_id = Finding.make_id(rule.id, raw_value, file_url)
+        f = Finding(
+            id                   = finding_id,
+            rule_id              = rule.id,
+            title                = rule.name,
+            category             = rule.category,
+            severity             = severity,
+            confidence           = round(confidence, 2),
+            file_url             = file_url,
+            source_page          = source_page,
+            line_number          = hit.line,
+            column               = 0,
+            matched_value        = raw_value,
+            redacted_value       = Finding.redact(raw_value),
+            sha256               = sha256,
+            context              = f"[key: {hit.key_name}] {hit.context}",
+            description          = rule.description,
+            impact               = "",
+            remediation          = rule.remediation,
+            false_positive_notes = (
+                f"Found as value of property '{hit.key_name}'. " + (rule.fp_notes or "")
+            ).strip(),
+            confidence_label     = label,
+            occurrences          = [f"{file_url}:{hit.line}"],
+        )
+        seen[sha256] = f
+        new_findings.append(f)
+        matched_by_rule = True
+
+    if matched_by_rule:
+        return new_findings
+
+    # No rule matched - synthesize a generic finding if entropy is high enough
+    entropy = _shannon_entropy(value)
+    if entropy < 3.0 or len(value) < 16:
+        return new_findings
+
+    rule_id    = "AST_GENERIC_SECRET"
+    sha256     = hashlib.sha256(f"{rule_id}:{value}".encode()).hexdigest()
+    if sha256 in seen:
+        return new_findings
+
+    severity   = hit.severity
+    confidence = round(min(0.92, hit.confidence), 2)
+    label      = _confidence_label(confidence)
+
+    finding_id = Finding.make_id(rule_id, value, file_url)
+    f = Finding(
+        id                   = finding_id,
+        rule_id              = rule_id,
+        title                = f"Generic Secret ({hit.key_name})",
+        category             = "Generic",
+        severity             = severity,
+        confidence           = confidence,
+        file_url             = file_url,
+        source_page          = source_page,
+        line_number          = hit.line,
+        column               = 0,
+        matched_value        = value,
+        redacted_value       = Finding.redact(value),
+        sha256               = sha256,
+        context              = f"[key: {hit.key_name}] {hit.context}",
+        description          = (
+            f"High-entropy string assigned to property '{hit.key_name}', "
+            f"which is a known secret key name. No specific rule matched the "
+            f"value pattern but the structural context is suspicious."
+        ),
+        impact               = "",
+        remediation          = (
+            "Verify this value is not a credential or key. "
+            "If it is, rotate it and move it to environment variables."
+        ),
+        false_positive_notes = (
+            f"Generic match based on key name '{hit.key_name}' and high entropy "
+            f"({entropy:.2f} bits). Review manually."
+        ),
+        confidence_label     = label,
+        occurrences          = [f"{file_url}:{hit.line}"],
+    )
+    seen[sha256] = f
+    new_findings.append(f)
+    return new_findings
+
+
+def _confidence_label(confidence: float) -> str:
+    if confidence >= 0.85:
+        return "likely_secret"
+    if confidence <= 0.30:
+        return "likely_false_positive"
+    return "candidate"
+
+
+def _key_severity_override(key_name: str, rule_severity: str) -> str:
+    """
+    Bump severity when the property key name is a known high-value secret
+    indicator. We never downgrade a rule's severity - only upgrade.
+    """
+    from .ast_parser import _classify_key
+    key_severity, _ = _classify_key(key_name)
+    if key_severity is None:
+        return rule_severity
+
+    _ORDER = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+    key_rank  = _ORDER.get(key_severity, 1)
+    rule_rank = _ORDER.get(rule_severity, 1)
+    _RANK_TO_SEV = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW", 1: "INFO"}
+    return _RANK_TO_SEV[max(key_rank, rule_rank)]
