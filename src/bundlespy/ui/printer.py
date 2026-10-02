@@ -1187,14 +1187,19 @@ def print_summary(result, extras=None, report_paths=None):
             _p(f"  {A.GREY}  {fmt.upper():<8}{A.RESET}  {path}")
 
     _p()
+    # final status line - reflects the actual highest severity found
     if counts.get("CRITICAL") or validated:
         _p(f"  {A.RED}{A.BOLD}Critical findings present. Immediate action required.{A.RESET}")
     elif counts.get("HIGH"):
         _p(f"  {A.ORANGE}{A.BOLD}High severity findings present. Review required.{A.RESET}")
     elif counts.get("MEDIUM"):
-        _p(f"  {A.YELLOW}Medium severity findings present.{A.RESET}")
+        _p(f"  {A.YELLOW}Medium severity findings. Review recommended.{A.RESET}")
+    elif counts.get("LOW") or counts.get("INFO"):
+        _p(f"  {A.BLUE}Low severity findings only.{A.RESET}")
+    elif real:
+        _p(f"  {A.GREY}Findings present. Review output above.{A.RESET}")
     else:
-        _p(f"  {A.GREEN}Scan complete. No critical findings.{A.RESET}")
+        _p(f"  {A.GREEN}No findings detected.{A.RESET}")
     _p()
 
 
