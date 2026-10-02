@@ -6503,20 +6503,18 @@ class HeadlessEngine:
                     _drain_rp_and_js()
                     _drain_queue_into_pool()
 
-            # Shut down thread-local browsers - each worker thread closes its
-            # own pw+browser. submit num_browsers cleanup tasks so every thread
-            # in the pool gets a chance to run cleanup_thread_browser().
-            # This runs inside the 'with' block so the same threads are still alive.
-            _cleanup_futs = [
-                _executor.submit(_browser_pool.cleanup_thread_browser)
-                for _ in range(self.num_browsers)
-            ]
-            for _cf in _as_completed(_cleanup_futs):
-                try:
-                    _cf.result()
-                except Exception:
-                    pass
-            logger.info("BrowserPool closed")
+                # Shut down thread-local pw+browser - runs inside the 'with' block
+                # so the executor threads are still alive to handle the cleanup tasks.
+                _cleanup_futs = [
+                    _executor.submit(_browser_pool.cleanup_thread_browser)
+                    for _ in range(self.num_browsers)
+                ]
+                for _cf in _as_completed(_cleanup_futs):
+                    try:
+                        _cf.result()
+                    except Exception:
+                        pass
+                logger.info("BrowserPool closed")
 
             self.timer.stop("phase2_routes")
 
