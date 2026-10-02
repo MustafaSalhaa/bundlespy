@@ -485,6 +485,7 @@ class Endpoint:
     path_params:     list  = None   # [{"name": "id", "position": 2}]
     body_fields:     list  = None   # [{"name": "email"}, {"name": "password"}]
     request_headers: dict  = None   # {"Content-Type": "application/json"}
+    content_type:    str   = ""     # request Content-Type, e.g. "application/json"
     auth_context:    str   = ""     # "Bearer", "Cookie", "ApiKey", "None"
     evidence:        str   = ""     # Raw JS snippet that revealed this endpoint
     kind:            str   = "api"  # api / route / external / websocket / graphql
