@@ -693,11 +693,25 @@ class _ASTWalker:
                             )
                 return
 
-            # xhr.open("POST", url)
+            # xhr.open("POST", url) - with scope-aware setRequestHeader extraction
             if prop_text == "open" and len(args) >= 2:
                 method = self._string_from_node(args[0]) or "UNKNOWN"
-                for url in self._resolve_url_arg(args[1]):
-                    self._add(url, method.upper(), node, confidence=0.90)
+                if method.upper() not in {"GET", "HEAD", "OPTIONS", "POST",
+                                          "PUT", "PATCH", "DELETE"}:
+                    return
+                resolved = list(self._resolve_url_arg(args[1]))
+                if not resolved:
+                    return
+                # scan the enclosing function/global scope for setRequestHeader calls
+                xhr_headers = self._xhr_headers(node, obj_text)
+                ev_extra = ""
+                if xhr_headers:
+                    ev_extra = "headers: " + ",".join(xhr_headers.keys())
+                for url in resolved:
+                    self._add_with_evidence(
+                        url, method.upper(), node,
+                        confidence=0.90, extra=ev_extra,
+                    )
                 return
 
             # superagent/got/ky/http.get(url)
@@ -1226,6 +1240,71 @@ class _ASTWalker:
         if headers:
             parts.append("headers: " + ",".join(headers))
         return " | ".join(parts)
+
+    def _xhr_headers(self, open_node, xhr_obj_name: str) -> Dict[str, str]:
+        """
+        Walk up to the enclosing function/global scope and find
+        xhr_obj_name.setRequestHeader(name, value) calls.
+        Returns {header_name: value_or_empty}.
+        Flags hardcoded auth headers as HIGH secret hits.
+        """
+        _auth_headers = {"authorization", "x-api-key", "x-auth-token",
+                         "x-access-token", "token", "api-key", "apikey"}
+
+        # ascend to function or global scope
+        scope = open_node.parent
+        if scope is None:
+            return {}
+        while True:
+            parent = scope.parent
+            if parent is None:
+                break
+            scope = parent
+            t = scope.type
+            if t in ("function_declaration", "function", "arrow_function"):
+                break
+
+        # scan all call_expressions in scope for xhr.setRequestHeader(...)
+        headers: Dict[str, str] = {}
+        stack = list(reversed(scope.children))
+        while stack:
+            n = stack.pop()
+            if n.type == "call_expression":
+                fn = n.child_by_field_name("function")
+                if fn is not None:
+                    fn_text = self._text(fn)
+                    if (fn_text.endswith(".setRequestHeader")
+                            and fn_text.startswith(xhr_obj_name)):
+                        args_node = n.child_by_field_name("arguments")
+                        if args_node is not None:
+                            named = args_node.named_children
+                            if named and named[0].type == "string":
+                                hname = self._text(named[0]).strip("'\"` ")
+                                if hname and hname not in headers:
+                                    hval = ""
+                                    if len(named) > 1 and named[1].type == "string":
+                                        hval = self._text(named[1]).strip("'\"` ")
+                                    headers[hname] = hval
+                                    # flag hardcoded sensitive header values
+                                    if hname.lower() in _auth_headers and len(hval) >= 8:
+                                        already = any(
+                                            s.key_name == hname and s.value == hval
+                                            for s in self.secret_hits
+                                        )
+                                        if not already:
+                                            self.secret_hits.append(ASTSecretHit(
+                                                key_name   = hname,
+                                                value      = hval,
+                                                line       = n.start_point[0] + 1,
+                                                context    = f"XHR setRequestHeader: {hname}",
+                                                severity   = "HIGH",
+                                                confidence = 0.88,
+                                            ))
+            # descend into children (skip function boundaries to stay in scope)
+            if n.type not in ("function_declaration", "function", "arrow_function"):
+                stack.extend(reversed(n.children))
+
+        return headers
 
     def _add_with_evidence(
         self,
