@@ -112,6 +112,7 @@ other:
     _fg.add_argument("-P", "--passive",          action="store_true", help="Pull historical JS from Wayback Machine + CommonCrawl instead of crawling live")
     _fg.add_argument("-H", "--headless",         action="store_true", help="Launch a real browser to trigger lazy-loaded JS and intercept network calls")
     _fg.add_argument("-S", "--stealth",          action="store_true", help="Enable evasion: randomized delays, realistic headers, no automation flags")
+    _fg.add_argument("--no-verify",             action="store_true", help="Disable SSL certificate verification (use for self-signed certs)")
     _fg.add_argument("-V", "--validate",         action="store_true", help="HTTP-probe discovered endpoints to confirm they respond")
     _fg.add_argument("-K", "--validate-secrets", action="store_true", help="Live-probe found secrets against their provider APIs to confirm they are active")
     _fg.add_argument("-G", "--graphql",          action="store_true", help="Run GraphQL introspection on any GraphQL endpoints found")
@@ -566,6 +567,7 @@ def run_scan(args) -> int:
         requests_per_second=args.rate,
         stealth=args.stealth,
         extra_headers=extra_headers,
+        verify_ssl=not args.no_verify,
     )
     scope = ScopeChecker(
         target_url=target,
@@ -726,6 +728,7 @@ def run_scan(args) -> int:
                         requests_per_second=args.rate,
                         stealth=args.stealth,
                         extra_headers=extra_headers,
+                        verify_ssl=not args.no_verify,
                     )
                     if not args.quiet:
                         phase_done(
@@ -846,21 +849,32 @@ def run_scan(args) -> int:
         else:
             all_endpoints_extra = []
 
+        _js_new          = len(headless_files)
+        _js_intercepted  = headless_stats.get("js_intercepted", 0)
+        # When headless found 0 new files but intercepted >0 JS responses, the
+        # static crawler already captured those files (dedup working correctly).
+        # Show both counts so the operator isn't misled.
+        if _js_intercepted > _js_new:
+            _js_label = f"{_js_new} JS new ({_js_intercepted} seen)"
+        else:
+            _js_label = f"{_js_new} JS"
+
         extras["headless_stats"] = {
-            "pages":     headless_stats.get("pages", 0),
-            "js":        len(headless_files),
-            "xhr":       headless_stats.get("xhr", 0),
-            "fetch":     headless_stats.get("fetch", 0),
-            "ws":        headless_stats.get("ws", 0),
-            "routes":    headless_stats.get("routes", 0),
-            "endpoints": headless_stats.get("endpoints", 0),
-            "workers":   headless_stats.get("workers", 0),
-            "timings":   headless_stats.get("timings", {}),
+            "pages":          headless_stats.get("pages", 0),
+            "js":             _js_new,
+            "js_intercepted": _js_intercepted,
+            "xhr":            headless_stats.get("xhr", 0),
+            "fetch":          headless_stats.get("fetch", 0),
+            "ws":             headless_stats.get("ws", 0),
+            "routes":         headless_stats.get("routes", 0),
+            "endpoints":      headless_stats.get("endpoints", 0),
+            "workers":        headless_stats.get("workers", 0),
+            "timings":        headless_stats.get("timings", {}),
         }
         if not args.quiet:
             phase_done("Browser discovery",
                 f"{headless_stats.get('pages',0)} pages  "
-                f"{len(headless_files)} JS  "
+                f"{_js_label}  "
                 f"{headless_stats.get('xhr',0)+headless_stats.get('fetch',0)} API calls  "
                 f"{headless_stats.get('ws',0)} WS  "
                 f"{headless_stats.get('routes',0)} routes"
