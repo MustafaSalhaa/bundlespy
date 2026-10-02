@@ -1421,11 +1421,28 @@ class PageStabilizer:
         """Short adaptive wait after a click/hover/scroll."""
         self.wait(max_ms=max_ms, quiet_ms=100)
 
-    def wait_for_framework(self, max_ms: int = 3000) -> None:
+    def wait_for_framework(self, max_ms: int = 3000, is_spa: bool = None) -> None:
         """
-        Wait for SPA framework to mount — Angular/React/Vue.
+        Wait for SPA framework to mount - Angular/React/Vue.
         Detects actual framework readiness, not a fixed delay.
+
+        is_spa: True  = confirmed SPA   -> 800ms stability wait after mount
+                False = confirmed non-SPA -> 150ms stability wait (skip poll)
+                None  = unknown          -> original 1000ms wait (safe default)
+
+        Non-SPA pages have document.body.children.length > 2 instantly, so the
+        poll fires on the first check every time. Cutting the stability wait from
+        1000ms to 150ms saves ~850ms per page on static sites.
         """
+        # Non-SPA: skip the poll entirely (content is already there), just a
+        # short DOM stability wait so late-appended links are captured.
+        if is_spa is False:
+            self.wait(max_ms=150, quiet_ms=50)
+            return
+
+        # SPA or unknown: run the framework poll as before
+        stability_ms = 800 if is_spa else 1000
+
         start = time.monotonic()
         deadline = start + max_ms / 1000
         framework_ready = False
@@ -1443,7 +1460,7 @@ class PageStabilizer:
                             document.querySelector('[data-reactroot] > *')) return true;
                         // Vue
                         if (document.querySelector('[data-v-app] > *')) return true;
-                        // Generic — any meaningful content loaded
+                        // Generic - any meaningful content loaded
                         if (document.body && document.body.children.length > 2) return true;
                         return false;
                     })()
@@ -1456,8 +1473,8 @@ class PageStabilizer:
             self.page.wait_for_timeout(100)
 
         if framework_ready:
-            # Brief stability wait after framework mounts
-            self.wait(max_ms=1000, quiet_ms=150)
+            # Stability wait after framework mounts - shorter for confirmed SPAs
+            self.wait(max_ms=stability_ms, quiet_ms=150)
 
 
 def _wait_heuristic(page, max_ms: int = 15000) -> None:
@@ -2495,13 +2512,52 @@ class BrowserPool:
         self._cdp_response_fn = cdp_response_fn
         # Semaphore caps the number of parallel browser visits.
         self._sem = threading.Semaphore(self._num)
+        # Thread-local storage - each worker thread keeps its pw+browser alive
+        # across all its URL visits instead of relaunching Chromium every time.
+        self._tls = threading.local()
+
+    def init_thread_browser(self) -> None:
+        """
+        Launch pw+browser for the calling worker thread - called once per thread.
+        Stored in thread-local so the same Chromium process handles all visits
+        on this thread without relaunching. Safe: Playwright objects are
+        greenlet-bound to the creating thread.
+        """
+        from playwright.sync_api import sync_playwright as _sync_playwright
+        if getattr(self._tls, "pw", None) is not None:
+            return  # already initialized for this thread
+        pw      = _sync_playwright().start()
+        browser = pw.chromium.launch(headless=True, args=self._browser_args)
+        self._tls.pw      = pw
+        self._tls.browser = browser
+
+    def cleanup_thread_browser(self) -> None:
+        """
+        Close the pw+browser for the calling thread. Call this when the worker
+        thread is done (e.g. via executor initializer teardown or atexit).
+        """
+        try:
+            b = getattr(self._tls, "browser", None)
+            if b is not None:
+                b.close()
+        except Exception:
+            pass
+        try:
+            pw = getattr(self._tls, "pw", None)
+            if pw is not None:
+                pw.stop()
+        except Exception:
+            pass
+        self._tls.pw      = None
+        self._tls.browser = None
 
     def make_thread_browser(self) -> dict:
         """
-        Create a complete Playwright stack owned by the calling thread.
+        Create a new ctx+page on the thread-local browser.
 
-        Must be called from the worker thread that will use the returned page —
-        never from a different thread.  Returns a dict with keys:
+        Must be called from the worker thread that will use the returned page.
+        pw+browser are reused across calls - init_thread_browser() must have
+        been called first on this thread.  Returns a dict with keys:
           pw, browser, ctx, page, cdp, resp_queue
         Pass the whole dict to close_thread_browser() when done.
 
@@ -2511,10 +2567,11 @@ class BrowserPool:
         "Cannot switch to a different thread" errors.  Use drain_thread_responses()
         on the owning thread after each goto/interact/before close.
         """
-        from playwright.sync_api import sync_playwright as _sync_playwright
+        # Lazily init pw+browser on first use in this thread
+        self.init_thread_browser()
 
-        pw      = _sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, args=self._browser_args)
+        pw      = self._tls.pw
+        browser = self._tls.browser
         ctx     = browser.new_context(**self._ctx_kwargs)
 
         if self._cookies:
@@ -2599,8 +2656,9 @@ class BrowserPool:
 
     def close_thread_browser(self, slot: dict) -> None:
         """
-        Tear down the Playwright stack created by make_thread_browser().
-        Must be called from the same worker thread that created it.
+        Close the ctx+page for one visit. pw+browser stay alive - they are
+        owned by the thread and reused for its next URL visit.
+        Must be called from the same worker thread that created the slot.
         Drain responses (drain_thread_responses) BEFORE calling this so no
         pending response bodies are lost when ctx.close() invalidates them.
         """
@@ -2610,14 +2668,7 @@ class BrowserPool:
             slot["ctx"].close()
         except Exception:
             pass
-        try:
-            slot["browser"].close()
-        except Exception:
-            pass
-        try:
-            slot["pw"].stop()
-        except Exception:
-            pass
+        # pw and browser stay alive - cleaned up by cleanup_thread_browser()
 
     def acquire(self) -> None:
         """Block until a concurrency slot is free."""
@@ -2705,7 +2756,8 @@ class HeadlessEngine:
         self.auth_steps            = auth_steps or []
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
-        self._logged_in:      bool = False   # loggedIn flag — avoids re-auth mid-crawl
+        self._logged_in:      bool = False   # loggedIn flag - avoids re-auth mid-crawl
+        self._is_spa:         bool = False   # set in Phase 1 - drives adaptive framework wait
 
         # Session 3 Katana enhancements
         self.cookie_jar_path       = cookie_jar_path
@@ -6023,8 +6075,23 @@ class HeadlessEngine:
                     except Exception:
                         pass
 
-            self.timer.stop("phase1_root")
-            logger.info("Phase 1 done: %d routes", len(self.routes))
+            # Detect SPA from root page - drives adaptive wait in Phase 2.
+            # Angular/React/Vue markers = SPA; plain HTML body = non-SPA.
+            try:
+                self._is_spa = bool(page.evaluate("""
+                    (function() {
+                        if (document.querySelector('[ng-version]') ||
+                            document.querySelector('app-root') ||
+                            document.querySelector('router-outlet')) return true;
+                        if (document.querySelector('[data-reactroot]') ||
+                            document.querySelector('#root > [data-reactroot]')) return true;
+                        if (document.querySelector('[data-v-app]')) return true;
+                        return false;
+                    })()
+                """))
+            except Exception:
+                self._is_spa = False
+            logger.info("Phase 1 done: %d routes  is_spa=%s", len(self.routes), self._is_spa)
 
             # ── Phase 2: BFS route exploration (parallel browser pool) ────────
             # Bug 19 fix: use a real BFS deque so routes discovered during the
@@ -6208,8 +6275,8 @@ class HeadlessEngine:
                     if self._is_captcha_page(slot_page):
                         self._handle_captcha(slot_page)
 
-                    # DOM state dedup
-                    slot_stabilizer.wait_for_framework(max_ms=2000)
+                    # DOM state dedup - use adaptive wait based on Phase 1 SPA detection
+                    slot_stabilizer.wait_for_framework(max_ms=2000, is_spa=self._is_spa)
                     fp, sim = self._dom_fingerprint_and_simhash(slot_page)
                     if fp:
                         with self._lock:
@@ -6281,25 +6348,33 @@ class HeadlessEngine:
             from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
             with ThreadPoolExecutor(max_workers=self.num_browsers) as _executor:
-                while bfs_queue:
-                    if self.pages_visited >= self.max_pages:
-                        break
+                # Rolling dispatch - keep up to num_browsers futures in flight.
+                # As soon as one finishes, immediately submit the next queued URL.
+                # This eliminates the old batch pattern where 4 workers idled
+                # while the 5th was still running.
+                from concurrent.futures import FIRST_COMPLETED, wait as _fut_wait
 
-                    if _session_lost.is_set():
-                        logger.warning(
-                            "Session lost mid-crawl — login wall detected on "
-                            "authenticated session; stopping BFS"
-                        )
-                        if self.auth_result is not None:
-                            self.auth_result["authenticated"] = False
-                            self.auth_result["reason"] = (
-                                "Login wall detected mid-crawl on an "
-                                "authenticated session — session may have expired"
-                            )
-                        self._logged_in = False
-                        break
+                _inflight: dict = {}   # future -> (url, depth)
+                _stop_bfs = False
 
-                    # Drain ResponseParser discoveries into the BFS queue.
+                def _drain_queue_into_pool():
+                    """Submit new URLs until the pool is full or the queue is empty."""
+                    while bfs_queue and len(_inflight) < self.num_browsers and not _stop_bfs:
+                        if self.pages_visited >= self.max_pages:
+                            return
+                        candidate = bfs_queue.popleft()
+                        current_depth = bfs_depth.get(candidate, 1)
+                        if not self.registry.register_url(candidate):
+                            continue
+                        safe_c, _ = validate_url(candidate)
+                        if not safe_c or not self.scope.in_scope(candidate):
+                            continue
+                        fut = _executor.submit(_visit_url_in_slot, candidate, current_depth)
+                        _inflight[fut] = (candidate, current_depth)
+
+                def _drain_rp_and_js():
+                    """Pull ResponseParser + JS nav discoveries into bfs_queue."""
+                    nonlocal _rp_added_count, _js_nav_count, _trie_filtered_count
                     if self._response_parser is not None:
                         with self._rp_lock:
                             pending_rp = self._rp_discovered[:]
@@ -6320,7 +6395,6 @@ class HeadlessEngine:
                                 bfs_queue.append(rp_url)
                                 _rp_added_count += 1
 
-                    # Drain JS navigation discoveries
                     with self._js_nav_lock:
                         pending_js_nav = self._js_nav_urls[:]
                         self._js_nav_urls.clear()
@@ -6340,46 +6414,16 @@ class HeadlessEngine:
                             bfs_queue.append(js_nav_url)
                             _js_nav_count += 1
 
-                    # MaxCrawlDuration guard
-                    if self._is_crawl_deadline_exceeded():
-                        logger.info(
-                            "MaxCrawlDuration (%ds) reached — stopping BFS",
-                            self.max_crawl_duration,
-                        )
-                        break
+                # Fill the pool for the first time
+                _drain_rp_and_js()
+                _drain_queue_into_pool()
 
-                    # MaxFailureCount guard
-                    if self._consecutive_failures >= self.max_failures:
-                        logger.warning(
-                            "MaxFailureCount (%d) reached — halting BFS",
-                            self.max_failures,
-                        )
-                        break
+                while _inflight:
+                    # Wait for at least one future to finish
+                    _done, _ = _fut_wait(_inflight.keys(), return_when=FIRST_COMPLETED)
 
-                    # Collect a batch of URLs — up to num_browsers at once
-                    _batch_items: List[tuple] = []
-                    while bfs_queue and len(_batch_items) < self.num_browsers:
-                        candidate = bfs_queue.popleft()
-                        current_depth = bfs_depth.get(candidate, 1)
-
-                        if not self.registry.register_url(candidate):
-                            continue
-                        safe_c, _ = validate_url(candidate)
-                        if not safe_c or not self.scope.in_scope(candidate):
-                            continue
-                        _batch_items.append((candidate, current_depth))
-
-                    if not _batch_items:
-                        continue
-
-                    # Dispatch batch in parallel
-                    _futures = {
-                        _executor.submit(_visit_url_in_slot, _burl, _bdepth): (_burl, _bdepth)
-                        for _burl, _bdepth in _batch_items
-                    }
-
-                    for _fut in _as_completed(_futures):
-                        _burl, _bdepth = _futures[_fut]
+                    for _fut in _done:
+                        _burl, _bdepth = _inflight.pop(_fut)
                         try:
                             new_urls, oc_count, success, sess_lost = _fut.result()
                         except Exception as _fe:
@@ -6388,7 +6432,8 @@ class HeadlessEngine:
                             continue
 
                         if sess_lost:
-                            continue  # session_lost event already set
+                            _stop_bfs = True
+                            continue
 
                         if not success:
                             self._consecutive_failures += 1
@@ -6414,8 +6459,61 @@ class HeadlessEngine:
                                 bfs_queue.append(new_url)
                                 bfs_depth[new_url] = _bdepth + 1
 
-            # Shut down all pool browsers — must happen inside sync_playwright ctx
-            _browser_pool.close_all()
+                    # Session lost - cancel remaining and stop
+                    if _stop_bfs:
+                        logger.warning(
+                            "Session lost mid-crawl — login wall detected on "
+                            "authenticated session; stopping BFS"
+                        )
+                        if self.auth_result is not None:
+                            self.auth_result["authenticated"] = False
+                            self.auth_result["reason"] = (
+                                "Login wall detected mid-crawl on an "
+                                "authenticated session — session may have expired"
+                            )
+                        self._logged_in = False
+                        # drain remaining futures so threads can exit cleanly
+                        for _rem in list(_inflight.keys()):
+                            try:
+                                _rem.result(timeout=0.1)
+                            except Exception:
+                                pass
+                            _inflight.pop(_rem, None)
+                        break
+
+                    # Hard limits
+                    if self.pages_visited >= self.max_pages:
+                        break
+                    if self._is_crawl_deadline_exceeded():
+                        logger.info(
+                            "MaxCrawlDuration (%ds) reached — stopping BFS",
+                            self.max_crawl_duration,
+                        )
+                        break
+                    if self._consecutive_failures >= self.max_failures:
+                        logger.warning(
+                            "MaxFailureCount (%d) reached — halting BFS",
+                            self.max_failures,
+                        )
+                        break
+
+                    # Pull in newly discovered URLs then refill the pool
+                    _drain_rp_and_js()
+                    _drain_queue_into_pool()
+
+            # Shut down thread-local browsers - each worker thread closes its
+            # own pw+browser. submit num_browsers cleanup tasks so every thread
+            # in the pool gets a chance to run cleanup_thread_browser().
+            # This runs inside the 'with' block so the same threads are still alive.
+            _cleanup_futs = [
+                _executor.submit(_browser_pool.cleanup_thread_browser)
+                for _ in range(self.num_browsers)
+            ]
+            for _cf in _as_completed(_cleanup_futs):
+                try:
+                    _cf.result()
+                except Exception:
+                    pass
             logger.info("BrowserPool closed")
 
             self.timer.stop("phase2_routes")
