@@ -67,12 +67,12 @@ class ActionType(Enum):
 class CrawlAction:
     """
     A typed crawl action — models a state transition, not just a URL visit.
-    Inspired by Katana's action-based crawl graph.
+    Inspired by BundleSpy's action-based crawl graph.
 
     origin_id: SHA-256 prefix of the DOM fingerprint of the page state from
     which this action was discovered.  Before executing the action the engine
     checks that the browser is still on that state; if not it navigates back
-    (navigateBackToStateOrigin pattern from Katana's crawler.go).
+    (navigateBackToStateOrigin pattern from BundleSpy's crawler.go).
     """
     action_type: ActionType
     url:         str
@@ -103,7 +103,7 @@ class _PageState:
 class CrawlGraph:
     """
     Directed Acyclic Graph of page states and the action edges that connect them.
-    Mirrors Katana's CrawlGraph (crawler.go).
+    Mirrors BundleSpy's CrawlGraph (crawler.go).
 
     Nodes = page states (keyed by DOM fingerprint / origin_id).
     Edges = CrawlActions that transition between states.
@@ -204,7 +204,7 @@ class DiagnosticsWriter:
     is printed to the log at startup.  Screenshots are written as PNG files
     named by action index.  A JSON-lines action log is also written.
 
-    Mirrors Katana's DiagnosticsWriter pattern.
+    Mirrors BundleSpy's DiagnosticsWriter pattern.
     """
 
     def __init__(self, label: str = "bundlespy") -> None:
@@ -256,7 +256,7 @@ class DiagnosticsWriter:
 class LoginStep:
     """
     One step in a recorded authentication flow.
-    Mirrors Katana's auth.StepsFromFile / RecordedFlow replay.
+    Mirrors BundleSpy's auth.StepsFromFile / RecordedFlow replay.
 
     step_type values:
       "navigate"       — navigate the browser to `url`
@@ -282,7 +282,7 @@ class CrawlHooks:
     relevant) and are called synchronously in the Playwright thread.
     None = no-op for that hook.
 
-    Mirrors Katana's Hooks interface.
+    Mirrors BundleSpy's Hooks interface.
     (Enhancement 4 — Hooks system)
     """
     before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
@@ -468,7 +468,7 @@ _CAPTCHA_TEXT_MARKERS = (
 )
 
 # ── DIT-style login form heuristics (enhanced) ───────────────────────────────
-# Katana uses a DIT classifier for login form detection that handles obfuscated
+# BundleSpy uses a DIT classifier for login form detection that handles obfuscated
 # field names and React-rendered forms where field names are hashed or minified.
 # These patterns capture field name variants used by common obfuscated forms.
 
@@ -1133,7 +1133,7 @@ EXTRACT_ROUTES_JS = """
     } catch(e) {}
 
     // Anchor links — preserve query strings so filter URLs like
-    // /projects?category=E-Commerce are discovered (Katana gap fix)
+    // /projects?category=E-Commerce are discovered (BundleSpy gap fix)
     document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
         try {
             const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
@@ -1155,8 +1155,8 @@ EXTRACT_ROUTES_JS = """
         });
     });
 
-    // link[rel] tags — manifest, canonical, alternate (Katana gap fix)
-    // Katana picks up /site.webmanifest via link[rel=manifest]; we were missing it
+    // link[rel] tags — manifest, canonical, alternate (BundleSpy gap fix)
+    // BundleSpy picks up /site.webmanifest via link[rel=manifest]; we were missing it
     document.querySelectorAll('link[rel][href]').forEach(el => {
         try {
             const rel = (el.getAttribute('rel') || '').toLowerCase();
@@ -1277,7 +1277,7 @@ class AssetRegistry:
         fragments are always stripped.
 
         This lets BundleSpy discover filter pages like
-        /projects?category=E-Commerce that Katana finds via anchor hrefs,
+        /projects?category=E-Commerce that BundleSpy finds via anchor hrefs,
         while still collapsing pagination noise like ?page=2&page=3.
         """
         # Tracking / noise params to always strip
@@ -1441,9 +1441,9 @@ class PageStabilizer:
 
 def _wait_heuristic(page, max_ms: int = 15000) -> None:
     """
-    Gap 1: Heuristic page-load strategy — ported from Katana's WaitPageLoadHeurisitics.
+    Gap 1: Heuristic page-load strategy — ported from BundleSpy's WaitPageLoadHeurisitics.
 
-    Katana's heuristic is the most robust strategy for modern SPAs. Instead of
+    BundleSpy's heuristic is the most robust strategy for modern SPAs. Instead of
     blindly waiting for a fixed event, it:
 
     1. Waits for the basic load event (DOMContentLoaded).
@@ -1558,10 +1558,10 @@ def _attach_cdp_fetch_interception(
     capture_response_types: Optional[set] = None,
 ) -> Optional[object]:
     """
-    Gap 2: CDP-level Fetch.requestPaused interception — ported from Katana's
+    Gap 2: CDP-level Fetch.requestPaused interception — ported from BundleSpy's
     FetchRequestStage/FetchResponseStage pipeline in browser.go.
 
-    Katana intercepts every request and response at the CDP Fetch domain level,
+    BundleSpy intercepts every request and response at the CDP Fetch domain level,
     giving access to raw POST bodies and raw response bytes that Playwright's
     high-level response event can miss (cached responses, service-worker
     intercepts, partial reads).
@@ -1783,7 +1783,7 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
 
 
 # ── PathTrie — URL structural deduplication ───────────────────────────────────
-# Mirrors Katana's FilterSimilar / PathTrie implementation.
+# Mirrors BundleSpy's FilterSimilar / PathTrie implementation.
 # Replaces numeric / UUID path segments with a wildcard token so that
 # /item/1, /item/2, /item/1337 all collapse to /item/* and are treated as
 # one unique structural pattern.  Configurable threshold controls how many
@@ -2067,7 +2067,7 @@ def load_cookie_jar(path: str) -> List[dict]:
 
 
 # ── ResponseParser — extract URLs from every HTTP response body ───────────────
-# Mirrors Katana's ResponseParser (engine/parser).
+# Mirrors BundleSpy's ResponseParser (engine/parser).
 #
 # Runs on EVERY response body the browser receives — HTML, JS, JSON, CSS.
 # Extracts embedded URLs that the browser would never navigate to on its own
@@ -2370,7 +2370,7 @@ def _is_login_page(page) -> bool:
        with hashed attribute values, and input elements that lack type="password"
        but carry password-related name/id/placeholder attributes.
 
-    This mirrors Katana's tryAutoLogin / DIT classifier approach.
+    This mirrors BundleSpy's tryAutoLogin / DIT classifier approach.
     """
     try:
         if _is_login_url(page.url):
@@ -2635,23 +2635,23 @@ class HeadlessEngine:
         cookies:            List[dict] = None,
         extra_headers:      dict       = None,
         seen_hashes:        Set[str]   = None,
-        # ── Katana enhancements ─────────────────────────────────────────────
+        # ── BundleSpy enhancements ─────────────────────────────────────────────
         max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
         max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
         enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
         captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
         cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
-        # New Katana enhancements (session 2)
+        # New BundleSpy enhancements (session 2)
         auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
         page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
         hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
-        # New Katana enhancements (session 3)
+        # New BundleSpy enhancements (session 3)
         cookie_jar_path:    Optional[str]  = None,   # Path to Netscape cookie file (Burp export)
         url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
         url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
         response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
-        # New Katana enhancements (session 4)
+        # New BundleSpy enhancements (session 4)
         max_onclick_links:         int   = 50,   # Max a[onclick] links to simulate per page (0=disabled)
         capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
         content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
@@ -2673,26 +2673,26 @@ class HeadlessEngine:
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
 
-        # Katana enhancement params
+        # BundleSpy enhancement params
         self.max_failures          = max(1, max_failures)
         self.max_crawl_duration    = max(0, max_crawl_duration)
         self.enable_diagnostics    = enable_diagnostics
         self.slow_mo               = max(0, slow_mo)
         self.captcha_handler       = captcha_handler
         self.cookie_consent_bypass = cookie_consent_bypass
-        # Session 2 Katana enhancements
+        # Session 2 BundleSpy enhancements
         self.auth_steps            = auth_steps or []
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag — avoids re-auth mid-crawl
 
-        # Session 3 Katana enhancements
+        # Session 3 BundleSpy enhancements
         self.cookie_jar_path       = cookie_jar_path
         self.url_filter_similar    = url_filter_similar
         self.url_filter_threshold  = max(1, url_filter_threshold)
         self.response_body_extract = response_body_extract
 
-        # Session 4 Katana enhancements
+        # Session 4 BundleSpy enhancements
         self.max_onclick_links        = max_onclick_links
         self.capture_raw_traffic      = capture_raw_traffic
         self.content_similarity_threshold = content_similarity_threshold
@@ -2767,25 +2767,25 @@ class HeadlessEngine:
         self._action_queue:   deque         = deque()
         self._seen_actions:   Set[str]      = set()
 
-        # CrawlGraph — DAG of page states and action edges (Katana enhancement 1)
+        # CrawlGraph — DAG of page states and action edges (BundleSpy enhancement 1)
         self.crawl_graph: CrawlGraph = CrawlGraph()
 
-        # DiagnosticsWriter — optional (Katana enhancement 11)
+        # DiagnosticsWriter — optional (BundleSpy enhancement 11)
         self._diagnostics: Optional[DiagnosticsWriter] = (
             DiagnosticsWriter() if enable_diagnostics else None
         )
 
-        # MaxCrawlDuration start time — set after auth completes (Katana enhancement 10)
+        # MaxCrawlDuration start time — set after auth completes (BundleSpy enhancement 10)
         self._crawl_start_time: float = 0.0
 
-        # Consecutive failure counter for MaxFailureCount guard (Katana enhancement 4)
+        # Consecutive failure counter for MaxFailureCount guard (BundleSpy enhancement 4)
         self._consecutive_failures: int = 0
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
         self.external_seen = external_seen or set()
 
-    # ── Katana enhancement helpers ────────────────────────────────────────────
+    # ── BundleSpy enhancement helpers ────────────────────────────────────────────
 
     def _slow_mo_wait(self, page) -> None:
         """SlowMotion mode: inject a configurable delay between interactions.
@@ -2929,7 +2929,7 @@ class HeadlessEngine:
 
     def _check_element_interactable(self, page, el) -> bool:
         """Interactability check: verify the element is not covered by an overlay
-        (modal, cookie banner, spinner) before clicking it.  Mirrors Katana's
+        (modal, cookie banner, spinner) before clicking it.  Mirrors BundleSpy's
         CoveredError / interactability check. (Enhancement 5)
 
         Returns True if the element is safe to click.
@@ -2961,11 +2961,11 @@ class HeadlessEngine:
             # If the check fails we fall back to attempting the click anyway
             return True
 
-    # ── Session 2 Katana enhancement helpers ─────────────────────────────────
+    # ── Session 2 BundleSpy enhancement helpers ─────────────────────────────────
 
     def _scroll_into_view(self, page, el) -> None:
         """Universal ScrollIntoView — call before every click, not just Phase 3.
-        Mirrors Katana's ScrollIntoView() call before every action.
+        Mirrors BundleSpy's ScrollIntoView() call before every action.
         Falls back silently if the element is gone or raises. (Enhancement 6)"""
         try:
             el.scroll_into_view_if_needed(timeout=600)
@@ -3027,12 +3027,12 @@ class HeadlessEngine:
         """Return True if any step in the recorded flow is an assert_visible step.
         A terminal visible assertion is an explicit UI check that login succeeded
         (e.g. 'Welcome back' is visible). Mirrors HasTerminalVisibleAssertion in
-        Katana. (Enhancement 5)"""
+        BundleSpy. (Enhancement 5)"""
         return any(s.step_type == "assert_visible" for s in steps)
 
     def _run_recorded_auth_flow(self, page, stabilizer) -> bool:
         """Replay a recorded authentication flow (multi-step SSO/MFA).
-        Mirrors Katana's auth.StepsFromFile + replay loop.
+        Mirrors BundleSpy's auth.StepsFromFile + replay loop.
 
         Executes each LoginStep in order:
           navigate        — page.goto(url)
@@ -3172,7 +3172,7 @@ class HeadlessEngine:
         or no recorded flow exists but we land on a login page.
 
         Attempts to fill detected username/password fields and submit.
-        Uses the same DIT classifier patterns as Katana's auto-login.
+        Uses the same DIT classifier patterns as BundleSpy's auto-login.
         Only attempted when we have a user:pass from an auth header or the
         caller injected credentials via a special auth_credentials dict.
         Returns True if a session delta confirms login. (Enhancement 2)"""
@@ -3422,7 +3422,7 @@ class HeadlessEngine:
 
         Two responsibilities:
         1. ResponseParser — parse every response body for URLs not visible in the DOM
-           (Katana enhancement: response body URL extraction). Discovered URLs are
+           (BundleSpy enhancement: response body URL extraction). Discovered URLs are
            staged into self._rp_discovered and drained into the BFS queue in run().
         2. JS capture — three-layer detection, body dedup, JS file creation (existing).
         """
@@ -3455,7 +3455,7 @@ class HeadlessEngine:
                 except Exception as rp_err:
                     logger.debug("ResponseParser error for %s: %s", url, rp_err)
 
-            # Technology fingerprinting — Katana hybrid feature 6
+            # Technology fingerprinting — BundleSpy hybrid feature 6
             if self.technology_detection and _resp_body is not None:
                 try:
                     techs = self._fingerprint_technologies(url, dict(response.headers), _resp_body)
@@ -3468,7 +3468,7 @@ class HeadlessEngine:
                     logger.debug("Technology detection error for %s: %s", url, tech_err)
 
             # Raw capture — store request+response bytes alongside api_call entries
-            # Katana's FetchRequestStageResponse captures full wire-level traffic;
+            # BundleSpy's FetchRequestStageResponse captures full wire-level traffic;
             # we approximate with Playwright's response object fields.
             if self.capture_raw_traffic and _resp_body is not None:
                 try:
@@ -3576,7 +3576,7 @@ class HeadlessEngine:
         """
         Return True if the element is a logout/sign-out link.
         Checks visible text, href path segments, id, and class — same approach
-        as Katana's isLogoutPage() which catches CSS-icon logout buttons whose
+        as BundleSpy's isLogoutPage() which catches CSS-icon logout buttons whose
         visible text is empty but whose href is /logout or /signout.
         """
         try:
@@ -3648,7 +3648,7 @@ class HeadlessEngine:
     def _discover_form_actions(self, page, source_url: str) -> None:
         """
         Discover forms on the current page and queue them as FILL_FORM actions
-        for dedicated follow-up crawling — same pattern Katana uses for FillForm
+        for dedicated follow-up crawling — same pattern BundleSpy uses for FillForm
         action type. This ensures form-triggered API calls are captured even if
         the form wasn't visible during the main page visit.
 
@@ -4622,7 +4622,7 @@ class HeadlessEngine:
         Routes may be bare paths (/about), paths with query strings
         (/projects?category=foo), or absolute URLs (https://...).
         Query strings are preserved — they represent distinct filterable
-        pages that differ in content (Katana gap fix).
+        pages that differ in content (BundleSpy gap fix).
         """
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
@@ -4892,7 +4892,7 @@ class HeadlessEngine:
 
         Two SPA pages with the same layout (same component) but different data
         (different product IDs) get the same hash and are treated as duplicates.
-        This is the same principle as Katana's SimhashOracle.
+        This is the same principle as BundleSpy's SimhashOracle.
 
         Structure signature: pathname + sorted tag-depth pairs from first 80
         elements + form count + input count. Ignores text content so product
@@ -4930,12 +4930,12 @@ class HeadlessEngine:
 
     def _simulate_onclick_links(self, page, source_url: str, max_links: int = 50) -> list:
         """
-        Click every a[onclick] element and record URL changes — Katana hybrid approach.
+        Click every a[onclick] element and record URL changes — BundleSpy hybrid approach.
 
         Standard crawlers miss JS redirects anchored to onclick handlers:
             <a href="#" onclick="window.location='/admin/dashboard'">Admin</a>
 
-        Katana's navigateRequest() clicks each a[onclick] individually, records
+        BundleSpy's navigateRequest() clicks each a[onclick] individually, records
         the URL drift after click, then navigates back. We do the same:
         1. Collect all a[onclick] selectors before clicking anything
         2. For each: click -> measure URL drift -> navigate back
@@ -5030,7 +5030,7 @@ class HeadlessEngine:
         technologies. No external service — all patterns are inline regexes.
         Returns a list of detected technology names for this response.
 
-        Katana runs Wappalyzer per-response in hybrid/crawl.go; we do the same
+        BundleSpy runs Wappalyzer per-response in hybrid/crawl.go; we do the same
         with a curated inline fingerprint database covering the most common stacks.
         """
         import re as _re
@@ -5110,7 +5110,7 @@ class HeadlessEngine:
         link count) and checks Hamming distance against previously seen fingerprints.
         Threshold 0.0 = disabled. Threshold 0.85 = skip if 85%+ structurally similar.
 
-        Katana's SimhashOracle uses simhash with configurable threshold; we use
+        BundleSpy's SimhashOracle uses simhash with configurable threshold; we use
         a simpler but effective structural hash approach that doesn't require
         external dependencies.
         """
@@ -5159,7 +5159,7 @@ class HeadlessEngine:
         invisible to standard scraping. CDP with pierce=True crosses every shadow
         boundary in a single call, returning the full composed tree.
 
-        Katana does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
+        BundleSpy does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
         pierce=True, then walks nodes collecting href/action attributes.
         """
         found = set()
@@ -5296,7 +5296,7 @@ class HeadlessEngine:
         # Shadow DOM traversal — extract routes hidden inside Web Components.
         # Playwright's page.content() only sees the light DOM; shadow roots require
         # CDP DOMGetDocument with pierce=True to pierce every shadow boundary.
-        # Katana uses this same approach in hybrid/crawl.go navigateRequest().
+        # BundleSpy uses this same approach in hybrid/crawl.go navigateRequest().
         try:
             shadow_routes = self._extract_shadow_dom_routes(page)
             new_routes.update(shadow_routes)
@@ -5535,7 +5535,7 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
-            # JS navigation tracking — Katana's PageFrameNavigated approach.
+            # JS navigation tracking — BundleSpy's PageFrameNavigated approach.
             # page.on("framenavigated") fires for window.location=, meta-refresh,
             # history.pushState, and client-side router transitions that the
             # response handler misses because they don't produce a new HTTP response.
@@ -5559,7 +5559,7 @@ class HeadlessEngine:
             page.on("framenavigated", _on_frame_navigated)
 
             # ── Gap 2: CDP FetchRequestPaused interception (Phase 1 page) ────
-            # Katana's FetchRequestStage/FetchResponseStage pipeline gives us
+            # BundleSpy's FetchRequestStage/FetchResponseStage pipeline gives us
             # raw POST bodies and raw response bytes at the CDP level — things
             # Playwright's high-level response event can miss (cached hits,
             # service-worker intercepts, partial streaming bodies).
@@ -5798,7 +5798,7 @@ class HeadlessEngine:
             # Gap 2: CDP-level raw traffic handlers for pool slots.
             # When capture_raw_traffic is on, each pool slot's page gets a CDP
             # Fetch interception session that captures POST bodies and response
-            # bytes before the browser can consume them — the same data Katana
+            # bytes before the browser can consume them — the same data BundleSpy
             # captures via FetchRequestStage/FetchResponseStage in browser.go.
             # The handlers are thread-safe (self._raw_lock guards the list).
             def _pool_cdp_request_fn(url: str, method: str, headers: dict,
@@ -6428,10 +6428,10 @@ class HeadlessEngine:
             "actions_queued":     len(self._seen_actions),
             "crawl_graph":        crawl_graph_summary,
             "timings":            timings,
-            # Katana enhancements (session 3)
+            # BundleSpy enhancements (session 3)
             "response_parser_urls": _rp_added_count,
             "trie_filtered":        _trie_filtered_count,
-            # Katana enhancements (session 4)
+            # BundleSpy enhancements (session 4)
             "onclick_navigations":  _onclick_nav_count,
             "js_nav_urls":          _js_nav_count,
             "technologies":         dict(self._tech_detections),
@@ -6489,24 +6489,24 @@ def collect_headless_full(
     cookies:              list           = None,
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
-    # Katana enhancements (session 1)
+    # BundleSpy enhancements (session 1)
     max_failures:         int            = 10,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
     captcha_handler       = None,
     cookie_consent_bypass: bool          = True,
-    # Katana enhancements (session 2)
+    # BundleSpy enhancements (session 2)
     auth_steps:           Optional[List[LoginStep]] = None,
     page_load_strategy:   str            = "domcontentloaded",
     hooks:                Optional[CrawlHooks] = None,
     auth_credentials:     Optional[dict] = None,
-    # Katana enhancements (session 3)
+    # BundleSpy enhancements (session 3)
     cookie_jar_path:      Optional[str]  = None,
     url_filter_similar:   bool           = False,
     url_filter_threshold: int            = 3,
     response_body_extract: bool          = True,
-    # Katana enhancements (session 4)
+    # BundleSpy enhancements (session 4)
     max_onclick_links:    int            = 50,
     capture_raw_traffic:  bool           = False,
     content_similarity_threshold: float  = 0.0,
@@ -6517,7 +6517,7 @@ def collect_headless_full(
     num_browsers:         int            = 5,
 ) -> dict:
     """
-    Full headless scan — all Katana enhancements exposed.
+    Full headless scan — all BundleSpy enhancements exposed.
 
     seed_urls:             routes from static analysis to pre-seed the engine.
     workers:               concurrent page processing (default 3).
