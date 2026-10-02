@@ -41,6 +41,26 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+# - matches <script>...</script> blocks; used to strip HTML before AST parsing
+_SCRIPT_TAG_RE = re.compile(
+    r'<script(?:\s[^>]*)?>(.+?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_inline_js(source: str) -> str:
+    """
+    If source looks like HTML, return only the concatenated script tag bodies.
+    Otherwise return source unchanged. Keeps the AST pass clean on HTML responses.
+    """
+    stripped = source.lstrip()
+    if not stripped.startswith('<'):
+        return source
+    chunks = _SCRIPT_TAG_RE.findall(source)
+    if not chunks:
+        return source
+    return '\n'.join(chunks)
+
 logger = logging.getLogger("bundlespy.analysis.ast_parser")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -226,6 +246,9 @@ def augment_env_and_extract(
     if parser is None:
         return DataFlowEnvAugmented(), [], []
 
+    # strip HTML wrapper if the response came back as a page instead of pure JS
+    content = _extract_inline_js(content)
+
     content_bytes = content.encode("utf-8", errors="replace")
     if len(content_bytes) > AST_MAX_MB * 1_048_576:
         logger.debug("AST pass skipped: file too large (%d bytes)", len(content_bytes))
@@ -337,31 +360,37 @@ class _ASTWalker:
         return node.start_point[0] + 1
 
     def walk(self, root) -> None:
-        """Three-pass walk: collect vars, extract endpoints, find secret pairs."""
-        # Pass 1 - variable bindings
-        self._collect_vars(root)
-        # Pass 2 - call sites
-        self._extract_calls(root)
-        # Pass 3 - key/value secret pairs
-        self._extract_secret_pairs(root)
+        """Three-pass walk using iterative DFS: collect vars, extract endpoints, find secret pairs."""
+        self._collect_vars_iter(root)
+        self._extract_calls_iter(root)
+        self._extract_secret_pairs_iter(root)
 
     # ── Pass 1: variable collection ───────────────────────────────────────────
 
+    def _collect_vars_iter(self, root) -> None:
+        """Iterative DFS variable binding collection - avoids Python recursion limit."""
+        stack = [root]
+        while stack:
+            if self._elapsed() > AST_MAX_SECONDS:
+                return
+            node = stack.pop()
+            t = node.type
+            if t == "variable_declarator":
+                self._handle_declarator(node)
+            elif t == "assignment_expression":
+                self._handle_assignment(node)
+            # push children in reverse so left-to-right order is preserved
+            stack.extend(reversed(node.named_children))
+
     def _collect_vars(self, node) -> None:
-        """Recursively collect variable bindings from the AST."""
+        """Recursive fallback - kept for any internal callers."""
         if self._elapsed() > AST_MAX_SECONDS:
             return
-
         t = node.type
-
-        # const/let/var x = ...
         if t == "variable_declarator":
             self._handle_declarator(node)
-
-        # x = ... (bare assignment)
         elif t == "assignment_expression":
             self._handle_assignment(node)
-
         for child in node.named_children:
             self._collect_vars(child)
 
@@ -530,19 +559,29 @@ class _ASTWalker:
 
     # ── Pass 2: call site extraction ──────────────────────────────────────────
 
+    def _extract_calls_iter(self, root) -> None:
+        """Iterative DFS call/new expression extraction."""
+        stack = [root]
+        while stack:
+            if self._elapsed() > AST_MAX_SECONDS:
+                return
+            node = stack.pop()
+            t = node.type
+            if t == "call_expression":
+                self._handle_call(node)
+            elif t == "new_expression":
+                self._handle_new(node)
+            stack.extend(reversed(node.named_children))
+
     def _extract_calls(self, node) -> None:
-        """Recursively walk looking for call/new expressions."""
+        """Recursive fallback - kept for any internal callers."""
         if self._elapsed() > AST_MAX_SECONDS:
             return
-
         t = node.type
-
         if t == "call_expression":
             self._handle_call(node)
-
         elif t == "new_expression":
             self._handle_new(node)
-
         for child in node.named_children:
             self._extract_calls(child)
 
@@ -671,28 +710,37 @@ class _ASTWalker:
 
     # ── Pass 3: secret key/value pair extraction ─────────────────────────────
 
-    def _extract_secret_pairs(self, node) -> None:
+    def _extract_secret_pairs_iter(self, root) -> None:
         """
-        Walk every `pair` node in the AST (object properties and assignments).
-        When the key name matches a known secret indicator and the value is a
-        non-empty string literal, record an ASTSecretHit.
+        Iterative DFS secret pair extraction. Walks every `pair` node in the AST
+        and every variable declarator / assignment where the name looks like a
+        secret key. Also detects multi-key Firebase-style config objects via
+        _materialize_object().
+        """
+        stack = [root]
+        while stack:
+            if self._elapsed() > AST_MAX_SECONDS:
+                return
+            node = stack.pop()
+            t = node.type
+            if t == "pair":
+                self._handle_secret_pair(node)
+            elif t in ("variable_declarator", "assignment_expression"):
+                self._handle_secret_assignment(node)
+            elif t == "object":
+                # check if this object is a multi-key config block (Firebase etc.)
+                self._handle_config_object(node)
+            stack.extend(reversed(node.named_children))
 
-        This catches patterns the regex scanner misses: object literals with
-        computed keys, keys with unusual quoting, and split assignments where
-        the key name is only visible in the AST structure.
-        """
+    def _extract_secret_pairs(self, node) -> None:
+        """Recursive fallback - kept for any internal callers."""
         if self._elapsed() > AST_MAX_SECONDS:
             return
-
         t = node.type
-
         if t == "pair":
             self._handle_secret_pair(node)
-
-        # Also catch: const apiKey = "..." / this.apiKey = "..." / config.apiKey = "..."
         elif t in ("variable_declarator", "assignment_expression"):
             self._handle_secret_assignment(node)
-
         for child in node.named_children:
             self._extract_secret_pairs(child)
 
@@ -813,15 +861,168 @@ class _ASTWalker:
         ))
         logger.debug("AST secret assignment: key=%r severity=%s line=%d", key_raw, severity, line)
 
+    def _materialize_object(self, node) -> Dict[str, str]:
+        """
+        Turn an `object` AST node into a {key: value} dict of string pairs.
+        Non-string values and unresolvable identifiers are skipped.
+        Used by _handle_config_object() to detect multi-key secret blocks.
+        """
+        result: Dict[str, str] = {}
+        for child in node.named_children:
+            if child.type != "pair":
+                continue
+            key_node = child.child_by_field_name("key")
+            val_node = child.child_by_field_name("value")
+            if not key_node or not val_node:
+                continue
+            key = self._text(key_node).strip("'\"` \t\n")
+            if not key:
+                continue
+            val = self._extract_string_value(val_node)
+            if not val and val_node.type == "identifier":
+                val = self.env.resolve(self._text(val_node))
+            if val:
+                result[key] = val
+        return result
+
+    def _handle_config_object(self, node) -> None:
+        """
+        Check an object node for Firebase-style multi-key config blocks.
+        If 2+ keys in the same object are secret indicators, treat them
+        together - this catches blocks that individually might look low-severity
+        but together are clearly credential objects.
+
+        E.g.:  const firebaseConfig = {
+                   apiKey: "AIzaSy...",
+                   authDomain: "proj.firebaseapp.com",
+                   projectId: "proj",
+                   ...
+               }
+        """
+        obj = self._materialize_object(node)
+        if len(obj) < 2:
+            return
+
+        # count how many keys are secret indicators
+        hits = []
+        for key, value in obj.items():
+            severity, confidence = _classify_key(key)
+            if severity and len(value) >= 8:
+                hits.append((key, value, severity, confidence))
+
+        # only treat as a config block if 2+ secret keys present
+        if len(hits) < 2:
+            return
+
+        # upgrade severity: if any key is HIGH, whole block is HIGH
+        block_severity = "HIGH" if any(s == "HIGH" for _, _, s, _ in hits) else "MEDIUM"
+        # confidence boost for multi-key blocks
+        block_confidence = min(0.95, max(c for _, _, _, c in hits) + 0.05)
+
+        for key, value, _, _ in hits:
+            dedup = f"{key.lower()}:{value}"
+            if dedup in self._seen_secret:
+                continue
+            self._seen_secret.add(dedup)
+
+            line = node.start_point[0] + 1
+            start = max(0, node.start_byte - 20)
+            end   = min(len(self._src), node.end_byte + 20)
+            ctx   = self._src[start:end].decode("utf-8", errors="replace").replace("\n", " ").strip()[:200]
+
+            self.secret_hits.append(ASTSecretHit(
+                key_name   = key,
+                value      = value,
+                line       = line,
+                context    = ctx,
+                severity   = block_severity,
+                confidence = block_confidence,
+            ))
+            logger.debug("AST config block: key=%r severity=%s line=%d", key, block_severity, line)
+
     def _extract_string_value(self, node) -> Optional[str]:
-        """Return the decoded string value from a string/template node, or None."""
+        """
+        Return the decoded string value from a string/template/concat node.
+        Uses _collapsed_string() for binary expressions so partial values like
+        "sk-EXPR" are captured instead of dropped entirely.
+        """
         if node.type == "string":
             return self._string_value(node)
         if node.type == "template_string":
             val = self._template_value(node)
-            # Only keep if no dynamic parts - a dynamic template is not a literal
             return val if val and "{dynamic}" not in val else None
+        if node.type == "binary_expression":
+            return self._collapsed_string(node)
         return None
+
+    def _collapsed_string(self, node) -> Optional[str]:
+        """
+        Flatten a binary + expression into a readable string.
+        Known string parts are kept verbatim; unresolvable expressions
+        become the placeholder EXPR. Returns None if entirely dynamic
+        (no static fragment at all), or if the result is too short to matter.
+
+        E.g.:  "sk-" + someVar  ->  "sk-EXPR"
+               prefix + apiKey  ->  "EXPRapiKey"  (if apiKey is literal)
+        """
+        if node.type != "binary_expression":
+            return None
+
+        # only handle string concatenation, not arithmetic
+        op = None
+        for child in node.children:
+            if child.type == "+" or (child.type not in ("binary_expression", "string",
+                                                          "identifier", "member_expression",
+                                                          "template_string", "call_expression",
+                                                          "number") and len(self._text(child)) == 1):
+                op = self._text(child)
+                break
+        # fall back: check raw text for + operator
+        raw = self._text(node)
+        if "+" not in raw:
+            return None
+
+        left_node  = node.child_by_field_name("left")
+        right_node = node.child_by_field_name("right")
+        if not left_node or not right_node:
+            return None
+
+        left  = self._collapse_part(left_node)
+        right = self._collapse_part(right_node)
+
+        combined = left + right
+        # must have at least one static fragment to be useful
+        if combined == "EXPREXPR":
+            return None
+        # must be long enough to matter as a secret value
+        static_len = len(combined.replace("EXPR", ""))
+        if static_len < 3:
+            return None
+        return combined
+
+    def _collapse_part(self, node) -> str:
+        """
+        Resolve one side of a binary expression to a string fragment.
+        Falls back to EXPR placeholder for anything unresolvable.
+        """
+        t = node.type
+        if t == "string":
+            return self._string_value(node) or "EXPR"
+        if t == "template_string":
+            val = self._template_value(node)
+            return val if val else "EXPR"
+        if t == "identifier":
+            resolved = self.env.resolve(self._text(node))
+            return resolved if resolved else "EXPR"
+        if t == "member_expression":
+            resolved = self.env.resolve(self._text(node))
+            return resolved if resolved else "EXPR"
+        if t == "binary_expression":
+            inner = self._collapsed_string(node)
+            return inner if inner else "EXPR"
+        if t == "parenthesized_expression" and node.named_children:
+            return self._collapse_part(node.named_children[0])
+        return "EXPR"
 
     # ── Resolution helpers ────────────────────────────────────────────────────
 
