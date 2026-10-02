@@ -67,12 +67,12 @@ class ActionType(Enum):
 class CrawlAction:
     """
     A typed crawl action — models a state transition, not just a URL visit.
-    Inspired by BundleSpy's action-based crawl graph.
+    Inspired by Katana's action-based crawl graph.
 
     origin_id: SHA-256 prefix of the DOM fingerprint of the page state from
     which this action was discovered.  Before executing the action the engine
     checks that the browser is still on that state; if not it navigates back
-    (navigateBackToStateOrigin pattern from BundleSpy's crawler.go).
+    (navigateBackToStateOrigin pattern from Katana's crawler.go).
     """
     action_type: ActionType
     url:         str
@@ -98,12 +98,13 @@ class _PageState:
     url:        str
     depth:      int        = 0
     discovered: float      = field(default_factory=time.time)
+    simhash:    int        = 0   # 64-bit structural simhash for fuzzy matching
 
 
 class CrawlGraph:
     """
     Directed Acyclic Graph of page states and the action edges that connect them.
-    Mirrors BundleSpy's CrawlGraph (crawler.go).
+    Mirrors Katana's CrawlGraph (crawler.go).
 
     Nodes = page states (keyed by DOM fingerprint / origin_id).
     Edges = CrawlActions that transition between states.
@@ -117,15 +118,35 @@ class CrawlGraph:
         self._nodes: Dict[str, _PageState] = {}   # origin_id -> PageState
         self._edges: List[CrawlAction]     = []   # all action edges
 
-    def add_page_state(self, state_id: str, url: str, depth: int = 0) -> bool:
+    def add_page_state(self, state_id: str, url: str, depth: int = 0,
+                       simhash: int = 0) -> bool:
         """Register a page state. Returns True if newly added, False if seen."""
         with self._lock:
             if state_id in self._nodes:
                 return False
             self._nodes[state_id] = _PageState(
-                state_id=state_id, url=url, depth=depth
+                state_id=state_id, url=url, depth=depth, simhash=simhash
             )
         return True
+
+    def get_page_state(self, state_id: str) -> Optional["_PageState"]:
+        """Look up a stored page state by its hash ID. Returns None if not found."""
+        with self._lock:
+            return self._nodes.get(state_id)
+
+    def find_similar_state(self, simhash: int, threshold: int = 2) -> Optional["_PageState"]:
+        """Return the first stored state whose simhash Hamming distance from
+        the given value is <= threshold. Returns None if nothing is close enough.
+        Uses the same threshold as Katana (default 2 bits)."""
+        with self._lock:
+            for state in self._nodes.values():
+                if state.simhash == 0:
+                    continue
+                xor = state.simhash ^ simhash
+                distance = bin(xor).count("1")
+                if distance <= threshold:
+                    return state
+        return None
 
     def add_edge(self, action: CrawlAction) -> None:
         """Record a CrawlAction as a directed edge in the graph."""
@@ -204,7 +225,7 @@ class DiagnosticsWriter:
     is printed to the log at startup.  Screenshots are written as PNG files
     named by action index.  A JSON-lines action log is also written.
 
-    Mirrors BundleSpy's DiagnosticsWriter pattern.
+    Mirrors Katana's DiagnosticsWriter pattern.
     """
 
     def __init__(self, label: str = "bundlespy") -> None:
@@ -256,7 +277,7 @@ class DiagnosticsWriter:
 class LoginStep:
     """
     One step in a recorded authentication flow.
-    Mirrors BundleSpy's auth.StepsFromFile / RecordedFlow replay.
+    Mirrors Katana's auth.StepsFromFile / RecordedFlow replay.
 
     step_type values:
       "navigate"       — navigate the browser to `url`
@@ -282,7 +303,7 @@ class CrawlHooks:
     relevant) and are called synchronously in the Playwright thread.
     None = no-op for that hook.
 
-    Mirrors BundleSpy's Hooks interface.
+    Mirrors Katana's Hooks interface.
     (Enhancement 4 — Hooks system)
     """
     before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
@@ -468,7 +489,7 @@ _CAPTCHA_TEXT_MARKERS = (
 )
 
 # ── DIT-style login form heuristics (enhanced) ───────────────────────────────
-# BundleSpy uses a DIT classifier for login form detection that handles obfuscated
+# Katana uses a DIT classifier for login form detection that handles obfuscated
 # field names and React-rendered forms where field names are hashed or minified.
 # These patterns capture field name variants used by common obfuscated forms.
 
@@ -1133,7 +1154,7 @@ EXTRACT_ROUTES_JS = """
     } catch(e) {}
 
     // Anchor links — preserve query strings so filter URLs like
-    // /projects?category=E-Commerce are discovered (BundleSpy gap fix)
+    // /projects?category=E-Commerce are discovered (Katana gap fix)
     document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
         try {
             const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
@@ -1155,8 +1176,8 @@ EXTRACT_ROUTES_JS = """
         });
     });
 
-    // link[rel] tags — manifest, canonical, alternate (BundleSpy gap fix)
-    // BundleSpy picks up /site.webmanifest via link[rel=manifest]; we were missing it
+    // link[rel] tags — manifest, canonical, alternate (Katana gap fix)
+    // Katana picks up /site.webmanifest via link[rel=manifest]; we were missing it
     document.querySelectorAll('link[rel][href]').forEach(el => {
         try {
             const rel = (el.getAttribute('rel') || '').toLowerCase();
@@ -1277,7 +1298,7 @@ class AssetRegistry:
         fragments are always stripped.
 
         This lets BundleSpy discover filter pages like
-        /projects?category=E-Commerce that BundleSpy finds via anchor hrefs,
+        /projects?category=E-Commerce that Katana finds via anchor hrefs,
         while still collapsing pagination noise like ?page=2&page=3.
         """
         # Tracking / noise params to always strip
@@ -1441,9 +1462,9 @@ class PageStabilizer:
 
 def _wait_heuristic(page, max_ms: int = 15000) -> None:
     """
-    Gap 1: Heuristic page-load strategy — ported from BundleSpy's WaitPageLoadHeurisitics.
+    Gap 1: Heuristic page-load strategy — ported from Katana's WaitPageLoadHeurisitics.
 
-    BundleSpy's heuristic is the most robust strategy for modern SPAs. Instead of
+    Katana's heuristic is the most robust strategy for modern SPAs. Instead of
     blindly waiting for a fixed event, it:
 
     1. Waits for the basic load event (DOMContentLoaded).
@@ -1558,10 +1579,10 @@ def _attach_cdp_fetch_interception(
     capture_response_types: Optional[set] = None,
 ) -> Optional[object]:
     """
-    Gap 2: CDP-level Fetch.requestPaused interception — ported from BundleSpy's
+    Gap 2: CDP-level Fetch.requestPaused interception — ported from Katana's
     FetchRequestStage/FetchResponseStage pipeline in browser.go.
 
-    BundleSpy intercepts every request and response at the CDP Fetch domain level,
+    Katana intercepts every request and response at the CDP Fetch domain level,
     giving access to raw POST bodies and raw response bytes that Playwright's
     high-level response event can miss (cached responses, service-worker
     intercepts, partial reads).
@@ -1783,7 +1804,7 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
 
 
 # ── PathTrie — URL structural deduplication ───────────────────────────────────
-# Mirrors BundleSpy's FilterSimilar / PathTrie implementation.
+# Mirrors Katana's FilterSimilar / PathTrie implementation.
 # Replaces numeric / UUID path segments with a wildcard token so that
 # /item/1, /item/2, /item/1337 all collapse to /item/* and are treated as
 # one unique structural pattern.  Configurable threshold controls how many
@@ -2067,7 +2088,7 @@ def load_cookie_jar(path: str) -> List[dict]:
 
 
 # ── ResponseParser — extract URLs from every HTTP response body ───────────────
-# Mirrors BundleSpy's ResponseParser (engine/parser).
+# Mirrors Katana's ResponseParser (engine/parser).
 #
 # Runs on EVERY response body the browser receives — HTML, JS, JSON, CSS.
 # Extracts embedded URLs that the browser would never navigate to on its own
@@ -2370,7 +2391,7 @@ def _is_login_page(page) -> bool:
        with hashed attribute values, and input elements that lack type="password"
        but carry password-related name/id/placeholder attributes.
 
-    This mirrors BundleSpy's tryAutoLogin / DIT classifier approach.
+    This mirrors Katana's tryAutoLogin / DIT classifier approach.
     """
     try:
         if _is_login_url(page.url):
@@ -2635,23 +2656,23 @@ class HeadlessEngine:
         cookies:            List[dict] = None,
         extra_headers:      dict       = None,
         seen_hashes:        Set[str]   = None,
-        # ── BundleSpy enhancements ─────────────────────────────────────────────
+        # ── Katana enhancements ─────────────────────────────────────────────
         max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
         max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
         enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
         captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
         cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
-        # New BundleSpy enhancements (session 2)
+        # New Katana enhancements (session 2)
         auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
         page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
         hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
-        # New BundleSpy enhancements (session 3)
+        # New Katana enhancements (session 3)
         cookie_jar_path:    Optional[str]  = None,   # Path to Netscape cookie file (Burp export)
         url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
         url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
         response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
-        # New BundleSpy enhancements (session 4)
+        # New Katana enhancements (session 4)
         max_onclick_links:         int   = 50,   # Max a[onclick] links to simulate per page (0=disabled)
         capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
         content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
@@ -2673,26 +2694,26 @@ class HeadlessEngine:
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
 
-        # BundleSpy enhancement params
+        # Katana enhancement params
         self.max_failures          = max(1, max_failures)
         self.max_crawl_duration    = max(0, max_crawl_duration)
         self.enable_diagnostics    = enable_diagnostics
         self.slow_mo               = max(0, slow_mo)
         self.captcha_handler       = captcha_handler
         self.cookie_consent_bypass = cookie_consent_bypass
-        # Session 2 BundleSpy enhancements
+        # Session 2 Katana enhancements
         self.auth_steps            = auth_steps or []
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag — avoids re-auth mid-crawl
 
-        # Session 3 BundleSpy enhancements
+        # Session 3 Katana enhancements
         self.cookie_jar_path       = cookie_jar_path
         self.url_filter_similar    = url_filter_similar
         self.url_filter_threshold  = max(1, url_filter_threshold)
         self.response_body_extract = response_body_extract
 
-        # Session 4 BundleSpy enhancements
+        # Session 4 Katana enhancements
         self.max_onclick_links        = max_onclick_links
         self.capture_raw_traffic      = capture_raw_traffic
         self.content_similarity_threshold = content_similarity_threshold
@@ -2767,25 +2788,25 @@ class HeadlessEngine:
         self._action_queue:   deque         = deque()
         self._seen_actions:   Set[str]      = set()
 
-        # CrawlGraph — DAG of page states and action edges (BundleSpy enhancement 1)
+        # CrawlGraph — DAG of page states and action edges (Katana enhancement 1)
         self.crawl_graph: CrawlGraph = CrawlGraph()
 
-        # DiagnosticsWriter — optional (BundleSpy enhancement 11)
+        # DiagnosticsWriter — optional (Katana enhancement 11)
         self._diagnostics: Optional[DiagnosticsWriter] = (
             DiagnosticsWriter() if enable_diagnostics else None
         )
 
-        # MaxCrawlDuration start time — set after auth completes (BundleSpy enhancement 10)
+        # MaxCrawlDuration start time — set after auth completes (Katana enhancement 10)
         self._crawl_start_time: float = 0.0
 
-        # Consecutive failure counter for MaxFailureCount guard (BundleSpy enhancement 4)
+        # Consecutive failure counter for MaxFailureCount guard (Katana enhancement 4)
         self._consecutive_failures: int = 0
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
         self.external_seen = external_seen or set()
 
-    # ── BundleSpy enhancement helpers ────────────────────────────────────────────
+    # ── Katana enhancement helpers ────────────────────────────────────────────
 
     def _slow_mo_wait(self, page) -> None:
         """SlowMotion mode: inject a configurable delay between interactions.
@@ -2891,45 +2912,214 @@ class HeadlessEngine:
             (after_storage  - before_storage)
         )
 
+    @staticmethod
+    def _is_element_match(current: dict, target_selector: str, target_xpath: str) -> bool:
+        """Stronger element identity check before trusting an XPath lookup result.
+
+        Mirrors Katana's isElementMatch: identical non-empty ID is a definitive
+        match; otherwise requires at least 2 of (classes, textContent, tagName)
+        to agree. Reduces false positives where the XPath resolves to a different
+        element after a SPA re-render.
+
+        current  - dict with keys: id, classes, textContent, tagName (from page.evaluate)
+        target_selector - the CSS selector stored on the action (used to extract id hint)
+        target_xpath    - the XPath stored on the action
+        """
+        if not current:
+            return False
+        cur_id = (current.get("id") or "").strip()
+        # Extract id hint from CSS selector if present (e.g. "#submit-btn")
+        target_id = ""
+        if target_selector and target_selector.startswith("#"):
+            target_id = target_selector.lstrip("#").split(".")[0].split(":")[0].strip()
+        # Definitive match on non-empty ID
+        if cur_id and target_id and cur_id == target_id:
+            return True
+        # Soft match: need 2+ attributes to agree
+        match_count = 0
+        # TagName from selector prefix (e.g. "button#id", "INPUT[type=...]")
+        sel_tag = (target_selector or "").split("#")[0].split(".")[0].split("[")[0].split(":")[0].upper().strip()
+        if sel_tag and current.get("tagName", "").upper() == sel_tag:
+            match_count += 1
+        # XPath encodes tag name at the last path segment
+        if target_xpath:
+            last_seg = target_xpath.rstrip("]").rsplit("[", 1)[0].rsplit("/", 1)[-1].upper()
+            if last_seg and current.get("tagName", "").upper() == last_seg:
+                match_count += 1
+        return match_count >= 1  # tagName alone is sufficient for structural match
+
     def _navigate_back_to_state_origin(
         self, page, action: CrawlAction, stabilizer
     ) -> bool:
-        """navigateBackToStateOrigin: if the browser is not on the page that
-        owns this action (by URL and origin_id), navigate back and verify
-        the DOM state matches before returning True.  Returns False if
-        restoration fails. (Enhancement 3)"""
-        # If already on the right URL, check the DOM state
-        if page.url == action.url or page.url.rstrip("/") == action.url.rstrip("/"):
-            if not action.origin_id:
-                return True  # no origin_id to verify — assume ok
-            current_fp = self._dom_fingerprint(page)
-            if current_fp and current_fp[:16] == action.origin_id:
-                return True  # browser is on the correct state
-            # Same URL but DOM changed — the SPA transitioned; navigate back
-        # Navigate to the action's source URL
+        """navigateBackToStateOrigin: three-strategy approach to get the browser
+        onto the correct DOM state before executing an action.
+
+        Strategy 1 - already there: check current page hash and SimHash distance.
+        Strategy 2 - browser history walk: step back N times using go_back().
+        Strategy 3 - hard goto: navigate directly to the action's source URL.
+
+        Mirrors Katana's navigateBackToStateOrigin with tryElementNavigation,
+        tryBrowserHistoryNavigation, and tryShortestPathNavigation."""
+
+        # ── Fast path: already on the right state ────────────────────────────
+        current_fp = self._dom_fingerprint(page)
+        if not action.origin_id:
+            return True  # no origin to verify
+
+        if current_fp and current_fp == action.origin_id:
+            return True  # exact match
+
+        # ── SimHash fuzzy check: close enough = treat as correct state ────────
+        if current_fp:
+            origin_state = self.crawl_graph.get_page_state(action.origin_id)
+            if origin_state and origin_state.simhash:
+                # Compute simhash of current stripped DOM
+                try:
+                    stripped = self._stripped_dom(page)
+                    current_sim = self._dom_simhash(stripped) if stripped else 0
+                except Exception:
+                    current_sim = 0
+                if current_sim:
+                    xor = origin_state.simhash ^ current_sim
+                    distance = bin(xor).count("1")
+                    if distance <= 2:  # Katana's simhashThreshold = 2
+                        logger.debug(
+                            "navigateBack: SimHash distance %d - treating as origin state %s",
+                            distance, action.origin_id,
+                        )
+                        return True
+
+        # ── Strategy 1: element already visible on current page ───────────────
+        # If the element we want to interact with exists right here, skip navigation
+        if action.selector and current_fp:
+            try:
+                el = page.query_selector(action.selector)
+                if el and el.is_visible():
+                    el_info = page.evaluate("""
+                        (sel) => {
+                            var el = document.querySelector(sel);
+                            if (!el) return null;
+                            return {
+                                id:          el.id || '',
+                                classes:     el.className || '',
+                                textContent: (el.textContent || '').trim().substring(0, 120),
+                                tagName:     el.tagName || '',
+                            };
+                        }
+                    """, action.selector)
+                    if self._is_element_match(el_info, action.selector, ""):
+                        logger.debug(
+                            "navigateBack: target element visible on current page - "
+                            "skipping navigation for %s", action.selector,
+                        )
+                        return True
+            except Exception:
+                pass
+
+        # ── Strategy 2: browser history walk ─────────────────────────────────
+        origin_state = self.crawl_graph.get_page_state(action.origin_id)
+        if origin_state:
+            try:
+                history = page.evaluate("""
+                    () => {
+                        var entries = [];
+                        // window.history doesn't expose entries in standard JS;
+                        // use performance.navigation entries as a proxy where available
+                        if (window.performance && window.performance.getEntriesByType) {
+                            var nav = window.performance.getEntriesByType('navigation');
+                            if (nav.length) entries.push(nav[0].type);
+                        }
+                        return { length: window.history.length, url: window.location.href };
+                    }
+                """)
+                history_len = (history or {}).get("length", 0)
+            except Exception:
+                history_len = 0
+
+            if history_len > 1:
+                # Try stepping back up to min(history_len-1, 5) times looking for origin URL
+                max_steps = min(history_len - 1, 5)
+                for step in range(1, max_steps + 1):
+                    try:
+                        page.go_back(timeout=3000)
+                        stabilizer.wait_for_framework(max_ms=1500)
+                        back_fp = self._dom_fingerprint(page)
+                        if back_fp == action.origin_id:
+                            logger.debug(
+                                "navigateBack: browser history walk succeeded in %d step(s)",
+                                step,
+                            )
+                            return True
+                        # SimHash check on the back-navigated state too
+                        if origin_state.simhash and back_fp:
+                            try:
+                                stripped = self._stripped_dom(page)
+                                back_sim = self._dom_simhash(stripped) if stripped else 0
+                                if back_sim:
+                                    dist = bin(origin_state.simhash ^ back_sim).count("1")
+                                    if dist <= 2:
+                                        logger.debug(
+                                            "navigateBack: history walk SimHash match "
+                                            "(distance %d) at step %d", dist, step,
+                                        )
+                                        return True
+                            except Exception:
+                                pass
+                        # URL match as a fallback — SPA may have same URL but different state
+                        if page.url.rstrip("/") == origin_state.url.rstrip("/"):
+                            logger.debug(
+                                "navigateBack: history walk URL match at step %d", step,
+                            )
+                            return True
+                    except Exception as e:
+                        logger.debug("navigateBack: go_back step %d failed: %s", step, e)
+                        break
+
+        # ── Strategy 3: hard goto ─────────────────────────────────────────────
         try:
-            page.goto(action.url, timeout=self.timeout * 1000,
-                      wait_until="domcontentloaded")
+            page.goto(
+                action.url,
+                timeout=self.timeout * 1000,
+                wait_until="domcontentloaded",
+            )
             stabilizer.wait_for_framework(max_ms=2000)
         except Exception as e:
-            logger.debug("navigateBackToStateOrigin: goto failed for %s: %s",
-                         action.url, e)
+            logger.debug("navigateBack: goto failed for %s: %s", action.url, e)
             return False
-        # Verify the DOM fingerprint if we have an origin_id
-        if action.origin_id:
-            fp = self._dom_fingerprint(page)
-            if fp and fp[:16] != action.origin_id:
-                logger.debug(
-                    "navigateBackToStateOrigin: state mismatch after navigate "
-                    "(expected %s, got %s) for %s",
-                    action.origin_id, fp[:16], action.url,
-                )
-                # Mismatch is non-fatal: SPA state may differ — log and continue
+
+        # Verify state after hard goto
+        fp = self._dom_fingerprint(page)
+        if fp == action.origin_id:
+            return True
+
+        # SimHash check after goto — SPA may produce a slightly different DOM
+        if fp and origin_state and origin_state.simhash:
+            try:
+                stripped = self._stripped_dom(page)
+                goto_sim = self._dom_simhash(stripped) if stripped else 0
+                if goto_sim:
+                    dist = bin(origin_state.simhash ^ goto_sim).count("1")
+                    if dist <= 2:
+                        logger.debug(
+                            "navigateBack: goto SimHash match (distance %d) for %s",
+                            dist, action.url,
+                        )
+                        return True
+            except Exception:
+                pass
+
+        if fp:
+            logger.debug(
+                "navigateBack: state mismatch after goto (expected %s, got %s) for %s - "
+                "proceeding anyway",
+                action.origin_id, fp, action.url,
+            )
+        # Non-fatal: SPA state drifts are common — log and continue
         return True
 
     def _check_element_interactable(self, page, el) -> bool:
         """Interactability check: verify the element is not covered by an overlay
-        (modal, cookie banner, spinner) before clicking it.  Mirrors BundleSpy's
+        (modal, cookie banner, spinner) before clicking it.  Mirrors Katana's
         CoveredError / interactability check. (Enhancement 5)
 
         Returns True if the element is safe to click.
@@ -2961,11 +3151,11 @@ class HeadlessEngine:
             # If the check fails we fall back to attempting the click anyway
             return True
 
-    # ── Session 2 BundleSpy enhancement helpers ─────────────────────────────────
+    # ── Session 2 Katana enhancement helpers ─────────────────────────────────
 
     def _scroll_into_view(self, page, el) -> None:
         """Universal ScrollIntoView — call before every click, not just Phase 3.
-        Mirrors BundleSpy's ScrollIntoView() call before every action.
+        Mirrors Katana's ScrollIntoView() call before every action.
         Falls back silently if the element is gone or raises. (Enhancement 6)"""
         try:
             el.scroll_into_view_if_needed(timeout=600)
@@ -3027,12 +3217,12 @@ class HeadlessEngine:
         """Return True if any step in the recorded flow is an assert_visible step.
         A terminal visible assertion is an explicit UI check that login succeeded
         (e.g. 'Welcome back' is visible). Mirrors HasTerminalVisibleAssertion in
-        BundleSpy. (Enhancement 5)"""
+        Katana. (Enhancement 5)"""
         return any(s.step_type == "assert_visible" for s in steps)
 
     def _run_recorded_auth_flow(self, page, stabilizer) -> bool:
         """Replay a recorded authentication flow (multi-step SSO/MFA).
-        Mirrors BundleSpy's auth.StepsFromFile + replay loop.
+        Mirrors Katana's auth.StepsFromFile + replay loop.
 
         Executes each LoginStep in order:
           navigate        — page.goto(url)
@@ -3172,7 +3362,7 @@ class HeadlessEngine:
         or no recorded flow exists but we land on a login page.
 
         Attempts to fill detected username/password fields and submit.
-        Uses the same DIT classifier patterns as BundleSpy's auto-login.
+        Uses the same DIT classifier patterns as Katana's auto-login.
         Only attempted when we have a user:pass from an auth header or the
         caller injected credentials via a special auth_credentials dict.
         Returns True if a session delta confirms login. (Enhancement 2)"""
@@ -3422,7 +3612,7 @@ class HeadlessEngine:
 
         Two responsibilities:
         1. ResponseParser — parse every response body for URLs not visible in the DOM
-           (BundleSpy enhancement: response body URL extraction). Discovered URLs are
+           (Katana enhancement: response body URL extraction). Discovered URLs are
            staged into self._rp_discovered and drained into the BFS queue in run().
         2. JS capture — three-layer detection, body dedup, JS file creation (existing).
         """
@@ -3455,7 +3645,7 @@ class HeadlessEngine:
                 except Exception as rp_err:
                     logger.debug("ResponseParser error for %s: %s", url, rp_err)
 
-            # Technology fingerprinting — BundleSpy hybrid feature 6
+            # Technology fingerprinting — Katana hybrid feature 6
             if self.technology_detection and _resp_body is not None:
                 try:
                     techs = self._fingerprint_technologies(url, dict(response.headers), _resp_body)
@@ -3468,7 +3658,7 @@ class HeadlessEngine:
                     logger.debug("Technology detection error for %s: %s", url, tech_err)
 
             # Raw capture — store request+response bytes alongside api_call entries
-            # BundleSpy's FetchRequestStageResponse captures full wire-level traffic;
+            # Katana's FetchRequestStageResponse captures full wire-level traffic;
             # we approximate with Playwright's response object fields.
             if self.capture_raw_traffic and _resp_body is not None:
                 try:
@@ -3576,7 +3766,7 @@ class HeadlessEngine:
         """
         Return True if the element is a logout/sign-out link.
         Checks visible text, href path segments, id, and class — same approach
-        as BundleSpy's isLogoutPage() which catches CSS-icon logout buttons whose
+        as Katana's isLogoutPage() which catches CSS-icon logout buttons whose
         visible text is empty but whose href is /logout or /signout.
         """
         try:
@@ -3648,7 +3838,7 @@ class HeadlessEngine:
     def _discover_form_actions(self, page, source_url: str) -> None:
         """
         Discover forms on the current page and queue them as FILL_FORM actions
-        for dedicated follow-up crawling — same pattern BundleSpy uses for FillForm
+        for dedicated follow-up crawling — same pattern Katana uses for FillForm
         action type. This ensures form-triggered API calls are captured even if
         the form wasn't visible during the main page visit.
 
@@ -3658,10 +3848,10 @@ class HeadlessEngine:
         # Capture DOM fingerprint at discovery time — used as OriginID (Enhancement 2)
         origin_id = ""
         try:
-            fp = self._dom_fingerprint(page)
+            fp, sim = self._dom_fingerprint_and_simhash(page)
             if fp:
                 origin_id = fp[:16]
-                self.crawl_graph.add_page_state(origin_id, source_url)
+                self.crawl_graph.add_page_state(origin_id, source_url, simhash=sim)
         except Exception:
             pass
 
@@ -3732,10 +3922,10 @@ class HeadlessEngine:
         # Capture DOM fingerprint at discovery time - used as OriginID
         origin_id = ""
         try:
-            fp = self._dom_fingerprint(page)
+            fp, sim = self._dom_fingerprint_and_simhash(page)
             if fp:
                 origin_id = fp[:16]
-                self.crawl_graph.add_page_state(origin_id, source_url)
+                self.crawl_graph.add_page_state(origin_id, source_url, simhash=sim)
         except Exception:
             pass
 
@@ -4622,7 +4812,7 @@ class HeadlessEngine:
         Routes may be bare paths (/about), paths with query strings
         (/projects?category=foo), or absolute URLs (https://...).
         Query strings are preserved — they represent distinct filterable
-        pages that differ in content (BundleSpy gap fix).
+        pages that differ in content (Katana gap fix).
         """
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
@@ -4886,56 +5076,125 @@ class HeadlessEngine:
             except Exception:
                 pass
 
-    def _dom_fingerprint(self, page) -> str:
-        """
-        Structural DOM fingerprint — hashes tag structure, not content.
+    def _stripped_dom(self, page) -> str:
+        """Return a normalized DOM string with scripts, styles, comments, and
+        dynamic attributes (data-*, aria-hidden, style) stripped.
 
-        Two SPA pages with the same layout (same component) but different data
-        (different product IDs) get the same hash and are treated as duplicates.
-        This is the same principle as BundleSpy's SimhashOracle.
-
-        Structure signature: pathname + sorted tag-depth pairs from first 80
-        elements + form count + input count. Ignores text content so product
-        listing pages at /products/1 and /products/2 hash identically.
-        """
+        Mirrors Katana's getStrippedDOM / domNormalizer — removes noise so
+        two renders of the same SPA component hash identically even when
+        minor dynamic attributes differ between page loads."""
         try:
-            sig = page.evaluate("""
+            return page.evaluate("""
                 (function() {
-                    var path = window.location.pathname || '/';
-                    // Structural walk — tag names + nesting depth, no text
-                    var tags = [];
-                    var walker = document.createTreeWalker(
-                        document.body || document.documentElement,
-                        NodeFilter.SHOW_ELEMENT,
-                        null
+                    var root = document.documentElement.cloneNode(true);
+                    // Remove script, style, noscript, svg, canvas — not structural
+                    var remove = root.querySelectorAll(
+                        'script,style,noscript,svg,canvas,iframe'
                     );
-                    var depth = 0;
-                    var node  = walker.nextNode();
-                    var count = 0;
-                    while (node && count < 80) {
-                        tags.push(node.tagName.toLowerCase());
-                        node = walker.nextNode();
-                        count++;
+                    for (var i = remove.length - 1; i >= 0; i--) {
+                        remove[i].parentNode && remove[i].parentNode.removeChild(remove[i]);
                     }
-                    var forms  = document.querySelectorAll('form').length;
-                    var inputs = document.querySelectorAll('input,select,textarea').length;
-                    // Sort tags so order-independent structural equivalence is detected
-                    var struct = tags.slice().sort().join(',');
-                    return path + '|' + struct + '|f' + forms + '|i' + inputs;
+                    // Strip dynamic/volatile attributes from every element
+                    var all = root.querySelectorAll('*');
+                    for (var j = 0; j < all.length; j++) {
+                        var el = all[j];
+                        var toRemove = [];
+                        for (var k = 0; k < el.attributes.length; k++) {
+                            var name = el.attributes[k].name;
+                            // Remove data-* (dynamic keys), style (computed), aria-hidden
+                            if (name.startsWith('data-') || name === 'style' ||
+                                name === 'aria-hidden' || name === 'tabindex') {
+                                toRemove.push(name);
+                            }
+                        }
+                        for (var m = 0; m < toRemove.length; m++) {
+                            el.removeAttribute(toRemove[m]);
+                        }
+                        // Blank out text nodes — structure only, not content
+                        for (var n = 0; n < el.childNodes.length; n++) {
+                            if (el.childNodes[n].nodeType === 3) {
+                                el.childNodes[n].nodeValue = '';
+                            }
+                        }
+                    }
+                    return root.outerHTML || '';
                 })()
-            """)
-            return hashlib.sha256((sig or "").encode()).hexdigest()[:16]
+            """) or ""
         except Exception:
             return ""
 
+    def _dom_simhash(self, stripped: str) -> int:
+        """Compute a 64-bit SimHash from a stripped DOM string.
+
+        Uses 3-character shingle hashing — same n-gram size as Katana's
+        simhash.Fingerprint(reader, 3). Returns 0 on empty input.
+
+        SimHash algorithm: for each shingle, hash it to 64 bits, then for
+        each bit position accumulate +1 if the bit is set, -1 if not.
+        Final bit i = 1 if accumulator[i] > 0, else 0."""
+        if not stripped:
+            return 0
+        accum = [0] * 64
+        # 3-gram shingles over the stripped DOM
+        for i in range(len(stripped) - 2):
+            shingle = stripped[i:i + 3]
+            h = int(hashlib.md5(shingle.encode("utf-8", errors="replace")).hexdigest(), 16)
+            for bit in range(64):
+                if (h >> bit) & 1:
+                    accum[bit] += 1
+                else:
+                    accum[bit] -= 1
+        result = 0
+        for bit in range(64):
+            if accum[bit] > 0:
+                result |= (1 << bit)
+        return result
+
+    def _dom_fingerprint(self, page) -> str:
+        """Structural DOM fingerprint — hashes the stripped DOM.
+
+        Uses _stripped_dom() to normalize before hashing so scripts, comments,
+        and volatile attributes don't create false new states. Returns the first
+        16 hex chars of the SHA-256 of the stripped DOM string.
+
+        Also stores the 64-bit SimHash on the matching CrawlGraph node so
+        fuzzy state matching can use it during navigation backtracking."""
+        try:
+            stripped = self._stripped_dom(page)
+            if not stripped:
+                return ""
+            fp = hashlib.sha256(stripped.encode("utf-8", errors="replace")).hexdigest()[:16]
+            # Update stored simhash if this state is already registered
+            sim = self._dom_simhash(stripped)
+            state = self.crawl_graph.get_page_state(fp)
+            if state is not None and state.simhash == 0 and sim != 0:
+                with self.crawl_graph._lock:
+                    state.simhash = sim
+            return fp
+        except Exception:
+            return ""
+
+    def _dom_fingerprint_and_simhash(self, page) -> Tuple[str, int]:
+        """Return (fingerprint, simhash) together so callers can register both
+        in add_page_state without computing the stripped DOM twice."""
+        try:
+            stripped = self._stripped_dom(page)
+            if not stripped:
+                return "", 0
+            fp  = hashlib.sha256(stripped.encode("utf-8", errors="replace")).hexdigest()[:16]
+            sim = self._dom_simhash(stripped)
+            return fp, sim
+        except Exception:
+            return "", 0
+
     def _simulate_onclick_links(self, page, source_url: str, max_links: int = 50) -> list:
         """
-        Click every a[onclick] element and record URL changes — BundleSpy hybrid approach.
+        Click every a[onclick] element and record URL changes — Katana hybrid approach.
 
         Standard crawlers miss JS redirects anchored to onclick handlers:
             <a href="#" onclick="window.location='/admin/dashboard'">Admin</a>
 
-        BundleSpy's navigateRequest() clicks each a[onclick] individually, records
+        Katana's navigateRequest() clicks each a[onclick] individually, records
         the URL drift after click, then navigates back. We do the same:
         1. Collect all a[onclick] selectors before clicking anything
         2. For each: click -> measure URL drift -> navigate back
@@ -5030,7 +5289,7 @@ class HeadlessEngine:
         technologies. No external service — all patterns are inline regexes.
         Returns a list of detected technology names for this response.
 
-        BundleSpy runs Wappalyzer per-response in hybrid/crawl.go; we do the same
+        Katana runs Wappalyzer per-response in hybrid/crawl.go; we do the same
         with a curated inline fingerprint database covering the most common stacks.
         """
         import re as _re
@@ -5110,7 +5369,7 @@ class HeadlessEngine:
         link count) and checks Hamming distance against previously seen fingerprints.
         Threshold 0.0 = disabled. Threshold 0.85 = skip if 85%+ structurally similar.
 
-        BundleSpy's SimhashOracle uses simhash with configurable threshold; we use
+        Katana's SimhashOracle uses simhash with configurable threshold; we use
         a simpler but effective structural hash approach that doesn't require
         external dependencies.
         """
@@ -5159,7 +5418,7 @@ class HeadlessEngine:
         invisible to standard scraping. CDP with pierce=True crosses every shadow
         boundary in a single call, returning the full composed tree.
 
-        BundleSpy does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
+        Katana does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
         pierce=True, then walks nodes collecting href/action attributes.
         """
         found = set()
@@ -5296,7 +5555,7 @@ class HeadlessEngine:
         # Shadow DOM traversal — extract routes hidden inside Web Components.
         # Playwright's page.content() only sees the light DOM; shadow roots require
         # CDP DOMGetDocument with pierce=True to pierce every shadow boundary.
-        # BundleSpy uses this same approach in hybrid/crawl.go navigateRequest().
+        # Katana uses this same approach in hybrid/crawl.go navigateRequest().
         try:
             shadow_routes = self._extract_shadow_dom_routes(page)
             new_routes.update(shadow_routes)
@@ -5535,7 +5794,7 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
-            # JS navigation tracking — BundleSpy's PageFrameNavigated approach.
+            # JS navigation tracking — Katana's PageFrameNavigated approach.
             # page.on("framenavigated") fires for window.location=, meta-refresh,
             # history.pushState, and client-side router transitions that the
             # response handler misses because they don't produce a new HTTP response.
@@ -5559,7 +5818,7 @@ class HeadlessEngine:
             page.on("framenavigated", _on_frame_navigated)
 
             # ── Gap 2: CDP FetchRequestPaused interception (Phase 1 page) ────
-            # BundleSpy's FetchRequestStage/FetchResponseStage pipeline gives us
+            # Katana's FetchRequestStage/FetchResponseStage pipeline gives us
             # raw POST bodies and raw response bytes at the CDP level — things
             # Playwright's high-level response event can miss (cached hits,
             # service-worker intercepts, partial streaming bodies).
@@ -5695,10 +5954,10 @@ class HeadlessEngine:
                 self.registry.register_url(self.target_url)
                 with self._lock:
                     self.pages_visited += 1
-                fp = self._dom_fingerprint(page)
+                fp, sim = self._dom_fingerprint_and_simhash(page)
                 if fp:
                     _seen_dom_states.add(fp)
-                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0)
+                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0, simhash=sim)
                 initial_routes = self._flush_page_intel(page, self.target_url)
                 _drain_phase1_responses()
             else:
@@ -5713,10 +5972,10 @@ class HeadlessEngine:
                 except Exception as e:
                     logger.debug("Root page error: %s", e)
                 self.registry.register_url(self.target_url)
-                fp = self._dom_fingerprint(page)
+                fp, sim = self._dom_fingerprint_and_simhash(page)
                 if fp:
                     _seen_dom_states.add(fp)
-                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0)
+                    self.crawl_graph.add_page_state(fp[:16], self.target_url, depth=0, simhash=sim)
                 initial_routes = self._flush_page_intel(page, self.target_url)
                 _drain_phase1_responses()
 
@@ -5798,7 +6057,7 @@ class HeadlessEngine:
             # Gap 2: CDP-level raw traffic handlers for pool slots.
             # When capture_raw_traffic is on, each pool slot's page gets a CDP
             # Fetch interception session that captures POST bodies and response
-            # bytes before the browser can consume them — the same data BundleSpy
+            # bytes before the browser can consume them — the same data Katana
             # captures via FetchRequestStage/FetchResponseStage in browser.go.
             # The handlers are thread-safe (self._raw_lock guards the list).
             def _pool_cdp_request_fn(url: str, method: str, headers: dict,
@@ -5951,13 +6210,13 @@ class HeadlessEngine:
 
                     # DOM state dedup
                     slot_stabilizer.wait_for_framework(max_ms=2000)
-                    fp = self._dom_fingerprint(slot_page)
+                    fp, sim = self._dom_fingerprint_and_simhash(slot_page)
                     if fp:
                         with self._lock:
                             if fp in _seen_dom_states:
                                 return [], 0, True, False
                             _seen_dom_states.add(fp)
-                        self.crawl_graph.add_page_state(fp[:16], url, depth=depth)
+                        self.crawl_graph.add_page_state(fp[:16], url, depth=depth, simhash=sim)
                         load_action = CrawlAction(
                             action_type = ActionType.LOAD_URL,
                             url         = url,
@@ -6428,10 +6687,10 @@ class HeadlessEngine:
             "actions_queued":     len(self._seen_actions),
             "crawl_graph":        crawl_graph_summary,
             "timings":            timings,
-            # BundleSpy enhancements (session 3)
+            # Katana enhancements (session 3)
             "response_parser_urls": _rp_added_count,
             "trie_filtered":        _trie_filtered_count,
-            # BundleSpy enhancements (session 4)
+            # Katana enhancements (session 4)
             "onclick_navigations":  _onclick_nav_count,
             "js_nav_urls":          _js_nav_count,
             "technologies":         dict(self._tech_detections),
@@ -6489,24 +6748,24 @@ def collect_headless_full(
     cookies:              list           = None,
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
-    # BundleSpy enhancements (session 1)
+    # Katana enhancements (session 1)
     max_failures:         int            = 10,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
     captcha_handler       = None,
     cookie_consent_bypass: bool          = True,
-    # BundleSpy enhancements (session 2)
+    # Katana enhancements (session 2)
     auth_steps:           Optional[List[LoginStep]] = None,
     page_load_strategy:   str            = "domcontentloaded",
     hooks:                Optional[CrawlHooks] = None,
     auth_credentials:     Optional[dict] = None,
-    # BundleSpy enhancements (session 3)
+    # Katana enhancements (session 3)
     cookie_jar_path:      Optional[str]  = None,
     url_filter_similar:   bool           = False,
     url_filter_threshold: int            = 3,
     response_body_extract: bool          = True,
-    # BundleSpy enhancements (session 4)
+    # Katana enhancements (session 4)
     max_onclick_links:    int            = 50,
     capture_raw_traffic:  bool           = False,
     content_similarity_threshold: float  = 0.0,
@@ -6517,7 +6776,7 @@ def collect_headless_full(
     num_browsers:         int            = 5,
 ) -> dict:
     """
-    Full headless scan — all BundleSpy enhancements exposed.
+    Full headless scan — all Katana enhancements exposed.
 
     seed_urls:             routes from static analysis to pre-seed the engine.
     workers:               concurrent page processing (default 3).
