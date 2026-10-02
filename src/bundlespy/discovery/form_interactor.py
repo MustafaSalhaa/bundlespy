@@ -80,7 +80,7 @@ class FormIntent(Enum):
 
 # ── Gap 7: Smart field-aware fill values ──────────────────────────────────────
 #
-# Equivalent to -'s FormFillSuggestions() — values are chosen per
+# Equivalent to Katana's FormFillSuggestions() — values are chosen per
 # field *type* (HTML input type + autocomplete + name token) to produce the
 # most realistic-looking value that will actually pass client-side validation
 # without carrying any real PII or triggering real server actions.
@@ -258,7 +258,7 @@ _INPUT_TYPE_FILL: Dict[str, str] = {
 
 def _smart_fill_value(el, itype: str) -> str:
     """
-    Gap 7: --style smart fill value selection.
+    Gap 7: Katana-style smart fill value selection.
 
     Priority chain (first match wins):
       1. HTML `autocomplete` attribute — the browser's own semantic hint
