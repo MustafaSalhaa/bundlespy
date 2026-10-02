@@ -570,7 +570,7 @@ class _ASTWalker:
     # ── Pass 2: call site extraction ──────────────────────────────────────────
 
     def _extract_calls_iter(self, root) -> None:
-        """Iterative DFS call/new expression extraction."""
+        """Iterative DFS call/new/assignment extraction."""
         stack = [root]
         while stack:
             if self._elapsed() > AST_MAX_SECONDS:
@@ -581,6 +581,8 @@ class _ASTWalker:
                 self._handle_call(node)
             elif t == "new_expression":
                 self._handle_new(node)
+            elif t == "assignment_expression":
+                self._handle_location_assignment(node)
             stack.extend(reversed(node.named_children))
 
     def _extract_calls(self, node) -> None:
@@ -616,8 +618,17 @@ class _ASTWalker:
         if callee_type == "identifier" and callee_text in _FETCH_NAMES:
             if args:
                 urls = self._resolve_url_arg(args[0])
+                method = _FETCH_METHOD
+                hdrs: List[str] = []
+                # parse init object for method + headers
+                if len(args) > 1 and args[1].type == "object":
+                    init = args[1]
+                    method, hdrs = self._fetch_init(init)
+                ev_extra = ("headers: " + ",".join(hdrs)) if hdrs else ""
                 for url in urls:
-                    self._add(url, _FETCH_METHOD, node, confidence=0.90)
+                    self._add_with_evidence(
+                        url, method, node, confidence=0.90, extra=ev_extra,
+                    )
             return
 
         # navigator.sendBeacon(url, data?)
@@ -634,6 +645,20 @@ class _ASTWalker:
                 if args:
                     for url in self._resolve_url_arg(args[0]):
                         self._add(url, _BEACON_METHOD, node, confidence=0.90)
+                return
+
+            # location.replace(url) / location.assign(url)
+            if prop_text in ("replace", "assign") and args:
+                first = args[0]
+                if first.type == "string" or self._string_from_node(first):
+                    for url in self._resolve_url_arg(first):
+                        self._add(url, "GET", node, confidence=0.80)
+                return
+
+            # window.open(url) - member form
+            if obj_text == "window" and prop_text == "open" and args:
+                for url in self._resolve_url_arg(args[0]):
+                    self._add(url, "GET", node, confidence=0.78)
                 return
 
             # axios.get/post/...
@@ -737,6 +762,113 @@ class _ASTWalker:
                 url, method = self._axios_config_obj(args[0])
                 if url:
                     self._add(url, method or "UNKNOWN", node, confidence=0.88)
+            return
+
+        # bare open(url) - window.open without the window prefix
+        if callee_type == "identifier" and callee_text == "open" and args:
+            first = args[0]
+            if first.type == "string":
+                for url in self._resolve_url_arg(first):
+                    self._add(url, "GET", node, confidence=0.70)
+
+    # interesting left-hand sides for location assignment
+    _LOCATION_LHS = frozenset({
+        "location", "window.location", "document.location",
+        "this.url", "this._url", "this.baseUrl", "this.baseURL",
+    })
+
+    def _handle_location_assignment(self, node) -> None:
+        """
+        Catch navigation assignments:
+          location.href = "/path"
+          window.location = url
+          img.src = "https://..."
+          this.baseUrl = "/api"
+        """
+        lhs = node.child_by_field_name("left")
+        rhs = node.child_by_field_name("right")
+        if lhs is None or rhs is None:
+            return
+
+        lhs_text = self._text(lhs)
+
+        interesting = (
+            lhs_text in self._LOCATION_LHS
+            or lhs_text.endswith(".href")
+            or lhs_text.endswith(".src")
+            or lhs_text.endswith(".location")
+            or lhs_text.endswith(".baseUrl")
+            or lhs_text.endswith(".baseURL")
+        )
+        if not interesting:
+            return
+
+        # only fire if the rhs starts with a string (avoids all-dynamic noise)
+        val = self._string_from_node(rhs)
+        if not val:
+            # try collapsed string for concatenations
+            val = self._collapsed_string(rhs)
+        if not val:
+            return
+
+        for url in self._resolve_url_arg(rhs):
+            self._add(url, "GET", node, confidence=0.78)
+
+    def _fetch_init(self, init_node) -> Tuple[str, List[str]]:
+        """
+        Parse a fetch() init object for method and headers.
+        Returns (method, [header_names]).
+        Emits HIGH secret hits for hardcoded auth header values.
+        """
+        _auth_headers = {"authorization", "x-api-key", "x-auth-token",
+                         "x-access-token", "token", "api-key", "apikey"}
+        method = "GET"
+        header_names: List[str] = []
+
+        for pair in init_node.named_children:
+            if pair.type != "pair":
+                continue
+            kn = pair.child_by_field_name("key")
+            vn = pair.child_by_field_name("value")
+            if not kn or not vn:
+                continue
+            key = self._text(kn).strip("'\"` ").lower()
+
+            if key == "method":
+                m = self._string_from_node(vn)
+                if m:
+                    method = m.upper()
+
+            elif key == "headers" and vn.type == "object":
+                for hp in vn.named_children:
+                    if hp.type != "pair":
+                        continue
+                    hk = hp.child_by_field_name("key")
+                    hv = hp.child_by_field_name("value")
+                    if not hk:
+                        continue
+                    hname = self._text(hk).strip("'\"` ")
+                    if not hname:
+                        continue
+                    header_names.append(hname)
+                    if hname.lower() in _auth_headers and hv is not None:
+                        hval = self._string_from_node(hv)
+                        if hval and len(hval) >= 8:
+                            already = any(
+                                s.key_name == hname and s.value == hval
+                                for s in self.secret_hits
+                            )
+                            if not already:
+                                self.secret_hits.append(ASTSecretHit(
+                                    key_name   = hname,
+                                    value      = hval,
+                                    line       = hp.start_point[0] + 1,
+                                    context    = f"fetch headers: {hname}",
+                                    severity   = "HIGH",
+                                    confidence = 0.90,
+                                ))
+
+        return method, header_names
 
     def _handle_new(self, node) -> None:
         """Handle new WebSocket(url) / new EventSource(url)."""
