@@ -3001,7 +3001,7 @@ class HeadlessEngine:
         return match_count >= 1  # tagName alone is sufficient for structural match
 
     def _navigate_back_to_state_origin(
-        self, page, action: CrawlAction, stabilizer
+        self, page, action: CrawlAction, stabilizer, is_spa: bool = None
     ) -> bool:
         """navigateBackToStateOrigin: three-strategy approach to get the browser
         onto the correct DOM state before executing an action.
@@ -3094,7 +3094,7 @@ class HeadlessEngine:
                 for step in range(1, max_steps + 1):
                     try:
                         page.go_back(timeout=3000)
-                        stabilizer.wait_for_framework(max_ms=1500)
+                        stabilizer.wait_for_framework(max_ms=1500, is_spa=is_spa)
                         back_fp = self._dom_fingerprint(page)
                         if back_fp == action.origin_id:
                             logger.debug(
@@ -3128,13 +3128,15 @@ class HeadlessEngine:
                         break
 
         # ── Strategy 3: hard goto ─────────────────────────────────────────────
+        # Capped at 10s - Phase 3 has a 90s wall; using the full 30s timeout
+        # per action would exhaust the budget in 3 actions on slow pages.
         try:
             page.goto(
                 action.url,
-                timeout=self.timeout * 1000,
+                timeout=min(self.timeout * 1000, 10000),
                 wait_until="domcontentloaded",
             )
-            stabilizer.wait_for_framework(max_ms=2000)
+            stabilizer.wait_for_framework(max_ms=2000, is_spa=is_spa)
         except Exception as e:
             logger.debug("navigateBack: goto failed for %s: %s", action.url, e)
             return False
@@ -3865,9 +3867,9 @@ class HeadlessEngine:
                 expected_origin, current_origin,
             )
             try:
-                page.goto(expected_url, timeout=self.timeout * 1000,
+                page.goto(expected_url, timeout=min(self.timeout * 1000, 10000),
                           wait_until="domcontentloaded")
-                stabilizer.wait_for_framework(max_ms=2000)
+                stabilizer.wait_for_framework(max_ms=2000, is_spa=self._is_spa)
             except Exception as nav_err:
                 logger.debug("Drift recovery navigation failed: %s", nav_err)
             return True
@@ -6526,9 +6528,22 @@ class HeadlessEngine:
             _action_pages_visited = 0
             _MAX_ACTION_PAGES = min(20, max(0, self.max_pages - self.pages_visited))
 
+            # Hard wall: Phase 3 must finish within 90s regardless of action count.
+            # Each action can take up to self.timeout seconds for navigation; without
+            # a wall, 20 actions on slow pages can block for 10+ minutes.
+            _phase3_deadline = time.monotonic() + 90
+
             phase3_consecutive_failures = 0
 
             while self._action_queue and _action_pages_visited < _MAX_ACTION_PAGES:
+                # Hard Phase 3 wall - prevents hanging on slow/unresponsive pages
+                if time.monotonic() > _phase3_deadline:
+                    logger.info(
+                        "Phase 3 wall (90s) reached — stopping early (%d action pages done)",
+                        _action_pages_visited,
+                    )
+                    break
+
                 # MaxCrawlDuration guard in Phase 3 as well (Enhancement 10)
                 if self._is_crawl_deadline_exceeded():
                     logger.info("MaxCrawlDuration reached — stopping Phase 3")
@@ -6547,7 +6562,7 @@ class HeadlessEngine:
                     # navigateBackToStateOrigin: verify browser is on the correct
                     # DOM state before executing the action (Enhancements 2 + 3)
                     self._recover_drift(page, action.url, stabilizer)
-                    restored = self._navigate_back_to_state_origin(page, action, stabilizer)
+                    restored = self._navigate_back_to_state_origin(page, action, stabilizer, is_spa=self._is_spa)
                     if not restored:
                         phase3_consecutive_failures += 1
                         continue
@@ -6742,11 +6757,34 @@ class HeadlessEngine:
             # processed here while the context is still valid.
             _drain_phase1_responses()
 
+            # Navigate to blank before close - stops pending route handlers
+            # that can block ctx.close() when Phase 3 left the page mid-navigation.
+            try:
+                page.goto("about:blank", timeout=3000, wait_until="commit")
+            except Exception:
+                pass
+
             try:
                 ctx.close()
             except Exception:
                 pass
-            browser.close()
+
+            # browser.close() can hang if CDP has un-flushed events; run it in
+            # a daemon thread with a hard timeout so the process always exits.
+            import threading as _bt
+            _close_done = _bt.Event()
+
+            def _do_browser_close():
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                finally:
+                    _close_done.set()
+
+            _bt.Thread(target=_do_browser_close, daemon=True).start()
+            if not _close_done.wait(timeout=10):
+                logger.debug("browser.close() timed out (10s) — skipping")
 
         # ── Phase 4: Build endpoints ──────────────────────────────────────────
         self.timer.start("endpoint_build")
