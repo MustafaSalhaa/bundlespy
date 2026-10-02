@@ -648,12 +648,18 @@ class _ASTWalker:
                 return
 
             # location.replace(url) / location.assign(url)
+            # only fire when the object is actually location-related
+            _LOCATION_OBJECTS = frozenset({
+                "location", "window.location", "document.location",
+                "history",
+            })
             if prop_text in ("replace", "assign") and args:
-                first = args[0]
-                if first.type == "string" or self._string_from_node(first):
-                    for url in self._resolve_url_arg(first):
-                        self._add(url, "GET", node, confidence=0.80)
-                return
+                if obj_text in _LOCATION_OBJECTS or obj_text.endswith(".location"):
+                    first = args[0]
+                    if first.type == "string" or self._string_from_node(first):
+                        for url in self._resolve_url_arg(first):
+                            self._add(url, "GET", node, confidence=0.80)
+                    return
 
             # window.open(url) - member form
             if obj_text == "window" and prop_text == "open" and args:
@@ -770,6 +776,94 @@ class _ASTWalker:
             if first.type == "string":
                 for url in self._resolve_url_arg(first):
                     self._add(url, "GET", node, confidence=0.70)
+            return
+
+        # catch-all: any call where the first arg looks like a URL and no
+        # specific handler above already claimed it. Mirrors jsluice's
+        # "other function calls with a URL-like argument" matcher.
+        self._handle_generic_call(node, callee_type, callee_text, args)
+
+    # callee names already handled by dedicated branches above - never re-fire
+    _HANDLED_CALLEES = frozenset({
+        "fetch", "open",
+        "$", "jQuery",
+        "axios",
+        "request", "superagent", "got", "ky",
+        "http", "https",
+        "app", "router", "express",
+        "EventSource", "WebSocket",
+        # noisy built-ins that take a string but never produce API endpoints
+        "require", "import", "define", "console",
+        "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+        "parseInt", "parseFloat", "JSON", "Object", "Array",
+        "Error", "Promise", "Symbol",
+        "document", "window", "navigator",
+        "eval", "Function",
+    })
+
+    def _handle_generic_call(
+        self,
+        node,
+        callee_type: str,
+        callee_text: str,
+        args: list,
+    ) -> None:
+        """
+        Catch-all for call_expression nodes not claimed by any specific handler.
+        Fires when the first argument resolves to a URL-like value.
+        Covers patterns like:
+          axios(url), request(url), http.get(url) already handled above,
+          but also custom wrappers: apiFetch(url), loadResource(url),
+          this._request(url), client.post(url), etc.
+        Confidence is deliberately low (0.65) - these lack structural context.
+        """
+        if not args:
+            return
+
+        # skip anything handled above by name
+        # for member calls (obj.method), check the full callee and the object
+        base_name = callee_text.split(".")[0] if "." in callee_text else callee_text
+        if base_name in self._HANDLED_CALLEES:
+            return
+        if callee_text in self._HANDLED_CALLEES:
+            return
+
+        # skip event emitters and DOM methods - they don't return API endpoints
+        prop_suffix = callee_text.split(".")[-1] if "." in callee_text else ""
+        _skip_props = frozenset({
+            "addEventListener", "removeEventListener", "dispatchEvent",
+            "emit", "on", "off", "once",
+            "setAttribute", "getAttribute", "querySelector", "querySelectorAll",
+            "getElementById", "getElementsByClassName",
+            "appendChild", "removeChild", "insertBefore",
+            "classList", "style", "dataset",
+            "log", "warn", "error", "info", "debug",
+            "then", "catch", "finally",
+            "toString", "valueOf", "hasOwnProperty",
+            "push", "pop", "shift", "unshift", "splice", "slice",
+            "map", "filter", "reduce", "forEach", "find", "includes",
+            "replace", "split", "join", "trim", "indexOf", "substring",
+        })
+        if prop_suffix in _skip_props:
+            return
+
+        # first arg must resolve to a URL-like string
+        first = args[0]
+        resolved = self._resolve_url_arg(first)
+        if not resolved:
+            return
+
+        # infer method from callee name if possible
+        method = "GET"
+        if "." in callee_text:
+            prop = callee_text.split(".")[-1].lower()
+            if prop in _HTTP_METHODS:
+                method = prop.upper()
+                if method == "REQUEST":
+                    method = "UNKNOWN"
+
+        for url in resolved:
+            self._add(url, method, node, confidence=0.65)
 
     # interesting left-hand sides for location assignment
     _LOCATION_LHS = frozenset({
