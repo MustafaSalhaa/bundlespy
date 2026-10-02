@@ -366,8 +366,21 @@ def _analyze(
     def _process(primary_js: "JSFile", all_urls: list) -> None:
         content = primary_js.content
 
-        # Secret detection — scan once against primary URL
-        for f in scanner.scan(content, primary_js.url, primary_js.source_page):
+        # Secret detection — run AST pass first to get env + key-value hits,
+        # then feed both into scan_with_env() so regex + AST work together.
+        try:
+            from .analysis.ast_parser import augment_env_and_extract
+            _ast_env, _, _ast_hits = augment_env_and_extract(
+                content, primary_js.url,
+            )
+        except Exception:
+            _ast_env = None
+            _ast_hits = None
+
+        for f in scanner.scan_with_env(
+            content, primary_js.url, primary_js.source_page,
+            ast_env=_ast_env, ast_secret_hits=_ast_hits,
+        ):
             if f.sha256 not in seen_finds:
                 seen_finds.add(f.sha256)
                 # Record all occurrence URLs in the finding
