@@ -520,7 +520,7 @@ class TestSummaryIntegrity:
         result = self._make_result([])
         output = self._get_summary_output(result)
         assert "Critical findings present" not in output
-        assert "No critical findings" in output
+        assert "No findings detected" in output
 
     def test_critical_triggers_message(self):
         result = self._make_result([self._make_finding("CRITICAL")])
