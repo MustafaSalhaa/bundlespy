@@ -98,8 +98,8 @@ other:
     _cg = scan.add_argument_group("crawl")
     _cg.add_argument("--depth",        type=int, default=5,    metavar="N", help="Max crawl depth from the target root (default: 5)")
     _cg.add_argument("--max-pages",    type=int, default=500,  metavar="N", help="Max pages to visit during crawl (default: 500)")
-    _cg.add_argument("--max-js",       type=int, default=1000, metavar="N", help="Max JS files to collect (default: 1000)")
-    _cg.add_argument("--rate",         type=int, default=3,    metavar="N", help="Requests per second (default: 3)")
+    _cg.add_argument("--max-js",       type=int, default=10000, metavar="N", help="Max JS files to collect (default: 1000)")
+    _cg.add_argument("--rate",         type=int, default=4,    metavar="N", help="Requests per second (default: 3)")
     _cg.add_argument("--timeout",      type=int, default=10,   metavar="S", help="Per-request timeout in seconds (default: 10)")
     _cg.add_argument("--common-paths", action="store_true",                  help="Probe common paths (/robots.txt, /sitemap.xml, etc.)")
     _cg.add_argument("--subdomains",   action="store_true",                  help="Follow links to subdomains of the target")
@@ -110,7 +110,7 @@ other:
     _fg.add_argument("-M", "--source-maps",      action="store_true", help="Fetch and parse .map files to recover original source")
     _fg.add_argument("-C", "--chunks",           action="store_true", help="Discover and download webpack chunk files")
     _fg.add_argument("-P", "--passive",          action="store_true", help="Pull historical JS from Wayback Machine + CommonCrawl instead of crawling live")
-    _fg.add_argument("-H", "--headless",         action="store_true", help="Launch a real browser to trigger lazy-loaded JS and intercept network calls")
+    _fg.add_argument("-H", "--headless",         action="store_true", default=True, help="Launch a real browser to trigger lazy-loaded JS and intercept network calls (default: on)")
     _fg.add_argument("-S", "--stealth",          action="store_true", help="Enable evasion: randomized delays, realistic headers, no automation flags")
     _fg.add_argument("--no-verify",             action="store_true", help="Disable SSL certificate verification (use for self-signed certs)")
     _fg.add_argument("-V", "--validate",         action="store_true", help="HTTP-probe discovered endpoints to confirm they respond")
@@ -155,7 +155,7 @@ other:
                      help="Directory to write report files (default: ./bundlespy-reports/)")
     _og.add_argument("--report-name", default="",         metavar="NAME",
                      help="Custom filename stem for reports (e.g. client-webapp-2026)")
-    _og.add_argument("-v", "--verbose",  action="store_true", help="Show more detail including low-confidence endpoints")
+    _og.add_argument("-v", "--verbose",  action="store_true", default=True, help="Show more detail including low-confidence endpoints (default: on)")
     _og.add_argument("-vv","--debug",    action="store_true", help="Full debug output including classifier scoring")
     _og.add_argument("-q", "--quiet",    action="store_true", help="Suppress all progress output")
     _og.add_argument("--no-color",       action="store_true", help="Disable ANSI colors")
@@ -183,7 +183,7 @@ other:
                        help="Directory to write report files")
     local.add_argument("--report-name",   default="",         metavar="NAME",
                        help="Custom filename stem for reports")
-    local.add_argument("-v", "--verbose", action="store_true", help="Show more detail")
+    local.add_argument("-v", "--verbose", action="store_true", default=True, help="Show more detail (default: on)")
     local.add_argument("--no-color",      action="store_true", help="Disable ANSI colors")
 
     # ── demo ──────────────────────────────────────────────────────────────────
