@@ -1431,7 +1431,7 @@ class PageStabilizer:
                 return
             self.page.wait_for_timeout(self.POLL_INTERVAL_MS)
 
-    def wait_for_load(self, max_ms: int = 8000, is_spa: bool = None) -> None:
+    def wait_for_load(self, max_ms: int = 8000, page_type: str = "unknown") -> None:
         """
         Wait for initial page load using a two-phase approach:
         1. Playwright's networkidle (CDP-level, catches all XHR/fetch) with a
@@ -1439,21 +1439,21 @@ class PageStabilizer:
         2. Our JS in-flight counter as a fallback — catches requests that fired
            before our init script landed or after networkidle returned early.
 
-        is_spa: False = confirmed non-SPA — skip networkidle, just DOM quiet
-                True  = confirmed SPA   — full networkidle + JS counter
-                None  = unknown         — original behaviour (networkidle cap)
+        page_type: "static"  - skip networkidle, just DOM quiet (fast path)
+                   "spa"     - full networkidle + JS counter
+                   "unknown" - networkidle with conservative cap (safe default)
         """
         start = time.monotonic()
 
-        if is_spa is False:
-            # Non-SPA: DOM is ready after domcontentloaded, no need to wait for
-            # network to go quiet. A short DOM stability window is enough.
+        if page_type == "static":
+            # Static site: DOM is ready after domcontentloaded, no XHR to wait for.
+            # A short DOM stability window is enough.
             self.wait(max_ms=min(max_ms, 400), quiet_ms=100)
             return
 
         # Phase A: CDP networkidle — capped to avoid SPA polling loops
         # SPA gets full 3s cap; unknown gets 1.5s (safer default)
-        idle_cap = 3000 if is_spa else 1500
+        idle_cap = 3000 if page_type == "spa" else 1500
         try:
             self.page.wait_for_load_state("networkidle",
                                           timeout=min(max_ms // 2, idle_cap))
@@ -1469,27 +1469,27 @@ class PageStabilizer:
         """Short adaptive wait after a click/hover/scroll."""
         self.wait(max_ms=max_ms, quiet_ms=100)
 
-    def wait_for_framework(self, max_ms: int = 3000, is_spa: bool = None) -> None:
+    def wait_for_framework(self, max_ms: int = 3000, page_type: str = "unknown") -> None:
         """
         Wait for SPA framework to mount - Angular/React/Vue.
         Detects actual framework readiness, not a fixed delay.
 
-        is_spa: True  = confirmed SPA   -> 800ms stability wait after mount
-                False = confirmed non-SPA -> 150ms stability wait (skip poll)
-                None  = unknown          -> original 1000ms wait (safe default)
+        page_type: "spa"     - full poll + 800ms stability wait after mount
+                   "static"  - skip poll, 150ms stability wait (content already there)
+                   "unknown" - full poll + 1000ms stability wait (safe default)
 
-        Non-SPA pages have document.body.children.length > 2 instantly, so the
-        poll fires on the first check every time. Cutting the stability wait from
-        1000ms to 150ms saves ~850ms per page on static sites.
+        Static pages have document.body.children.length > 2 instantly, so the
+        poll fires on the first check every time. Skipping it saves ~850ms per
+        page on static sites.
         """
-        # Non-SPA: skip the poll entirely (content is already there), just a
-        # short DOM stability wait so late-appended links are captured.
-        if is_spa is False:
+        # Static site: skip the poll entirely, just a short DOM stability wait
+        # so late-appended links are captured before we move on.
+        if page_type == "static":
             self.wait(max_ms=150, quiet_ms=50)
             return
 
         # SPA or unknown: run the framework poll as before
-        stability_ms = 800 if is_spa else 1000
+        stability_ms = 800 if page_type == "spa" else 1000
 
         start = time.monotonic()
         deadline = start + max_ms / 1000
@@ -2805,7 +2805,7 @@ class HeadlessEngine:
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag - avoids re-auth mid-crawl
-        self._is_spa:         bool = False   # set in Phase 1 - drives adaptive framework wait
+        self._page_type:      str  = "unknown"  # set in Phase 1: "spa", "static", or "unknown"
 
         # Session 3 Katana enhancements
         self.cookie_jar_path       = cookie_jar_path
@@ -3049,7 +3049,7 @@ class HeadlessEngine:
         return match_count >= 1  # tagName alone is sufficient for structural match
 
     def _navigate_back_to_state_origin(
-        self, page, action: CrawlAction, stabilizer, is_spa: bool = None
+        self, page, action: CrawlAction, stabilizer, page_type: str = "unknown"
     ) -> bool:
         """navigateBackToStateOrigin: three-strategy approach to get the browser
         onto the correct DOM state before executing an action.
@@ -3142,7 +3142,7 @@ class HeadlessEngine:
                 for step in range(1, max_steps + 1):
                     try:
                         page.go_back(timeout=3000)
-                        stabilizer.wait_for_framework(max_ms=1500, is_spa=is_spa)
+                        stabilizer.wait_for_framework(max_ms=1500, page_type=page_type)
                         back_fp = self._dom_fingerprint(page)
                         if back_fp == action.origin_id:
                             logger.debug(
@@ -3184,7 +3184,7 @@ class HeadlessEngine:
                 timeout=min(self.timeout * 1000, 10000),
                 wait_until="domcontentloaded",
             )
-            stabilizer.wait_for_framework(max_ms=2000, is_spa=is_spa)
+            stabilizer.wait_for_framework(max_ms=2000, page_type=page_type)
         except Exception as e:
             logger.debug("navigateBack: goto failed for %s: %s", action.url, e)
             return False
@@ -4112,7 +4112,7 @@ class HeadlessEngine:
             try:
                 page.goto(expected_url, timeout=min(self.timeout * 1000, 10000),
                           wait_until="domcontentloaded")
-                stabilizer.wait_for_framework(max_ms=2000, is_spa=self._is_spa)
+                stabilizer.wait_for_framework(max_ms=2000, page_type=self._page_type)
             except Exception as nav_err:
                 logger.debug("Drift recovery navigation failed: %s", nav_err)
             return True
@@ -6325,10 +6325,10 @@ class HeadlessEngine:
                     except Exception:
                         pass
 
-            # Detect SPA from root page - drives adaptive wait in Phase 2.
-            # Angular/React/Vue markers = SPA; plain HTML body = non-SPA.
+            # Detect page type from root page - drives adaptive wait in Phase 2.
+            # Angular/React/Vue markers = "spa"; plain HTML body = "static".
             try:
-                self._is_spa = bool(page.evaluate("""
+                _spa_detected = bool(page.evaluate("""
                     (function() {
                         if (document.querySelector('[ng-version]') ||
                             document.querySelector('app-root') ||
@@ -6339,9 +6339,10 @@ class HeadlessEngine:
                         return false;
                     })()
                 """))
+                self._page_type = "spa" if _spa_detected else "static"
             except Exception:
-                self._is_spa = False
-            logger.info("Phase 1 done: %d routes  is_spa=%s", len(self.routes), self._is_spa)
+                self._page_type = "unknown"
+            logger.info("Phase 1 done: %d routes  page_type=%s", len(self.routes), self._page_type)
 
             # ── Phase 2: BFS route exploration (parallel browser pool) ────────
             # Bug 19 fix: use a real BFS deque so routes discovered during the
@@ -6591,8 +6592,8 @@ class HeadlessEngine:
                     if self._is_captcha_page(slot_page):
                         self._handle_captcha(slot_page)
 
-                    # DOM state dedup - use adaptive wait based on Phase 1 SPA detection
-                    slot_stabilizer.wait_for_framework(max_ms=2000, is_spa=self._is_spa)
+                    # DOM state dedup - adaptive wait based on Phase 1 page type detection
+                    slot_stabilizer.wait_for_framework(max_ms=2000, page_type=self._page_type)
                     fp, sim = self._dom_fingerprint_and_simhash(slot_page)
                     if fp:
                         with self._lock:
@@ -6937,7 +6938,7 @@ class HeadlessEngine:
                     # navigateBackToStateOrigin: verify browser is on the correct
                     # DOM state before executing the action (Enhancements 2 + 3)
                     self._recover_drift(page, action.url, stabilizer)
-                    restored = self._navigate_back_to_state_origin(page, action, stabilizer, is_spa=self._is_spa)
+                    restored = self._navigate_back_to_state_origin(page, action, stabilizer, page_type=self._page_type)
                     if not restored:
                         phase3_consecutive_failures += 1
                         continue
