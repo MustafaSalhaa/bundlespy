@@ -6474,6 +6474,7 @@ class HeadlessEngine:
                 Returns (new_urls, onclick_count, success, session_lost_flag).
                 Called from a ThreadPoolExecutor worker thread.
                 """
+                logger.debug("[worker-start] %s", url)
                 # Gate on concurrency limit — blocks until a slot is available.
                 _browser_pool.acquire()
                 slot = None
@@ -6501,8 +6502,8 @@ class HeadlessEngine:
                             return
                         _job_timed_out.set()
                         logger.warning(
-                            "Job deadline (%ds) hit for %s - closing page to unblock worker",
-                            _JOB_DEADLINE, url,
+                            "[worker-timeout] %s (deadline %ds) - closing page to unblock worker",
+                            url, _JOB_DEADLINE,
                         )
                         try:
                             _this_page.close()
@@ -6557,6 +6558,8 @@ class HeadlessEngine:
                             "Session expired for %s (redirected to %s) - skipping, BFS continues",
                             url, slot_page.url,
                         )
+                        # Record so the scheduler never requeues this URL
+                        _auth_failed_urls.add(url)
                         if self.hooks.on_login_detected:
                             try:
                                 self.hooks.on_login_detected(slot_page)
@@ -6651,13 +6654,19 @@ class HeadlessEngine:
                             pass
                         _browser_pool.close_thread_browser(slot)
                     _browser_pool.release()
+                    logger.debug("[worker-end] %s", url)
 
             # Use a ThreadPoolExecutor scoped to Phase 2 only.
             # We dispatch batches of up to num_browsers URLs at a time so the
             # BFS queue drains can still feed new URLs between batches.
             from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
-            with ThreadPoolExecutor(max_workers=self.num_browsers) as _executor:
+            # Explicit lifecycle instead of context manager - the 'with' form calls
+            # shutdown(wait=True) on exit, which blocks forever when a Playwright
+            # worker thread is stalled. shutdown(wait=False) lets us exit cleanly
+            # after the job deadline + watchdog have already closed stuck pages.
+            _executor = ThreadPoolExecutor(max_workers=self.num_browsers)
+            try:
                 # Rolling dispatch - keep up to num_browsers futures in flight.
                 # As soon as one finishes, immediately submit the next queued URL.
                 # This eliminates the old batch pattern where 4 workers idled
@@ -6667,6 +6676,7 @@ class HeadlessEngine:
                 _inflight: dict = {}          # future -> (url, depth)
                 _inflight_started: dict = {}  # future -> submit monotonic time
                 _stop_bfs = False
+                _auth_failed_urls: set = set()  # URLs that triggered session expiry - don't retry
 
                 def _drain_queue_into_pool():
                     """Submit new URLs until the pool is full or the queue is empty."""
@@ -6674,6 +6684,9 @@ class HeadlessEngine:
                         if self.pages_visited >= self.max_pages:
                             return
                         candidate = bfs_queue.popleft()
+                        # Skip URLs that already caused session expiry - no point retrying
+                        if candidate in _auth_failed_urls:
+                            continue
                         current_depth = bfs_depth.get(candidate, 1)
                         if not self.registry.register_url(candidate):
                             continue
@@ -6842,8 +6855,8 @@ class HeadlessEngine:
                     _drain_rp_and_js()
                     _drain_queue_into_pool()
 
-                # Shut down thread-local pw+browser - runs inside the 'with' block
-                # so the executor threads are still alive to handle the cleanup tasks.
+                # Shut down thread-local pw+browser while threads are still alive
+                # to handle the cleanup tasks.
                 _cleanup_futs = [
                     _executor.submit(_browser_pool.cleanup_thread_browser)
                     for _ in range(self.num_browsers)
@@ -6854,6 +6867,13 @@ class HeadlessEngine:
                     except Exception:
                         pass
                 logger.info("BrowserPool closed")
+
+            finally:
+                # Don't block waiting for stalled Playwright threads. Job deadline
+                # + watchdog already closed stuck pages; any thread still alive at
+                # this point will unwind on its own once its page.close() exception
+                # propagates. cancel_futures drops pending (not-yet-started) work.
+                _executor.shutdown(wait=False, cancel_futures=True)
 
             self.timer.stop("phase2_routes")
 
