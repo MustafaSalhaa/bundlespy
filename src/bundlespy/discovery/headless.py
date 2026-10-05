@@ -6547,24 +6547,26 @@ class HeadlessEngine:
                     _redirected_to_login = (
                         _is_login_url(slot_page.url) and not _is_login_url(url)
                     )
-                    # debug - remove after diagnosing session-loss false positives
-                    if self._logged_in:
-                        logger.warning(
-                            "[auth-debug] url=%s final=%s req_login=%s final_login=%s login_page=%s redirected=%s",
-                            url, slot_page.url,
-                            _is_login_url(url), _is_login_url(slot_page.url),
-                            _is_login_page(slot_page), _redirected_to_login,
-                        )
                     if self._logged_in and _redirected_to_login:
+                        # Session expired - this specific URL is auth-gated and
+                        # the cookie is no longer valid for it. Skip this URL but
+                        # keep BFS running - other pages may still be accessible
+                        # (public routes, already-loaded pages, etc.). Only stop
+                        # if the session was never valid at all.
+                        logger.warning(
+                            "Session expired for %s (redirected to %s) - skipping, BFS continues",
+                            url, slot_page.url,
+                        )
                         if self.hooks.on_login_detected:
                             try:
                                 self.hooks.on_login_detected(slot_page)
                             except Exception:
                                 pass
-                        # Drain responses before bailing — don't skip collected data.
                         _browser_pool.drain_thread_responses(slot)
-                        _session_lost.set()
-                        return [], 0, False, True
+                        # Return failure for this URL but don't signal sess_lost -
+                        # that flag stops the entire BFS which is too aggressive
+                        # for a single expired auth-gated page.
+                        return [], 0, False, False
 
                     # Cookie consent
                     if self.cookie_consent_bypass:
