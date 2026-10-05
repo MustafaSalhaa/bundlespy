@@ -6537,11 +6537,17 @@ class HeadlessEngine:
                     # scan hitting a login form is normal; flagging it as session
                     # loss would incorrectly stop the entire parallel BFS.
                     #
-                    # Even when authenticated, _is_login_page() alone isn't proof
-                    # of session loss — the page may embed a login modal, password-
-                    # reset widget, or SPA auth overlay on a public route.  We set
-                    # the flag only when we have a logged-in state to lose.
-                    if self._logged_in and _is_login_page(slot_page) and not _is_login_url(url):
+                    # Session loss = browser was redirected to a login URL after
+                    # navigating to a non-login URL.  _is_login_page() alone is not
+                    # enough — many apps embed login forms as nav widgets, modals or
+                    # SPA overlays on regular pages.  We require an actual redirect:
+                    # the final URL must be a login path AND the URL we asked for is
+                    # not itself a login path.  This filters out embedded login forms
+                    # while still catching a genuine 302 → /login redirect.
+                    _redirected_to_login = (
+                        _is_login_url(slot_page.url) and not _is_login_url(url)
+                    )
+                    if self._logged_in and _redirected_to_login:
                         if self.hooks.on_login_detected:
                             try:
                                 self.hooks.on_login_detected(slot_page)
