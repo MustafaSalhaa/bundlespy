@@ -6547,6 +6547,14 @@ class HeadlessEngine:
                     _redirected_to_login = (
                         _is_login_url(slot_page.url) and not _is_login_url(url)
                     )
+                    # debug - remove after diagnosing session-loss false positives
+                    if self._logged_in:
+                        logger.warning(
+                            "[auth-debug] url=%s final=%s req_login=%s final_login=%s login_page=%s redirected=%s",
+                            url, slot_page.url,
+                            _is_login_url(url), _is_login_url(slot_page.url),
+                            _is_login_page(slot_page), _redirected_to_login,
+                        )
                     if self._logged_in and _redirected_to_login:
                         if self.hooks.on_login_detected:
                             try:
