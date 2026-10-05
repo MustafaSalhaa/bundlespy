@@ -2625,8 +2625,8 @@ class BrowserPool:
         if self._cookies:
             try:
                 ctx.add_cookies(self._cookies)
-            except Exception:
-                pass
+            except Exception as _ce:
+                logger.warning("BrowserPool: failed to inject cookies into slot context: %s", _ce)
         ctx.add_init_script(self._init_script)
 
         # Queue-based response collection — ctx.on("response") fires on
@@ -6454,9 +6454,6 @@ class HeadlessEngine:
             _js_nav_count: int        = 0
             _onclick_nav_count: int   = 0
 
-            # Session-loss flag — set by any pool worker hitting a login wall
-            _session_lost = threading.Event()
-
             # Hard deadline for a single browser job - covers all phases inside
             # the worker (navigation, interactions, response processing, cleanup).
             # Without this, one hung interaction loop blocks the future forever.
@@ -6471,7 +6468,8 @@ class HeadlessEngine:
                 pattern with Playwright sync_api under threading: objects are
                 greenlet-bound and cannot cross thread boundaries.
 
-                Returns (new_urls, onclick_count, success, session_lost_flag).
+                Returns (new_urls, onclick_count, success, session_lost_flag, auth_expired_flag).
+                auth_expired_flag: URL was auth-gated and session rejected - not a real failure.
                 Called from a ThreadPoolExecutor worker thread.
                 """
                 logger.debug("[worker-start] %s", url)
@@ -6538,16 +6536,30 @@ class HeadlessEngine:
                     # scan hitting a login form is normal; flagging it as session
                     # loss would incorrectly stop the entire parallel BFS.
                     #
-                    # Session loss = browser was redirected to a login URL after
-                    # navigating to a non-login URL.  _is_login_page() alone is not
-                    # enough — many apps embed login forms as nav widgets, modals or
-                    # SPA overlays on regular pages.  We require an actual redirect:
-                    # the final URL must be a login path AND the URL we asked for is
-                    # not itself a login path.  This filters out embedded login forms
-                    # while still catching a genuine 302 → /login redirect.
-                    _redirected_to_login = (
-                        _is_login_url(slot_page.url) and not _is_login_url(url)
-                    )
+                    # Two-layer redirect detection (consistent with _verify_auth):
+                    # 1. URL keyword check: fast, zero DOM cost. Catches /login, /signin, etc.
+                    # 2. DOM check: catches custom auth paths like /enter, /verify, /challenge
+                    #    that don't match the keyword list. Only runs if URL check misses and
+                    #    the final URL differs from what we requested (actual redirect happened).
+                    #
+                    # _is_login_page() alone would be wrong here - many apps embed login forms
+                    # as nav widgets, modals or SPA overlays on regular pages. We only invoke
+                    # DOM detection when a redirect actually occurred (final URL != requested URL),
+                    # which filters out those embedded form false positives.
+                    _requested_url_is_login = _is_login_url(url)
+                    _final_url_is_login     = _is_login_url(slot_page.url)
+                    _url_changed            = slot_page.url.rstrip("/") != url.rstrip("/")
+
+                    if not _final_url_is_login and _url_changed and self._logged_in:
+                        # URL keyword didn't fire but a redirect happened - check DOM
+                        # for custom login paths (same approach _verify_auth uses).
+                        try:
+                            _final_url_is_login = _is_login_page(slot_page)
+                        except Exception:
+                            pass
+
+                    _redirected_to_login = _final_url_is_login and not _requested_url_is_login
+
                     if self._logged_in and _redirected_to_login:
                         # Session expired - this specific URL is auth-gated and
                         # the cookie is no longer valid for it. Skip this URL but
@@ -6559,17 +6571,17 @@ class HeadlessEngine:
                             url, slot_page.url,
                         )
                         # Record so the scheduler never requeues this URL
-                        _auth_failed_urls.add(url)
+                        with _auth_failed_lock:
+                            _auth_failed_urls.add(url)
                         if self.hooks.on_login_detected:
                             try:
                                 self.hooks.on_login_detected(slot_page)
                             except Exception:
                                 pass
                         _browser_pool.drain_thread_responses(slot)
-                        # Return failure for this URL but don't signal sess_lost -
-                        # that flag stops the entire BFS which is too aggressive
-                        # for a single expired auth-gated page.
-                        return [], 0, False, False
+                        # Return auth_expired=True so the scheduler can skip
+                        # consecutive_failures - auth-gated pages aren't errors.
+                        return [], 0, False, False, True
 
                     # Cookie consent
                     if self.cookie_consent_bypass:
@@ -6630,14 +6642,14 @@ class HeadlessEngine:
                     # Final drain before closing — captures any late-arriving
                     # responses (async resource loads, lazy fetches, etc.).
                     _browser_pool.drain_thread_responses(slot)
-                    return new_urls, _oc_count, True, False
+                    return new_urls, _oc_count, True, False, False
 
                 except Exception as e:
                     if _job_timed_out.is_set():
                         logger.debug("Worker for %s caught exception after job timeout: %s", url, e)
                     else:
                         logger.debug("Error visiting %s: %s", url, e)
-                    return [], 0, False, False
+                    return [], 0, False, False, False
                 finally:
                     # Signal job is done BEFORE cancelling timer - eliminates the
                     # race where timer fires between job completion and cancel().
@@ -6676,7 +6688,8 @@ class HeadlessEngine:
                 _inflight: dict = {}          # future -> (url, depth)
                 _inflight_started: dict = {}  # future -> submit monotonic time
                 _stop_bfs = False
-                _auth_failed_urls: set = set()  # URLs that triggered session expiry - don't retry
+                _auth_failed_urls: set = set()    # URLs that triggered session expiry - don't retry
+                _auth_failed_lock = threading.Lock()  # guards _auth_failed_urls (written by workers, read by scheduler)
 
                 def _drain_queue_into_pool():
                     """Submit new URLs until the pool is full or the queue is empty."""
@@ -6685,8 +6698,9 @@ class HeadlessEngine:
                             return
                         candidate = bfs_queue.popleft()
                         # Skip URLs that already caused session expiry - no point retrying
-                        if candidate in _auth_failed_urls:
-                            continue
+                        with _auth_failed_lock:
+                            if candidate in _auth_failed_urls:
+                                continue
                         current_depth = bfs_depth.get(candidate, 1)
                         if not self.registry.register_url(candidate):
                             continue
@@ -6779,7 +6793,7 @@ class HeadlessEngine:
                         _burl, _bdepth = _inflight.pop(_fut)
                         _inflight_started.pop(_fut, None)
                         try:
-                            new_urls, oc_count, success, sess_lost = _fut.result()
+                            new_urls, oc_count, success, sess_lost, auth_expired = _fut.result()
                         except Exception as _fe:
                             logger.debug("Future error for %s: %s", _burl, _fe)
                             self._consecutive_failures += 1
@@ -6787,6 +6801,10 @@ class HeadlessEngine:
 
                         if sess_lost:
                             _stop_bfs = True
+                            continue
+
+                        if auth_expired:
+                            # Auth-gated page - not a real failure, don't penalize consecutive_failures
                             continue
 
                         if not success:
