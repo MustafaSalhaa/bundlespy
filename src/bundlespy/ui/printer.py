@@ -1,5 +1,5 @@
 """
-BundleSpy terminal UI — clean, modern, professional.
+BundleSpy terminal UI - clean, modern, professional.
 """
 
 import os
@@ -252,7 +252,7 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
                 url = f"script {_script_num} @ {_page_display}"
             else:
                 url = re.sub(r"^https?://[^/]+", "", bare) or bare
-            tag = f" {A.GREY}[inline]{A.RESET}"
+            tag = f" {A.GREY}[inline JS]{A.RESET}"
         elif "headless-captured" in (js.technology or ""):
             tag = f" {A.CYAN}[browser]{A.RESET}"
         elif "webworker" in (js.technology or ""):
