@@ -3677,10 +3677,26 @@ class HeadlessEngine:
 
             # ── Shared response body fetch (ResponseParser + tech fingerprinting) ─
             # Fetched once and reused to avoid calling response.body() twice.
+            # response.body() is a sync Playwright call that switches greenlets
+            # and waits for Chrome to return the bytes. On stale responses (e.g.
+            # queued during Phase 3 after the page navigated away), Chrome has
+            # already flushed the buffer and the call blocks forever — it never
+            # raises, just hangs. We run it in a daemon thread with a 3s timeout
+            # so a stale response body call can never block the teardown path.
             _resp_body: Optional[bytes] = None
             if self._response_parser is not None or self.technology_detection or self.capture_raw_traffic:
                 try:
-                    _resp_body = response.body()
+                    import threading as _threading
+                    _body_result: list = []
+                    def _fetch_body():
+                        try:
+                            _body_result.append(response.body())
+                        except Exception:
+                            pass
+                    _bt = _threading.Thread(target=_fetch_body, daemon=True)
+                    _bt.start()
+                    _bt.join(timeout=3.0)
+                    _resp_body = _body_result[0] if _body_result else None
                 except Exception:
                     _resp_body = None
 
