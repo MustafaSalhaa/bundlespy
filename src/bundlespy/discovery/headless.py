@@ -53,6 +53,39 @@ from .form_interactor import FormInteractor
 
 logger = logging.getLogger("bundlespy.discovery.headless")
 
+# Max response body size captured eagerly in the on_response callback.
+# Larger bodies are skipped for body-dependent features (ResponseParser,
+# tech fingerprinting, raw capture) but JS files still get captured via
+# the registry path which checks Content-Type first.
+_MAX_CAPTURE_BODY = 5 * 1024 * 1024  # 5 MB
+
+
+@dataclass
+class ResponseRecord:
+    """
+    Immutable snapshot of a Playwright Response, captured eagerly on the
+    Playwright greenlet thread inside on_response() before any navigation
+    can invalidate the backing Chrome network resource.
+
+    Using this instead of retaining the live Response object eliminates the
+    class of bug where response.body() is called after the page has navigated
+    away, which causes:
+      - Protocol error: No resource with given identifier found
+      - greenlet.error: cannot switch to a different thread (which has exited)
+    """
+    url:          str
+    status:       int
+    content_type: str
+    resource_type: str
+    req_method:   str
+    req_url:      str
+    req_headers:  dict
+    req_post:     str
+    resp_headers: dict
+    source_page:  str
+    body:         Optional[bytes]   # None when skipped (redirect, too large, error)
+    body_skipped: bool = False      # True when body exists but was not fetched
+
 
 # ── Typed crawl actions — models page state transitions ──────────────────────
 
@@ -3676,27 +3709,18 @@ class HeadlessEngine:
             resource_type = response.request.resource_type
 
             # ── Shared response body fetch (ResponseParser + tech fingerprinting) ─
-            # Fetched once and reused to avoid calling response.body() twice.
-            # response.body() is a sync Playwright call that switches greenlets
-            # and waits for Chrome to return the bytes. On stale responses (e.g.
-            # queued during Phase 3 after the page navigated away), Chrome has
-            # already flushed the buffer and the call blocks forever — it never
-            # raises, just hangs. We run it in a daemon thread with a 3s timeout
-            # so a stale response body call can never block the teardown path.
+            # Fetched once and reused for ResponseParser, tech fingerprinting,
+            # and raw capture. Safe to call response.body() here — this method
+            # is only called from two safe contexts:
+            #   1. Pool worker threads — each owns its own Playwright instance
+            #   2. Per-page on("response") callbacks (line 4794) — on the right greenlet
+            # The Phase 1 on_response callback uses _handle_response_record()
+            # instead, which takes a pre-captured ResponseRecord, so response.body()
+            # is never called on a stale response from a deferred queue drain.
             _resp_body: Optional[bytes] = None
             if self._response_parser is not None or self.technology_detection or self.capture_raw_traffic:
                 try:
-                    import threading as _threading
-                    _body_result: list = []
-                    def _fetch_body():
-                        try:
-                            _body_result.append(response.body())
-                        except Exception:
-                            pass
-                    _bt = _threading.Thread(target=_fetch_body, daemon=True)
-                    _bt.start()
-                    _bt.join(timeout=3.0)
-                    _resp_body = _body_result[0] if _body_result else None
+                    _resp_body = response.body()
                 except Exception:
                     _resp_body = None
 
@@ -3827,6 +3851,194 @@ class HeadlessEngine:
         except Exception as e:
             logger.debug("_handle_response error for %s: %s",
                          getattr(response, "url", "?"), e)
+
+    def _capture_response_record(self, response, source_page: str) -> Optional[ResponseRecord]:
+        """
+        Eagerly snapshot everything we need from a Playwright Response object
+        while we are still on the correct Playwright greenlet thread (i.e. inside
+        an on_response callback).
+
+        Rules:
+        - response.body() MUST only be called here, never from a deferred drain
+        - Skip body for redirect responses (no body available)
+        - Skip body when Content-Length > _MAX_CAPTURE_BODY (avoid OOM on huge files)
+        - Skip body on any exception — record is still useful for URL/status metadata
+        - Returns None only on hard failures reading url/status/headers
+        """
+        try:
+            url           = response.url
+            status        = response.status
+            resp_headers  = dict(response.headers or {})
+            content_type  = resp_headers.get("content-type", "")
+            resource_type = ""
+            req_method    = "GET"
+            req_url       = url
+            req_headers   = {}
+            req_post      = ""
+            try:
+                req           = response.request
+                resource_type = req.resource_type
+                req_method    = req.method
+                req_url       = req.url
+                req_headers   = dict(req.headers or {})
+                try:
+                    req_post  = req.post_data or ""
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            body         = None
+            body_skipped = False
+
+            # Redirects have no body — calling body() raises immediately
+            is_redirect = 300 <= status < 400
+            if not is_redirect:
+                # Check Content-Length before fetching to avoid loading huge files
+                cl_str = resp_headers.get("content-length", "")
+                try:
+                    content_length = int(cl_str)
+                except (ValueError, TypeError):
+                    content_length = -1  # unknown — fetch anyway, truncate not possible here
+
+                if content_length > _MAX_CAPTURE_BODY:
+                    body_skipped = True
+                    logger.debug(
+                        "Skipping body capture for %s — Content-Length %d > %d",
+                        url, content_length, _MAX_CAPTURE_BODY,
+                    )
+                else:
+                    try:
+                        raw = response.body()
+                        # Guard against compressed responses where Content-Length lied
+                        if len(raw) > _MAX_CAPTURE_BODY:
+                            body_skipped = True
+                            logger.debug(
+                                "Discarding body for %s — actual size %d > %d",
+                                url, len(raw), _MAX_CAPTURE_BODY,
+                            )
+                        else:
+                            body = raw
+                    except Exception as be:
+                        logger.debug("body() failed for %s: %s", url, be)
+                        body_skipped = True
+
+            return ResponseRecord(
+                url          = url,
+                status       = status,
+                content_type = content_type,
+                resource_type = resource_type,
+                req_method   = req_method,
+                req_url      = req_url,
+                req_headers  = req_headers,
+                req_post     = req_post,
+                resp_headers = resp_headers,
+                source_page  = source_page,
+                body         = body,
+                body_skipped = body_skipped,
+            )
+
+        except Exception as e:
+            logger.debug("_capture_response_record failed: %s", e)
+            return None
+
+    def _handle_response_record(self, rec: ResponseRecord) -> None:
+        """
+        Process a pre-captured ResponseRecord — the Phase 1 counterpart to
+        _handle_response(). Works entirely with plain Python data; never touches
+        a live Playwright object, so it is safe to call from a deferred drain
+        after the page has navigated away.
+        """
+        try:
+            url           = rec.url
+            ct            = rec.content_type
+            resource_type = rec.resource_type
+            source_page   = rec.source_page
+            _resp_body    = rec.body  # may be None
+
+            # ── ResponseParser ───────────────────────────────────────────────
+            if self._response_parser is not None and _resp_body:
+                try:
+                    found = self._response_parser.extract(url, ct, _resp_body)
+                    if found:
+                        with self._rp_lock:
+                            self._rp_discovered.extend(found)
+                        logger.debug("ResponseParser: %d URLs from %s", len(found), url)
+                except Exception as rp_err:
+                    logger.debug("ResponseParser error for %s: %s", url, rp_err)
+
+            # ── Technology fingerprinting ────────────────────────────────────
+            if self.technology_detection and _resp_body is not None:
+                try:
+                    techs = self._fingerprint_technologies(url, rec.resp_headers, _resp_body)
+                    if techs:
+                        page_url = source_page or url
+                        with self._tech_lock:
+                            existing = self._tech_detections.get(page_url, [])
+                            self._tech_detections[page_url] = list(set(existing + techs))
+                except Exception as tech_err:
+                    logger.debug("Technology detection error for %s: %s", url, tech_err)
+
+            # ── Raw traffic capture ──────────────────────────────────────────
+            if self.capture_raw_traffic and _resp_body is not None:
+                try:
+                    req_headers_str  = "\r\n".join(f"{k}: {v}" for k, v in rec.req_headers.items())
+                    resp_headers_str = "\r\n".join(f"{k}: {v}" for k, v in rec.resp_headers.items())
+                    resp_body_str    = _resp_body.decode("utf-8", errors="replace")[:4096]
+                    raw_req  = f"{rec.req_method} {rec.req_url} HTTP/1.1\r\n{req_headers_str}\r\n\r\n{rec.req_post}"
+                    raw_resp = f"HTTP/1.1 {rec.status}\r\n{resp_headers_str}\r\n\r\n{resp_body_str}"
+                    with self._raw_lock:
+                        self._raw_traffic.append({
+                            "url":         url,
+                            "method":      rec.req_method,
+                            "status":      rec.status,
+                            "raw_request": raw_req,
+                            "raw_response": raw_resp,
+                            "source_page": source_page,
+                        })
+                except Exception as raw_err:
+                    logger.debug("Raw capture error for %s: %s", url, raw_err)
+
+            # ── JS capture ───────────────────────────────────────────────────
+            if not self._is_js_response(url, ct, resource_type):
+                return
+
+            safe, _ = validate_url(url)
+            if not safe or not self.scope.in_scope(url):
+                return
+
+            with self._lock:
+                self._js_intercepted_count += 1
+
+            norm = self.registry._normalize(url)
+            if not self.registry.register_url(norm):
+                return
+
+            # body may be None if it was skipped (too large, redirect, error)
+            body = _resp_body
+            if not body:
+                logger.debug("No body available for JS file %s — skipping content capture", url)
+                return
+
+            h = hashlib.sha256(body).hexdigest()
+            if self.registry.seen_hash(h):
+                return
+
+            try:
+                snippet = body[:512].decode("utf-8", errors="replace").lstrip()
+                if snippet.startswith(("<!DOCTYPE", "<!doctype", "<html", "<HTML")):
+                    logger.debug("Skipping HTML-disguised-as-JS: %s", url)
+                    return
+            except Exception:
+                pass
+
+            js_file = self._make_js_file(url, body, source_page)
+            added   = self._add_js_file(js_file)
+            if added:
+                logger.debug("Captured JS [%s] %s (%d bytes)", resource_type, url, len(body))
+
+        except Exception as e:
+            logger.debug("_handle_response_record error for %s: %s", rec.url if rec else "?", e)
 
     def _is_destructive(self, text: str) -> bool:
         lower = (text or "").lower().strip()
@@ -5822,25 +6034,30 @@ class HeadlessEngine:
             _resp_queue: queue.Queue = queue.Queue()
 
             def _on_response(r):
+                # Capture everything NOW while we're on the correct Playwright
+                # greenlet. Storing the live Response object and calling body()
+                # later (from the drain) hangs forever once Chrome flushes the
+                # resource - that was the original post-Phase-3 hang.
                 try:
-                    # frame.url is the page that triggered this request
                     source = r.frame.url if r.frame else r.url
                 except Exception:
                     source = r.url
-                _resp_queue.put((r, source))
+                rec = self._capture_response_record(r, source)
+                if rec is not None:
+                    _resp_queue.put(rec)
 
             ctx.on("response", _on_response)
 
             def _drain_phase1_responses() -> int:
-                """Drain queued responses on the main (Playwright-owning) thread."""
+                """Process queued ResponseRecords - safe from any thread, no Playwright calls."""
                 processed = 0
                 while True:
                     try:
-                        r, src = _resp_queue.get_nowait()
+                        rec = _resp_queue.get_nowait()
                     except queue.Empty:
                         break
                     try:
-                        self._handle_response(r, src)
+                        self._handle_response_record(rec)
                     except Exception:
                         pass
                     processed += 1
