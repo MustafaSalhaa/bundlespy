@@ -6742,7 +6742,7 @@ class HeadlessEngine:
                         # own timer). The watchdog here is a secondary recovery layer
                         # for workers that somehow outlived their timer + grace period.
                         _now = time.monotonic()
-                        _grace = _JOB_DEADLINE + 5  # 5s after deadline for page.close() to unblock
+                        _grace = _JOB_DEADLINE + 15  # 15s after deadline for page.close() to unblock and worker to return
 
                         for _wf, (_wu, _wd) in list(_inflight.items()):
                             _age = _now - _inflight_started.get(_wf, _now)
