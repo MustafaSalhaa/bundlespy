@@ -33,8 +33,8 @@ class CrawlerConfig:
 
 @dataclass
 class DiscoveryConfig:
-    common_paths: bool  = False
-    source_maps: bool   = False
+    common_paths: bool  = True
+    source_maps: bool   = True
 
 @dataclass
 class AnalysisConfig:
@@ -81,6 +81,6 @@ class BundleSpyConfig:
     reporting: ReportingConfig   = field(default_factory=ReportingConfig)
     safety: SafetyConfig         = field(default_factory=SafetyConfig)
     policy: PolicyConfig         = field(default_factory=PolicyConfig)
-    verbose: bool                = False
+    verbose: bool                = True
     quiet: bool                  = False
     no_color: bool               = True
