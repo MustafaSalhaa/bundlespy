@@ -387,7 +387,10 @@ def _route_priority(url: str) -> int:
 BLOCK_RESOURCE_TYPES = {
     "image", "media", "font", "texttrack",
     "eventsource",
-    # NOTE: "manifest" intentionally removed — some servers serve JS chunk
+    # stylesheet/ping/prefetch carry no JS intelligence - block to save
+    # download + parse time per page
+    "stylesheet", "ping", "prefetch",
+    # NOTE: "manifest" intentionally not blocked - some servers serve JS chunk
     # manifests (webpack, Vite) with resource type "manifest". Blocking it
     # causes those files to never fire a response event and be missed entirely.
 }
@@ -1428,20 +1431,32 @@ class PageStabilizer:
                 return
             self.page.wait_for_timeout(self.POLL_INTERVAL_MS)
 
-    def wait_for_load(self, max_ms: int = 8000) -> None:
+    def wait_for_load(self, max_ms: int = 8000, is_spa: bool = None) -> None:
         """
         Wait for initial page load using a two-phase approach:
         1. Playwright's networkidle (CDP-level, catches all XHR/fetch) with a
            short cap so SPA polling loops don't stall it.
         2. Our JS in-flight counter as a fallback — catches requests that fired
            before our init script landed or after networkidle returned early.
+
+        is_spa: False = confirmed non-SPA — skip networkidle, just DOM quiet
+                True  = confirmed SPA   — full networkidle + JS counter
+                None  = unknown         — original behaviour (networkidle cap)
         """
         start = time.monotonic()
 
-        # Phase A: CDP networkidle — most accurate, capped to avoid SPA hangs
+        if is_spa is False:
+            # Non-SPA: DOM is ready after domcontentloaded, no need to wait for
+            # network to go quiet. A short DOM stability window is enough.
+            self.wait(max_ms=min(max_ms, 400), quiet_ms=100)
+            return
+
+        # Phase A: CDP networkidle — capped to avoid SPA polling loops
+        # SPA gets full 3s cap; unknown gets 1.5s (safer default)
+        idle_cap = 3000 if is_spa else 1500
         try:
             self.page.wait_for_load_state("networkidle",
-                                          timeout=min(max_ms // 2, 3000))
+                                          timeout=min(max_ms // 2, idle_cap))
         except Exception:
             # networkidle timed out (SPA with polling) — fall through to JS check
             pass
