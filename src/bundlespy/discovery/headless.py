@@ -6457,6 +6457,11 @@ class HeadlessEngine:
             # Session-loss flag — set by any pool worker hitting a login wall
             _session_lost = threading.Event()
 
+            # Hard deadline for a single browser job - covers all phases inside
+            # the worker (navigation, interactions, response processing, cleanup).
+            # Without this, one hung interaction loop blocks the future forever.
+            _JOB_DEADLINE = max(self.timeout * 4, 60)
+
             def _visit_url_in_slot(url: str, depth: int):
                 """
                 Visit one URL using a thread-local Playwright browser.
@@ -6472,6 +6477,21 @@ class HeadlessEngine:
                 # Gate on concurrency limit — blocks until a slot is available.
                 _browser_pool.acquire()
                 slot = None
+                _job_timed_out = threading.Event()
+
+                def _job_timeout_cb():
+                    _job_timed_out.set()
+                    logger.warning("Job deadline (%ds) hit for %s - aborting worker", _JOB_DEADLINE, url)
+                    # Close the page to unblock any Playwright calls waiting inside
+                    if slot is not None:
+                        try:
+                            slot["page"].close()
+                        except Exception:
+                            pass
+
+                _job_timer = threading.Timer(_JOB_DEADLINE, _job_timeout_cb)
+                _job_timer.daemon = True
+                _job_timer.start()
                 try:
                     # Build a fresh browser stack owned by this thread.
                     slot = _browser_pool.make_thread_browser()
@@ -6579,14 +6599,19 @@ class HeadlessEngine:
                     return new_urls, _oc_count, True, False
 
                 except Exception as e:
-                    logger.debug("Error visiting %s: %s", url, e)
+                    if _job_timed_out.is_set():
+                        logger.debug("Worker for %s caught exception after job timeout: %s", url, e)
+                    else:
+                        logger.debug("Error visiting %s: %s", url, e)
                     return [], 0, False, False
                 finally:
+                    _job_timer.cancel()
                     if slot is not None:
                         # Drain one last time before teardown so no pending
                         # response bodies are lost when ctx.close() runs.
                         try:
-                            _browser_pool.drain_thread_responses(slot)
+                            if not _job_timed_out.is_set():
+                                _browser_pool.drain_thread_responses(slot)
                         except Exception:
                             pass
                         _browser_pool.close_thread_browser(slot)
@@ -6621,6 +6646,7 @@ class HeadlessEngine:
                             continue
                         fut = _executor.submit(_visit_url_in_slot, candidate, current_depth)
                         _inflight[fut] = (candidate, current_depth)
+                        _inflight_started[fut] = time.monotonic()
 
                 def _drain_rp_and_js():
                     """Pull ResponseParser + JS nav discoveries into bfs_queue."""
@@ -6668,12 +6694,46 @@ class HeadlessEngine:
                 _drain_rp_and_js()
                 _drain_queue_into_pool()
 
-                while _inflight:
-                    # Wait for at least one future to finish
-                    _done, _ = _fut_wait(_inflight.keys(), return_when=FIRST_COMPLETED)
+                # Track when each future was submitted so the watchdog can detect stalls
+                _inflight_started: dict = {}  # future -> monotonic start time
+                _watchdog_stall_logged = False
 
+                while _inflight:
+                    # Bounded wait - never block forever. If nothing completes in
+                    # 1s, the watchdog checks whether all workers are stalled past
+                    # their job deadline and cancels them if so.
+                    _done, _ = _fut_wait(_inflight.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
+
+                    if not _done:
+                        # Nothing completed this tick - check for stalled workers
+                        _now = time.monotonic()
+                        _stalled = [
+                            (fut, url, _now - _inflight_started.get(fut, _now))
+                            for fut, (url, _depth) in list(_inflight.items())
+                            if _now - _inflight_started.get(fut, _now) > _JOB_DEADLINE + 5
+                        ]
+                        if _stalled and not _watchdog_stall_logged:
+                            _watchdog_stall_logged = True
+                            logger.warning(
+                                "Watchdog: %d/%d workers stalled past job deadline",
+                                len(_stalled), len(_inflight),
+                            )
+                            for _sf, _su, _age in _stalled:
+                                logger.warning("  stalled worker: %s  age=%.1fs", _su, _age)
+                        # If ALL inflight workers are stalled, cancel them so BFS can continue
+                        if _stalled and len(_stalled) == len(_inflight):
+                            logger.warning("Watchdog: all workers stalled - cancelling and moving on")
+                            for _sf, _su, _age in _stalled:
+                                _sf.cancel()
+                                _inflight.pop(_sf, None)
+                                _inflight_started.pop(_sf, None)
+                                self._consecutive_failures += 1
+                        continue
+
+                    _watchdog_stall_logged = False  # reset on any progress
                     for _fut in _done:
                         _burl, _bdepth = _inflight.pop(_fut)
+                        _inflight_started.pop(_fut, None)
                         try:
                             new_urls, oc_count, success, sess_lost = _fut.result()
                         except Exception as _fe:
