@@ -414,25 +414,6 @@ def _is_logout_url(url: str) -> bool:
     return bool(_LOGOUT_PATTERN.search(url))
 
 
-# ── Path climbing ─────────────────────────────────────────────────────────────
-# From https://target.com/api/v2/users/123 extract and queue parent paths:
-# /api/v2/users/, /api/v2/, /api/, /
-# Useful for finding unlisted admin panels, API roots, directory listings.
-
-def _extract_parent_paths(url: str) -> List[str]:
-    try:
-        p = urlparse(url)
-        parts = [seg for seg in p.path.split("/") if seg]
-        parents: List[str] = []
-        for i in range(len(parts) - 1, 0, -1):
-            parent_path = "/" + "/".join(parts[:i]) + "/"
-            parents.append(urlunparse((p.scheme, p.netloc, parent_path, "", "", "")))
-        # Root
-        parents.append(urlunparse((p.scheme, p.netloc, "/", "", "", "")))
-        return parents
-    except Exception:
-        return []
-
 
 # ── Cycle detection ───────────────────────────────────────────────────────────
 # Tracks the last N base paths seen in the queue per origin.
@@ -1116,9 +1097,6 @@ class Crawler:
         # When True, URLs matching logout patterns are skipped.
         # Activate whenever --auth or --cookie is in use so sessions survive.
         protect_session:  bool = False,
-        # When True, parent directory paths are extracted from every discovered URL
-        # and added to the crawl queue. Discovers unlisted admin panels / API roots.
-        path_climb:       bool = False,
     ):
         self.target_url       = target_url
         self.fetcher          = fetcher
@@ -1129,7 +1107,6 @@ class Crawler:
         self.common_paths     = common_paths
         self.max_domain_pages = max_domain_pages
         self.protect_session  = protect_session
-        self.path_climb       = path_climb
 
         # Dedup state
         self.visited_pages:      Set[str] = set()
@@ -1416,11 +1393,6 @@ class Crawler:
                     self.visited_pages.add(norm)
                     self.page_access_states[ping_url] = 0  # unverified
 
-            # Path climbing — queue parent directory paths of the current URL
-            # Helps discover unlisted API roots, admin panels, and directory listings.
-            if self.path_climb:
-                for parent_url in _extract_parent_paths(url):
-                    self._enqueue_page(parent_url, depth + 1, queue)
 
     def _extract_all_js_from_html(
         self,
