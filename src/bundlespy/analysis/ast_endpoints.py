@@ -262,6 +262,35 @@ RE_REDIRECT = re.compile(
 )
 
 
+# ── Opaque token filter ───────────────────────────────────────────────────────
+# Catches Netlify short-link tokens, deploy IDs, and content hashes that leak
+# from analytics/RUM scripts and end up misclassified as ROUTE endpoints.
+# Two rules - matches headless.py _is_opaque_token_path():
+#   1. Purely alphanumeric seg with mixed case (e.g. tNKgr4GnJ5SCpBpu, siJv)
+#   2. All-uppercase seg with a digit, >= 4 chars (e.g. ALLTKG5, BUQ7X)
+
+_RE_OPAQUE_SEG = re.compile(r'^[A-Za-z0-9]{3,64}$')
+
+
+def _is_opaque_path(path: str) -> bool:
+    """Return True when any path segment looks like a token/hash, not a real route."""
+    segs = [s for s in path.strip("/").split("/") if s]
+    if not segs:
+        return False
+    for seg in segs:
+        # Skip segments that contain separators - likely a real word
+        if not _RE_OPAQUE_SEG.match(seg):
+            continue
+        # Mixed case (both upper and lower letters) - classic token pattern
+        if seg != seg.lower() and seg != seg.upper():
+            return True
+        # All-uppercase with digit, >= 4 chars - e.g. ALLTKG5, BUQ7X
+        # Real uppercase route segs don't contain digits: /API, /V2 are fine at len 2-3
+        if seg == seg.upper() and any(c.isdigit() for c in seg) and len(seg) >= 4:
+            return True
+    return False
+
+
 # ── Categorization ────────────────────────────────────────────────────────────
 
 def _categorize(path: str, method: str = "UNKNOWN") -> str:
@@ -463,6 +492,9 @@ def extract_all_endpoints(
             return
 
         path = _clean_path(path)
+
+        if _is_opaque_path(path):
+            return
 
         if not _is_valid_path(path):
             return
