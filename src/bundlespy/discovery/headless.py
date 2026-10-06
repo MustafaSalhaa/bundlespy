@@ -100,12 +100,12 @@ class ActionType(Enum):
 class CrawlAction:
     """
     A typed crawl action — models a state transition, not just a URL visit.
-    Inspired by BundleSpy's action-based crawl graph.
+    Inspired by Katana's action-based crawl graph.
 
     origin_id: SHA-256 prefix of the DOM fingerprint of the page state from
     which this action was discovered.  Before executing the action the engine
     checks that the browser is still on that state; if not it navigates back
-    (navigateBackToStateOrigin pattern from BundleSpy's crawler.go).
+    (navigateBackToStateOrigin pattern from Katana's crawler.go).
     """
     action_type: ActionType
     url:         str
@@ -137,7 +137,7 @@ class _PageState:
 class CrawlGraph:
     """
     Directed Acyclic Graph of page states and the action edges that connect them.
-    Mirrors BundleSpy's CrawlGraph (crawler.go).
+    Mirrors Katana's CrawlGraph (crawler.go).
 
     Nodes = page states (keyed by DOM fingerprint / origin_id).
     Edges = CrawlActions that transition between states.
@@ -170,7 +170,7 @@ class CrawlGraph:
     def find_similar_state(self, simhash: int, threshold: int = 2) -> Optional["_PageState"]:
         """Return the first stored state whose simhash Hamming distance from
         the given value is <= threshold. Returns None if nothing is close enough.
-        Uses the same threshold as BundleSpy (default 2 bits)."""
+        Uses the same threshold as Katana (default 2 bits)."""
         with self._lock:
             for state in self._nodes.values():
                 if state.simhash == 0:
@@ -258,7 +258,7 @@ class DiagnosticsWriter:
     is printed to the log at startup.  Screenshots are written as PNG files
     named by action index.  A JSON-lines action log is also written.
 
-    Mirrors BundleSpy's DiagnosticsWriter pattern.
+    Mirrors Katana's DiagnosticsWriter pattern.
     """
 
     def __init__(self, label: str = "bundlespy") -> None:
@@ -310,7 +310,7 @@ class DiagnosticsWriter:
 class LoginStep:
     """
     One step in a recorded authentication flow.
-    Mirrors BundleSpy's auth.StepsFromFile / RecordedFlow replay.
+    Mirrors Katana's auth.StepsFromFile / RecordedFlow replay.
 
     step_type values:
       "navigate"       — navigate the browser to `url`
@@ -336,7 +336,7 @@ class CrawlHooks:
     relevant) and are called synchronously in the Playwright thread.
     None = no-op for that hook.
 
-    Mirrors BundleSpy's Hooks interface.
+    Mirrors Katana's Hooks interface.
     (Enhancement 4 — Hooks system)
     """
     before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
@@ -426,12 +426,58 @@ BLOCK_DOMAINS = {
 # ── Destructive keywords — never click these ─────────────────────────────────
 
 DESTRUCTIVE_KEYWORDS = {
-    "delete", "remove", "cancel", "purchase", "pay now", "pay",
-    "checkout", "submit order", "confirm order", "place order",
-    "unsubscribe", "deactivate", "reset", "destroy", "wipe",
-    "clear data", "close account", "terminate", "disable",
-    "send payment", "transfer", "withdraw", "confirm delete",
+    # payment / money
+    "pay", "pay now", "payment", "purchase", "buy now", "buy",
+    "checkout", "place order", "submit order", "confirm order",
+    "complete order", "complete purchase", "proceed to checkout",
+    "add to cart", "add to bag", "apply promo", "redeem",
+    "transfer", "send money", "send payment", "wire", "withdraw",
+    "deposit", "top up", "fund", "charge", "invoice",
+    # account destruction
+    "delete", "delete account", "confirm delete", "permanent delete",
+    "remove", "remove account", "deactivate", "terminate",
+    "close account", "cancel account", "cancel subscription",
+    "cancel plan", "cancel membership",
+    # data destruction
+    "destroy", "wipe", "purge", "clear data", "reset data",
+    "factory reset", "flush", "truncate",
+    # dangerous sends
+    "send", "submit", "confirm", "publish", "post", "save changes",
+    "apply changes", "update settings",
+    # unsubscribe/opt-out
+    "unsubscribe", "opt out", "opt-out", "remove me",
+    # session / auth destruction
+    "disable", "revoke", "expire", "invalidate",
+    # ordering / shipping
+    "place order", "order now", "ship now", "dispatch",
 }
+
+# Elements BundleSpy is allowed to click in safe interact mode.
+# Only navigation disclosure elements — tabs, menus, accordions.
+# Anything not matching this whitelist is never clicked.
+SAFE_CLICK_SELECTORS = [
+    "[role='tab']",
+    "[role='menuitem']",
+    "[role='button'][aria-expanded]",
+    "[data-toggle='tab']",
+    "[data-bs-toggle='tab']",
+    "[data-toggle='collapse']",
+    "[data-bs-toggle='collapse']",
+    ".nav-link:not(.active)",
+    "[aria-selected='false']",
+    ".accordion-button",
+    "[aria-expanded='false']",
+    "button[data-toggle]",
+    "button[data-bs-toggle]",
+    ".dropdown-toggle",
+    "details > summary",
+]
+
+# Attributes checked during safe-click validation
+_SAFE_CLICK_BLOCKED_ATTRS = frozenset({
+    "type", "name", "id", "class", "aria-label", "data-action",
+    "data-method", "data-confirm", "formaction",
+})
 
 # Logout link keywords — never click these, they invalidate the session
 LOGOUT_KEYWORDS = {
@@ -525,7 +571,7 @@ _CAPTCHA_TEXT_MARKERS = (
 )
 
 # ── DIT-style login form heuristics (enhanced) ───────────────────────────────
-# BundleSpy uses a DIT classifier for login form detection that handles obfuscated
+# Katana uses a DIT classifier for login form detection that handles obfuscated
 # field names and React-rendered forms where field names are hashed or minified.
 # These patterns capture field name variants used by common obfuscated forms.
 
@@ -1190,7 +1236,7 @@ EXTRACT_ROUTES_JS = """
     } catch(e) {}
 
     // Anchor links — preserve query strings so filter URLs like
-    // /projects?category=E-Commerce are discovered (BundleSpy gap fix)
+    // /projects?category=E-Commerce are discovered (Katana gap fix)
     document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
         try {
             const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
@@ -1212,8 +1258,8 @@ EXTRACT_ROUTES_JS = """
         });
     });
 
-    // link[rel] tags — manifest, canonical, alternate (BundleSpy gap fix)
-    // BundleSpy picks up /site.webmanifest via link[rel=manifest]; we were missing it
+    // link[rel] tags — manifest, canonical, alternate (Katana gap fix)
+    // Katana picks up /site.webmanifest via link[rel=manifest]; we were missing it
     document.querySelectorAll('link[rel][href]').forEach(el => {
         try {
             const rel = (el.getAttribute('rel') || '').toLowerCase();
@@ -1334,7 +1380,7 @@ class AssetRegistry:
         fragments are always stripped.
 
         This lets BundleSpy discover filter pages like
-        /projects?category=E-Commerce that BundleSpy finds via anchor hrefs,
+        /projects?category=E-Commerce that Katana finds via anchor hrefs,
         while still collapsing pagination noise like ?page=2&page=3.
         """
         # Tracking / noise params to always strip
@@ -1527,9 +1573,9 @@ class PageStabilizer:
 
 def _wait_heuristic(page, max_ms: int = 15000) -> None:
     """
-    Gap 1: Heuristic page-load strategy — ported from BundleSpy's WaitPageLoadHeurisitics.
+    Gap 1: Heuristic page-load strategy — ported from Katana's WaitPageLoadHeurisitics.
 
-    BundleSpy's heuristic is the most robust strategy for modern SPAs. Instead of
+    Katana's heuristic is the most robust strategy for modern SPAs. Instead of
     blindly waiting for a fixed event, it:
 
     1. Waits for the basic load event (DOMContentLoaded).
@@ -1644,10 +1690,10 @@ def _attach_cdp_fetch_interception(
     capture_response_types: Optional[set] = None,
 ) -> Optional[object]:
     """
-    Gap 2: CDP-level Fetch.requestPaused interception — ported from BundleSpy's
+    Gap 2: CDP-level Fetch.requestPaused interception — ported from Katana's
     FetchRequestStage/FetchResponseStage pipeline in browser.go.
 
-    BundleSpy intercepts every request and response at the CDP Fetch domain level,
+    Katana intercepts every request and response at the CDP Fetch domain level,
     giving access to raw POST bodies and raw response bytes that Playwright's
     high-level response event can miss (cached responses, service-worker
     intercepts, partial reads).
@@ -1869,7 +1915,7 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
 
 
 # ── PathTrie — URL structural deduplication ───────────────────────────────────
-# Mirrors BundleSpy's FilterSimilar / PathTrie implementation.
+# Mirrors Katana's FilterSimilar / PathTrie implementation.
 # Replaces numeric / UUID path segments with a wildcard token so that
 # /item/1, /item/2, /item/1337 all collapse to /item/* and are treated as
 # one unique structural pattern.  Configurable threshold controls how many
@@ -2153,7 +2199,7 @@ def load_cookie_jar(path: str) -> List[dict]:
 
 
 # ── ResponseParser — extract URLs from every HTTP response body ───────────────
-# Mirrors BundleSpy's ResponseParser (engine/parser).
+# Mirrors Katana's ResponseParser (engine/parser).
 #
 # Runs on EVERY response body the browser receives — HTML, JS, JSON, CSS.
 # Extracts embedded URLs that the browser would never navigate to on its own
@@ -2727,7 +2773,7 @@ def _is_login_page(page) -> bool:
        with hashed attribute values, and input elements that lack type="password"
        but carry password-related name/id/placeholder attributes.
 
-    This mirrors BundleSpy's tryAutoLogin / DIT classifier approach.
+    This mirrors Katana's tryAutoLogin / DIT classifier approach.
     """
     try:
         if _is_login_url(page.url):
@@ -3026,23 +3072,23 @@ class HeadlessEngine:
         cookies:            List[dict] = None,
         extra_headers:      dict       = None,
         seen_hashes:        Set[str]   = None,
-        # ── BundleSpy enhancements ─────────────────────────────────────────────
+        # ── Katana enhancements ─────────────────────────────────────────────
         max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
         max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
         enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
         captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
         cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
-        # New BundleSpy enhancements (session 2)
+        # New Katana enhancements (session 2)
         auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
         page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
         hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
-        # New BundleSpy enhancements (session 3)
+        # New Katana enhancements (session 3)
         cookie_jar_path:    Optional[str]  = None,   # Path to Netscape cookie file (Burp export)
         url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
         url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
         response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
-        # New BundleSpy enhancements (session 4)
+        # New Katana enhancements (session 4)
         max_onclick_links:         int   = 50,   # Max a[onclick] links to simulate per page (0=disabled)
         capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
         content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
@@ -3064,27 +3110,27 @@ class HeadlessEngine:
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
 
-        # BundleSpy enhancement params
+        # Katana enhancement params
         self.max_failures          = max(1, max_failures)
         self.max_crawl_duration    = max(0, max_crawl_duration)
         self.enable_diagnostics    = enable_diagnostics
         self.slow_mo               = max(0, slow_mo)
         self.captcha_handler       = captcha_handler
         self.cookie_consent_bypass = cookie_consent_bypass
-        # Session 2 BundleSpy enhancements
+        # Session 2 Katana enhancements
         self.auth_steps            = auth_steps or []
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag - avoids re-auth mid-crawl
         self._page_type:      str  = "unknown"  # set in Phase 1: "spa", "static", or "unknown"
 
-        # Session 3 BundleSpy enhancements
+        # Session 3 Katana enhancements
         self.cookie_jar_path       = cookie_jar_path
         self.url_filter_similar    = url_filter_similar
         self.url_filter_threshold  = max(1, url_filter_threshold)
         self.response_body_extract = response_body_extract
 
-        # Session 4 BundleSpy enhancements
+        # Session 4 Katana enhancements
         self.max_onclick_links        = max_onclick_links
         self.capture_raw_traffic      = capture_raw_traffic
         self.content_similarity_threshold = content_similarity_threshold
@@ -3159,25 +3205,25 @@ class HeadlessEngine:
         self._action_queue:   deque         = deque()
         self._seen_actions:   Set[str]      = set()
 
-        # CrawlGraph — DAG of page states and action edges (BundleSpy enhancement 1)
+        # CrawlGraph — DAG of page states and action edges (Katana enhancement 1)
         self.crawl_graph: CrawlGraph = CrawlGraph()
 
-        # DiagnosticsWriter — optional (BundleSpy enhancement 11)
+        # DiagnosticsWriter — optional (Katana enhancement 11)
         self._diagnostics: Optional[DiagnosticsWriter] = (
             DiagnosticsWriter() if enable_diagnostics else None
         )
 
-        # MaxCrawlDuration start time — set after auth completes (BundleSpy enhancement 10)
+        # MaxCrawlDuration start time — set after auth completes (Katana enhancement 10)
         self._crawl_start_time: float = 0.0
 
-        # Consecutive failure counter for MaxFailureCount guard (BundleSpy enhancement 4)
+        # Consecutive failure counter for MaxFailureCount guard (Katana enhancement 4)
         self._consecutive_failures: int = 0
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
         self.external_seen = external_seen or set()
 
-    # ── BundleSpy enhancement helpers ────────────────────────────────────────────
+    # ── Katana enhancement helpers ────────────────────────────────────────────
 
     def _slow_mo_wait(self, page) -> None:
         """SlowMotion mode: inject a configurable delay between interactions.
@@ -3287,7 +3333,7 @@ class HeadlessEngine:
     def _is_element_match(current: dict, target_selector: str, target_xpath: str) -> bool:
         """Stronger element identity check before trusting an XPath lookup result.
 
-        Mirrors BundleSpy's isElementMatch: identical non-empty ID is a definitive
+        Mirrors Katana's isElementMatch: identical non-empty ID is a definitive
         match; otherwise requires at least 2 of (classes, textContent, tagName)
         to agree. Reduces false positives where the XPath resolves to a different
         element after a SPA re-render.
@@ -3329,7 +3375,7 @@ class HeadlessEngine:
         Strategy 2 - browser history walk: step back N times using go_back().
         Strategy 3 - hard goto: navigate directly to the action's source URL.
 
-        Mirrors BundleSpy's navigateBackToStateOrigin with tryElementNavigation,
+        Mirrors Katana's navigateBackToStateOrigin with tryElementNavigation,
         tryBrowserHistoryNavigation, and tryShortestPathNavigation."""
 
         # ── Fast path: already on the right state ────────────────────────────
@@ -3353,7 +3399,7 @@ class HeadlessEngine:
                 if current_sim:
                     xor = origin_state.simhash ^ current_sim
                     distance = bin(xor).count("1")
-                    if distance <= 2:  # BundleSpy's simhashThreshold = 2
+                    if distance <= 2:  # Katana's simhashThreshold = 2
                         logger.debug(
                             "navigateBack: SimHash distance %d - treating as origin state %s",
                             distance, action.origin_id,
@@ -3492,7 +3538,7 @@ class HeadlessEngine:
 
     def _check_element_interactable(self, page, el) -> bool:
         """Interactability check: verify the element is not covered by an overlay
-        (modal, cookie banner, spinner) before clicking it.  Mirrors BundleSpy's
+        (modal, cookie banner, spinner) before clicking it.  Mirrors Katana's
         CoveredError / interactability check. (Enhancement 5)
 
         Returns True if the element is safe to click.
@@ -3524,11 +3570,11 @@ class HeadlessEngine:
             # If the check fails we fall back to attempting the click anyway
             return True
 
-    # ── Session 2 BundleSpy enhancement helpers ─────────────────────────────────
+    # ── Session 2 Katana enhancement helpers ─────────────────────────────────
 
     def _scroll_into_view(self, page, el) -> None:
         """Universal ScrollIntoView — call before every click, not just Phase 3.
-        Mirrors BundleSpy's ScrollIntoView() call before every action.
+        Mirrors Katana's ScrollIntoView() call before every action.
         Falls back silently if the element is gone or raises. (Enhancement 6)"""
         try:
             el.scroll_into_view_if_needed(timeout=600)
@@ -3590,12 +3636,12 @@ class HeadlessEngine:
         """Return True if any step in the recorded flow is an assert_visible step.
         A terminal visible assertion is an explicit UI check that login succeeded
         (e.g. 'Welcome back' is visible). Mirrors HasTerminalVisibleAssertion in
-        BundleSpy. (Enhancement 5)"""
+        Katana. (Enhancement 5)"""
         return any(s.step_type == "assert_visible" for s in steps)
 
     def _run_recorded_auth_flow(self, page, stabilizer) -> bool:
         """Replay a recorded authentication flow (multi-step SSO/MFA).
-        Mirrors BundleSpy's auth.StepsFromFile + replay loop.
+        Mirrors Katana's auth.StepsFromFile + replay loop.
 
         Executes each LoginStep in order:
           navigate        — page.goto(url)
@@ -3735,7 +3781,7 @@ class HeadlessEngine:
         or no recorded flow exists but we land on a login page.
 
         Attempts to fill detected username/password fields and submit.
-        Uses the same DIT classifier patterns as BundleSpy's auto-login.
+        Uses the same DIT classifier patterns as Katana's auto-login.
         Only attempted when we have a user:pass from an auth header or the
         caller injected credentials via a special auth_credentials dict.
         Returns True if a session delta confirms login. (Enhancement 2)"""
@@ -3985,7 +4031,7 @@ class HeadlessEngine:
 
         Two responsibilities:
         1. ResponseParser — parse every response body for URLs not visible in the DOM
-           (BundleSpy enhancement: response body URL extraction). Discovered URLs are
+           (Katana enhancement: response body URL extraction). Discovered URLs are
            staged into self._rp_discovered and drained into the BFS queue in run().
         2. JS capture — three-layer detection, body dedup, JS file creation (existing).
         """
@@ -4034,7 +4080,7 @@ class HeadlessEngine:
                 except Exception as rp_err:
                     logger.debug("ResponseParser error for %s: %s", url, rp_err)
 
-            # Technology fingerprinting — BundleSpy hybrid feature 6
+            # Technology fingerprinting — Katana hybrid feature 6
             if self.technology_detection and _resp_body is not None:
                 try:
                     techs = self._fingerprint_technologies(url, dict(response.headers), _resp_body)
@@ -4047,7 +4093,7 @@ class HeadlessEngine:
                     logger.debug("Technology detection error for %s: %s", url, tech_err)
 
             # Raw capture — store request+response bytes alongside api_call entries
-            # BundleSpy's FetchRequestStageResponse captures full wire-level traffic;
+            # Katana's FetchRequestStageResponse captures full wire-level traffic;
             # we approximate with Playwright's response object fields.
             if self.capture_raw_traffic and _resp_body is not None:
                 try:
@@ -4349,7 +4395,7 @@ class HeadlessEngine:
         """
         Return True if the element is a logout/sign-out link.
         Checks visible text, href path segments, id, and class — same approach
-        as BundleSpy's isLogoutPage() which catches CSS-icon logout buttons whose
+        as Katana's isLogoutPage() which catches CSS-icon logout buttons whose
         visible text is empty but whose href is /logout or /signout.
         """
         try:
@@ -4361,6 +4407,75 @@ class HeadlessEngine:
             href_path = urlparse(href).path if href.startswith("/") else href
             combined = f"{text} {href_path} {eid} {cls}"
             return any(kw in combined for kw in LOGOUT_KEYWORDS)
+        except Exception:
+            return False
+
+    def _is_safe_to_click(self, el) -> bool:
+        """
+        Multi-layer safety check before clicking any element.
+        Returns True only if all checks pass.
+        Designed to be conservative - when in doubt, skip.
+        """
+        try:
+            # must be visible and enabled
+            if not el.is_visible() or not el.is_enabled():
+                return False
+
+            # never click elements inside a <form> - could trigger submit
+            try:
+                in_form = el.evaluate("e => !!e.closest('form')")
+                if in_form:
+                    return False
+            except Exception:
+                pass
+
+            # never click submit/reset/button[type=submit] by tag+type
+            try:
+                tag  = (el.evaluate("e => e.tagName") or "").lower()
+                typ  = (el.get_attribute("type") or "").lower()
+                if tag == "input" or (tag == "button" and typ in ("submit", "reset", "")):
+                    # button with no type defaults to submit inside a form
+                    # we already blocked in-form elements above, but double-check
+                    if typ in ("submit", "reset"):
+                        return False
+            except Exception:
+                pass
+
+            # gather all text signals for destructive/logout check
+            try:
+                text       = (el.inner_text()              or "").lower().strip()
+                aria_label = (el.get_attribute("aria-label") or "").lower()
+                data_action= (el.get_attribute("data-action") or "").lower()
+                data_method= (el.get_attribute("data-method") or "").lower()
+                href       = (el.get_attribute("href")       or "").lower()
+                cls        = (el.get_attribute("class")      or "").lower()
+                combined   = f"{text} {aria_label} {data_action} {href} {cls}"
+
+                # block destructive keywords in any signal
+                if any(kw in combined for kw in DESTRUCTIVE_KEYWORDS):
+                    return False
+
+                # block logout in any signal
+                if any(kw in combined for kw in LOGOUT_KEYWORDS):
+                    return False
+
+                # block data-method="delete/patch/put" (Rails UJS pattern)
+                if data_method in ("delete", "patch", "put", "post"):
+                    return False
+
+                # block data-confirm - always a destructive action confirmation
+                if el.get_attribute("data-confirm"):
+                    return False
+
+                # block href that navigates off-site
+                if href and href.startswith("http") and self._netloc not in href:
+                    return False
+
+            except Exception:
+                return False  # if we can't inspect it, don't click it
+
+            return True
+
         except Exception:
             return False
 
@@ -4421,7 +4536,7 @@ class HeadlessEngine:
     def _discover_form_actions(self, page, source_url: str) -> None:
         """
         Discover forms on the current page and queue them as FILL_FORM actions
-        for dedicated follow-up crawling — same pattern BundleSpy uses for FillForm
+        for dedicated follow-up crawling — same pattern Katana uses for FillForm
         action type. This ensures form-triggered API calls are captured even if
         the form wasn't visible during the main page visit.
 
@@ -4857,92 +4972,78 @@ class HeadlessEngine:
 
     def _interact(self, page, stabilizer: PageStabilizer) -> None:
         """
-        Interaction engine — scroll, tabs, dropdowns, nav hovers.
-        Safe: never clicks destructive actions, never submits forms.
-        Adaptive waits after each action so JS-driven UI settles before the
-        next step fires.
+        Safe interaction engine - scroll + whitelist-only nav clicks.
+
+        Safety guarantees:
+        - Only clicks elements from SAFE_CLICK_SELECTORS whitelist
+        - _is_safe_to_click() rejects: in-form elements, submit/reset types,
+          destructive keywords, logout keywords, data-confirm, data-method delete/patch/put,
+          off-origin hrefs, invisible/disabled elements
+        - Never clicks arbitrary buttons - only nav disclosure elements
+        - DOM fingerprint guard prevents re-firing on already-seen page states
+        - Hard cap of 15 clicks per page total across all selectors
+        - Scroll is passive (JS evaluate only, no Playwright scroll actions)
         """
-        # DOM simhash guard: skip interaction on states we've already triggered.
-        # Prevents re-firing the same JS events on SPAs that render the same
-        # component under different URLs (common in React Router / Vue Router apps).
+        # DOM fingerprint guard - skip if we've already interacted on this DOM state
         try:
             _ifp = self._dom_fingerprint(page)
             if _ifp and _ifp in self._seen_interact_states:
-                logger.debug("Skipping interaction — duplicate DOM state")
+                logger.debug("Skipping interaction - duplicate DOM state on %s", page.url)
                 return
             if _ifp:
                 self._seen_interact_states.add(_ifp)
         except Exception:
             pass
 
-        # Phase 1: Adaptive scroll — triggers lazy-load and infinite-scroll JS
+        # Step 1: Passive scroll - triggers lazy-load JS without Playwright scroll actions
         try:
             for frac in [0.25, 0.5, 0.75, 1.0, 0]:
                 page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {frac});")
-                stabilizer.wait_after_interaction(max_ms=500)
+                stabilizer.wait_after_interaction(max_ms=400)
         except Exception:
             pass
 
-        # Phase 2: Tabs, accordions, toggles — reveal hidden panels
-        tab_selectors = [
-            "[role='tab']", "[role='menuitem']",
-            "[data-toggle='tab']", "[data-bs-toggle='tab']",
-            ".nav-link:not(.active)", "[aria-selected='false']",
-            ".accordion-button", "[aria-expanded='false']",
-        ]
-        for sel in tab_selectors:
+        # Step 2: Whitelist-only nav clicks - tabs, accordions, menus only
+        # Hard cap: 15 total clicks per page across all selectors
+        _click_budget = 15
+        for sel in SAFE_CLICK_SELECTORS:
+            if _click_budget <= 0:
+                break
             try:
-                for el in page.query_selector_all(sel)[:6]:
+                for el in page.query_selector_all(sel)[:5]:
+                    if _click_budget <= 0:
+                        break
                     try:
-                        if not el.is_visible() or not el.is_enabled():
-                            continue
-                        if self._is_destructive(el.inner_text()):
-                            continue
-                        if self._is_logout_link(el):
+                        if not self._is_safe_to_click(el):
                             continue
                         el.click(timeout=800)
-                        stabilizer.wait_after_interaction(max_ms=800)
+                        _click_budget -= 1
+                        stabilizer.wait_after_interaction(max_ms=700)
+                        logger.debug(
+                            "Safe click: sel=%s text='%s' on %s",
+                            sel,
+                            (el.inner_text() or "")[:40].strip(),
+                            page.url,
+                        )
                     except Exception:
                         pass
             except Exception:
                 pass
 
-        # Phase 3: Dropdown and menu toggles
+        # Step 3: Nav hover only - reveals mega-menus without clicking
         try:
-            for el in page.query_selector_all(
-                "button[data-toggle],button[data-bs-toggle],"
-                "button[aria-expanded],.dropdown-toggle"
-            )[:8]:
-                try:
-                    if not el.is_visible() or not el.is_enabled():
-                        continue
-                    if self._is_destructive(el.inner_text()):
-                        continue
-                    if self._is_logout_link(el):
-                        continue
-                    el.click(timeout=800)
-                    stabilizer.wait_after_interaction(max_ms=600)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Phase 4: Nav hover — reveals mega-menus and sub-nav JS
-        try:
-            for el in page.query_selector_all(
-                ".dropdown,.has-submenu,nav > ul > li"
-            )[:6]:
+            for el in page.query_selector_all("nav > ul > li, .has-submenu")[:5]:
                 try:
                     if el.is_visible():
-                        el.hover(timeout=600)
-                        stabilizer.wait_after_interaction(max_ms=400)
+                        el.hover(timeout=500)
+                        stabilizer.wait_after_interaction(max_ms=300)
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # Phase 5: Multi-step form engine — drives conditional field reveal
-        # and modal appearance without ever submitting or touching payment flows.
+        # Step 4: Form field interaction - GET search forms only (Tier 1)
+        # POST form filling only when explicitly enabled via --forms
         self._interact_forms(page, stabilizer)
 
     def _interact_forms(self, page, stabilizer: PageStabilizer) -> None:
@@ -5332,6 +5433,11 @@ class HeadlessEngine:
             # Adaptive framework wait
             stabilizer.wait_for_framework(max_ms=3000)
 
+            # safe interact gate - only runs when --interact is passed
+            if self.interact:
+                self._interact(page, stabilizer)
+                self._observe_forms(page, stabilizer)
+
             # Extract everything
             new_routes  = self._extract_routes(page)
             api_calls   = self._extract_api_calls(page)
@@ -5403,7 +5509,7 @@ class HeadlessEngine:
         Routes may be bare paths (/about), paths with query strings
         (/projects?category=foo), or absolute URLs (https://...).
         Query strings are preserved — they represent distinct filterable
-        pages that differ in content (BundleSpy gap fix).
+        pages that differ in content (Katana gap fix).
         """
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
@@ -5671,7 +5777,7 @@ class HeadlessEngine:
         """Return a normalized DOM string with scripts, styles, comments, and
         dynamic attributes (data-*, aria-hidden, style) stripped.
 
-        Mirrors BundleSpy's getStrippedDOM / domNormalizer — removes noise so
+        Mirrors Katana's getStrippedDOM / domNormalizer — removes noise so
         two renders of the same SPA component hash identically even when
         minor dynamic attributes differ between page loads."""
         try:
@@ -5717,7 +5823,7 @@ class HeadlessEngine:
     def _dom_simhash(self, stripped: str) -> int:
         """Compute a 64-bit SimHash from a stripped DOM string.
 
-        Uses 3-character shingle hashing — same n-gram size as BundleSpy's
+        Uses 3-character shingle hashing — same n-gram size as Katana's
         simhash.Fingerprint(reader, 3). Returns 0 on empty input.
 
         SimHash algorithm: for each shingle, hash it to 64 bits, then for
@@ -5780,12 +5886,12 @@ class HeadlessEngine:
 
     def _simulate_onclick_links(self, page, source_url: str, max_links: int = 50) -> list:
         """
-        Click every a[onclick] element and record URL changes — BundleSpy hybrid approach.
+        Click every a[onclick] element and record URL changes — Katana hybrid approach.
 
         Standard crawlers miss JS redirects anchored to onclick handlers:
             <a href="#" onclick="window.location='/admin/dashboard'">Admin</a>
 
-        BundleSpy's navigateRequest() clicks each a[onclick] individually, records
+        Katana's navigateRequest() clicks each a[onclick] individually, records
         the URL drift after click, then navigates back. We do the same:
         1. Collect all a[onclick] selectors before clicking anything
         2. For each: click -> measure URL drift -> navigate back
@@ -5880,7 +5986,7 @@ class HeadlessEngine:
         technologies. No external service — all patterns are inline regexes.
         Returns a list of detected technology names for this response.
 
-        BundleSpy runs Wappalyzer per-response in hybrid/crawl.go; we do the same
+        Katana runs Wappalyzer per-response in hybrid/crawl.go; we do the same
         with a curated inline fingerprint database covering the most common stacks.
         """
         import re as _re
@@ -5960,7 +6066,7 @@ class HeadlessEngine:
         link count) and checks Hamming distance against previously seen fingerprints.
         Threshold 0.0 = disabled. Threshold 0.85 = skip if 85%+ structurally similar.
 
-        BundleSpy's SimhashOracle uses simhash with configurable threshold; we use
+        Katana's SimhashOracle uses simhash with configurable threshold; we use
         a simpler but effective structural hash approach that doesn't require
         external dependencies.
         """
@@ -6009,7 +6115,7 @@ class HeadlessEngine:
         invisible to standard scraping. CDP with pierce=True crosses every shadow
         boundary in a single call, returning the full composed tree.
 
-        BundleSpy does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
+        Katana does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
         pierce=True, then walks nodes collecting href/action attributes.
         """
         found = set()
@@ -6146,7 +6252,7 @@ class HeadlessEngine:
         # Shadow DOM traversal — extract routes hidden inside Web Components.
         # Playwright's page.content() only sees the light DOM; shadow roots require
         # CDP DOMGetDocument with pierce=True to pierce every shadow boundary.
-        # BundleSpy uses this same approach in hybrid/crawl.go navigateRequest().
+        # Katana uses this same approach in hybrid/crawl.go navigateRequest().
         try:
             shadow_routes = self._extract_shadow_dom_routes(page)
             new_routes.update(shadow_routes)
@@ -6390,7 +6496,7 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
-            # JS navigation tracking — BundleSpy's PageFrameNavigated approach.
+            # JS navigation tracking — Katana's PageFrameNavigated approach.
             # page.on("framenavigated") fires for window.location=, meta-refresh,
             # history.pushState, and client-side router transitions that the
             # response handler misses because they don't produce a new HTTP response.
@@ -6414,7 +6520,7 @@ class HeadlessEngine:
             page.on("framenavigated", _on_frame_navigated)
 
             # ── Gap 2: CDP FetchRequestPaused interception (Phase 1 page) ────
-            # BundleSpy's FetchRequestStage/FetchResponseStage pipeline gives us
+            # Katana's FetchRequestStage/FetchResponseStage pipeline gives us
             # raw POST bodies and raw response bytes at the CDP level — things
             # Playwright's high-level response event can miss (cached hits,
             # service-worker intercepts, partial streaming bodies).
@@ -6669,7 +6775,7 @@ class HeadlessEngine:
             # Gap 2: CDP-level raw traffic handlers for pool slots.
             # When capture_raw_traffic is on, each pool slot's page gets a CDP
             # Fetch interception session that captures POST bodies and response
-            # bytes before the browser can consume them — the same data BundleSpy
+            # bytes before the browser can consume them — the same data Katana
             # captures via FetchRequestStage/FetchResponseStage in browser.go.
             # The handlers are thread-safe (self._raw_lock guards the list).
             def _pool_cdp_request_fn(url: str, method: str, headers: dict,
@@ -6909,7 +7015,12 @@ class HeadlessEngine:
                             logger.debug("Content similarity gate: skipping %s", url)
                             return [], 0, True, False
 
-                    # passive-only: no interact, no form actions, no onclick simulation
+                    # safe interact gate - only runs when --interact is passed
+                    if self.interact:
+                        self._interact(slot_page, slot_stabilizer)
+                        self._observe_forms(slot_page, slot_stabilizer)
+                        _browser_pool.drain_thread_responses(slot)
+
                     new_routes = self._flush_page_intel(slot_page, url)
 
                     new_urls   = self._build_urls(new_routes)
@@ -7233,14 +7344,129 @@ class HeadlessEngine:
                     self._slow_mo_wait(page)
 
                     if action.action_type == ActionType.FILL_FORM:
-                        # passive mapper - form submission disabled
-                        logger.debug("Skipping FILL_FORM action (passive mode): %s", action.url)
-                        phase3_consecutive_failures += 1
+                        if not self.interact:
+                            logger.debug("Skipping FILL_FORM (--interact not set): %s", action.url)
+                            phase3_consecutive_failures += 1
+                        else:
+                            try:
+                                form = page.query_selector("form")
+                                if form and form.is_visible():
+                                    self._interact_forms(page, stabilizer)
+                                    new_routes = self._flush_page_intel(page, action.url)
+                                    for r in new_routes:
+                                        if self._add_route(r):
+                                            full = self._build_urls({r})
+                                            for u in full:
+                                                if not self.registry.seen_url(u):
+                                                    if self._path_trie is not None:
+                                                        _fp = self._path_trie.fingerprint(u)
+                                                        if _fp in self._trie_seen:
+                                                            _trie_filtered_count += 1
+                                                            continue
+                                                        self._trie_seen.add(_fp)
+                                                    bfs_queue.append(u)
+                                    _action_pages_visited += 1
+                                    phase3_consecutive_failures = 0
+                                    if self._diagnostics:
+                                        self._diagnostics.record(page, action, note="post-fill_form")
+                                    if self.hooks.after_action:
+                                        try:
+                                            self.hooks.after_action(page, action)
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
+                                phase3_consecutive_failures += 1
 
                     elif action.action_type == ActionType.LEFT_CLICK:
-                        # passive mapper - click actions disabled
-                        logger.debug("Skipping LEFT_CLICK action (passive mode): %s", action.url)
-                        phase3_consecutive_failures += 1
+                        if not self.interact:
+                            logger.debug("Skipping LEFT_CLICK (--interact not set): %s", action.url)
+                            phase3_consecutive_failures += 1
+                        else:
+                            try:
+                                el = page.query_selector(action.selector)
+                                if el and el.is_visible() and el.is_enabled():
+                                    # safety gate - multi-layer check before any click
+                                    if not self._is_safe_to_click(el):
+                                        logger.debug(
+                                            "Safety gate blocked click: %s on %s",
+                                            action.selector, action.url,
+                                        )
+                                        phase3_consecutive_failures += 1
+                                        continue
+                                    # scroll into view before click
+                                    self._scroll_into_view(page, el)
+                                    if not self._check_element_interactable(page, el):
+                                        logger.debug(
+                                            "Element covered by overlay, skipping: %s on %s",
+                                            action.selector, action.url,
+                                        )
+                                        if self.cookie_consent_bypass:
+                                            self._dismiss_cookie_consent(page)
+                                        phase3_consecutive_failures += 1
+                                        continue
+                                    self._slow_mo_wait(page)
+                                    try:
+                                        el.click(timeout=800)
+                                    except Exception as click_err:
+                                        typed_err = self._classify_click_error(click_err, page, el)
+                                        if isinstance(typed_err, ElementCoveredError):
+                                            logger.debug(
+                                                "ElementCoveredError on %s — trying consent bypass",
+                                                action.selector,
+                                            )
+                                            if self.cookie_consent_bypass:
+                                                self._dismiss_cookie_consent(page)
+                                            try:
+                                                el.click(timeout=600)
+                                            except Exception:
+                                                phase3_consecutive_failures += 1
+                                                continue
+                                        elif isinstance(typed_err, ElementInvisibleError):
+                                            logger.debug(
+                                                "ElementInvisibleError on %s — skipping",
+                                                action.selector,
+                                            )
+                                            phase3_consecutive_failures += 1
+                                            continue
+                                        elif isinstance(typed_err, ElementNoPointerEventsError):
+                                            logger.debug(
+                                                "ElementNoPointerEventsError on %s — JS click fallback",
+                                                action.selector,
+                                            )
+                                            try:
+                                                page.evaluate("el => el.click()", el)
+                                            except Exception:
+                                                phase3_consecutive_failures += 1
+                                                continue
+                                        else:
+                                            raise typed_err
+                                    stabilizer.wait_after_interaction(max_ms=1000)
+                                    new_routes = self._flush_page_intel(page, action.url)
+                                    for r in new_routes:
+                                        if self._add_route(r):
+                                            full = self._build_urls({r})
+                                            for u in full:
+                                                if not self.registry.seen_url(u):
+                                                    if self._path_trie is not None:
+                                                        _fp = self._path_trie.fingerprint(u)
+                                                        if _fp in self._trie_seen:
+                                                            _trie_filtered_count += 1
+                                                            continue
+                                                        self._trie_seen.add(_fp)
+                                                    bfs_queue.append(u)
+                                    _action_pages_visited += 1
+                                    phase3_consecutive_failures = 0
+                                    if self._diagnostics:
+                                        self._diagnostics.record(page, action, note="post-left_click")
+                                    if self.hooks.after_action:
+                                        try:
+                                            self.hooks.after_action(page, action)
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
+                                phase3_consecutive_failures += 1
 
                 except Exception as e:
                     logger.debug("Action processing error: %s", e)
@@ -7350,10 +7576,10 @@ class HeadlessEngine:
             "actions_queued":     len(self._seen_actions),
             "crawl_graph":        crawl_graph_summary,
             "timings":            timings,
-            # BundleSpy enhancements (session 3)
+            # Katana enhancements (session 3)
             "response_parser_urls": _rp_added_count,
             "trie_filtered":        _trie_filtered_count,
-            # BundleSpy enhancements (session 4)
+            # Katana enhancements (session 4)
             "onclick_navigations":  _onclick_nav_count,
             "js_nav_urls":          _js_nav_count,
             "technologies":         dict(self._tech_detections),
@@ -7411,24 +7637,24 @@ def collect_headless_full(
     cookies:              list           = None,
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
-    # BundleSpy enhancements (session 1)
+    # Katana enhancements (session 1)
     max_failures:         int            = 10,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
     captcha_handler       = None,
     cookie_consent_bypass: bool          = True,
-    # BundleSpy enhancements (session 2)
+    # Katana enhancements (session 2)
     auth_steps:           Optional[List[LoginStep]] = None,
     page_load_strategy:   str            = "domcontentloaded",
     hooks:                Optional[CrawlHooks] = None,
     auth_credentials:     Optional[dict] = None,
-    # BundleSpy enhancements (session 3)
+    # Katana enhancements (session 3)
     cookie_jar_path:      Optional[str]  = None,
     url_filter_similar:   bool           = False,
     url_filter_threshold: int            = 3,
     response_body_extract: bool          = True,
-    # BundleSpy enhancements (session 4)
+    # Katana enhancements (session 4)
     max_onclick_links:    int            = 50,
     capture_raw_traffic:  bool           = False,
     content_similarity_threshold: float  = 0.0,
@@ -7439,7 +7665,7 @@ def collect_headless_full(
     num_browsers:         int            = 5,
 ) -> dict:
     """
-    Full headless scan — all BundleSpy enhancements exposed.
+    Full headless scan — all Katana enhancements exposed.
 
     seed_urls:             routes from static analysis to pre-seed the engine.
     workers:               concurrent page processing (default 3).
