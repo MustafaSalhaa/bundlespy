@@ -961,18 +961,32 @@ def score_endpoint(url: str, surrounding_context: str = "") -> Tuple[int, List[s
         return -1000, [], ["chart_token_bare"]
 
     # ---- Opaque token check -------------------------------------------------
-    # Netlify short-link tokens, deploy IDs, content hashes that leak from
-    # analytics/RUM scripts. Two rules (same as headless.py):
-    #   1. Purely alphanumeric seg with mixed case - e.g. tNKgr4GnJ5SCpBpu, siJv
-    #   2. All-uppercase seg with digit, >= 4 chars - e.g. ALLTKG5, BUQ7X
-    _opaque_segs = [s for s in url.strip("/").split("/") if s]
+    # Catches: Netlify short-link tokens, deploy IDs, content hashes, JPEG/base64
+    # string literals leaking from analytics/RUM/image data in JS bundles.
+    # Parse the path out of full URLs first so segments are clean alphanumeric.
+    _opaque_path = urlparse(url).path if '://' in url else url
+    _opaque_segs = [s for s in _opaque_path.strip("/").split("/") if s]
     for _seg in _opaque_segs:
-        if not re.match(r'^[A-Za-z0-9]{3,64}$', _seg):
-            continue
-        if _seg != _seg.lower() and _seg != _seg.upper():
-            return -1000, [], ["opaque_token_mixed_case"]
-        if _seg == _seg.upper() and any(c.isdigit() for c in _seg) and len(_seg) >= 4:
-            return -1000, [], ["opaque_token_upper_digit"]
+        # Rule 1 - mixed case alphanumeric (min 2 chars): tNKgr4GnJ5SCpBpu, siJv, Na, pF
+        if re.match(r'^[A-Za-z0-9]{2,64}$', _seg):
+            if _seg != _seg.lower() and _seg != _seg.upper():
+                return -1000, [], ["opaque_token_mixed_case"]
+        # Rule 2 - all-uppercase with digit, >= 4 chars: ALLTKG5, BUQ7X
+        if re.match(r'^[A-Za-z0-9]{4,64}$', _seg):
+            if _seg == _seg.upper() and any(c.isdigit() for c in _seg):
+                return -1000, [], ["opaque_token_upper_digit"]
+    # Rule 3 - single path segment with no meaningful word structure:
+    # pure lowercase/digit noise like jpeg, qu3, kul0, muw, 5WS
+    # only applies when the full URL path is a single short segment
+    if len(_opaque_segs) == 1:
+        _s = _opaque_segs[0]
+        if re.match(r'^[A-Za-z0-9]{2,8}$', _s) and not re.match(
+            r'^(?:api|auth|admin|login|logout|register|signup|user|users|'
+            r'shop|cart|checkout|products?|orders?|search|account|profile|'
+            r'about|contact|home|index|page|pages|blog|news|faq|help|'
+            r'stock|toggle|v\d|v\d+)$', _s, re.IGNORECASE
+        ):
+            return -1000, [], ["opaque_token_short_seg"]
 
     # ---- Structural signals ------------------------------------------------
 
