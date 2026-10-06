@@ -106,7 +106,6 @@ other:
     _cg.add_argument("--exclude",          nargs="+", default=[],  metavar="PAT", help="URL patterns to exclude from crawl (substring match)")
     _cg.add_argument("--max-domain-pages", type=int,  default=0,   metavar="N",   help="Max pages per hostname - prevents one subdomain eating the full budget (default: 0 = unlimited)")
     _cg.add_argument("--protect-session",  action="store_true",                   help="Skip logout/signout URLs to keep authenticated sessions alive during crawl")
-    _cg.add_argument("--path-climb",       action="store_true",                   help="Queue parent directory paths of every discovered URL to find unlisted admin panels and API roots")
 
     # Features
     _fg = scan.add_argument_group("features")
@@ -612,7 +611,6 @@ def run_scan(args) -> int:
             max_js_files=args.max_js, common_paths=args.common_paths,
             max_domain_pages=getattr(args, "max_domain_pages", 0) or 0,
             protect_session=getattr(args, "protect_session", False),
-            path_climb=getattr(args, "path_climb", False),
         )
         try:
             crawler.crawl()
@@ -973,12 +971,42 @@ def run_scan(args) -> int:
 
     # Upgrade any UNKNOWN endpoint that the crawler actually visited to ROUTE.
     # These are real pages confirmed to exist - no reason to show them as UNKNOWN.
+    import re as _re_cli
+    _RE_OPAQUE_SEG = _re_cli.compile(r'^[A-Za-z0-9]{3,64}$')
+
+    def _is_opaque_seg(s: str) -> bool:
+        """True when a single path segment looks like a token - not a real route word."""
+        if not _RE_OPAQUE_SEG.match(s):
+            return False
+        # Mixed case (both upper and lower) - classic token
+        if s != s.lower() and s != s.upper():
+            return True
+        # All-uppercase with digit, >= 4 chars - e.g. ALLTKG5, BUQ7X
+        if s == s.upper() and any(c.isdigit() for c in s) and len(s) >= 4:
+            return True
+        return False
+
+    def _is_opaque_path(url: str) -> bool:
+        """True when any path segment looks like a token/hash, not a real route."""
+        _path = _uprc(url).path
+        _segs = [s for s in _path.split("/") if s]
+        if not _segs:
+            return False
+        return any(_is_opaque_seg(_s) for _s in _segs)
+
     _visited_pages_norm = set()
     if not args.passive:
         for _vp in (getattr(crawler, "visited_pages", set()) or set()):
-            _visited_pages_norm.add(_vp.rstrip("/").lower().split("?")[0])
+            _path = _uprc(_vp).path
+            _segs = [s for s in _path.split("/") if s]
+            # Skip opaque token paths from visited_pages promotion
+            if not any(_is_opaque_seg(s) for s in _segs):
+                _visited_pages_norm.add(_vp.rstrip("/").lower().split("?")[0])
     for _ep in all_endpoints:
         if _ep.category in ("UNKNOWN", "") and _visited_pages_norm:
+            # Skip opaque token paths - these are not real routes
+            if _is_opaque_path(_ep.url):
+                continue
             _ep_key = _ep.url.rstrip("/").lower().split("?")[0]
             if _ep_key in _visited_pages_norm:
                 _ep_lower = _uprc(_ep.url).path.lower()
