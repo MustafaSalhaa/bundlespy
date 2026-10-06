@@ -124,6 +124,16 @@ other:
                      help="Parallel browser instances for headless scan (default: 5; lower to 1-2 if WAF is active)")
     _hg.add_argument("--interact",    action="store_true",
                      help="Enable safe UI interaction: expand nav tabs, accordions, dropdowns (whitelist-only, never submits forms or clicks destructive elements)")
+    _hg.add_argument("--page-load-strategy", default="domcontentloaded", metavar="MODE",
+                     choices=["none", "domcontentloaded", "load", "heuristic"],
+                     help="Page stabilization strategy (default: domcontentloaded)\n"
+                          "  none            - return immediately after navigation commit\n"
+                          "  domcontentloaded - DOMContentLoaded + DOM quiet window (fast, works on SSE apps)\n"
+                          "  load            - window load event + JS in-flight quiet\n"
+                          "  heuristic       - URL-change detection + network idle + DOM stability (thorough, slow)")
+    _hg.add_argument("--dom-wait-time", type=int, default=1, metavar="SECS",
+                     help="Extra seconds of DOM quiet after DOMContentLoaded (default: 1)\n"
+                          "Increase on slow SPAs. Only applies to domcontentloaded strategy.")
 
     # Auth
     _ag = scan.add_argument_group("authentication")
@@ -818,13 +828,15 @@ def run_scan(args) -> int:
             max_pages     = args.max_pages,
             external_seen = crawler_seen,
             seed_urls     = all_seed_urls,
-            interact      = getattr(args, "interact", False),
-            workers       = getattr(args, "workers", 5),
-            num_browsers  = getattr(args, "workers", 5),
-            cookies       = _playwright_cookies,
-            extra_headers = extra_headers,
-            seen_hashes   = _crawler_js_hashes,
-            forms_mode    = getattr(args, "interact", False),
+            interact           = getattr(args, "interact", False),
+            workers            = getattr(args, "workers", 5),
+            num_browsers       = getattr(args, "workers", 5),
+            cookies            = _playwright_cookies,
+            extra_headers      = extra_headers,
+            seen_hashes        = _crawler_js_hashes,
+            forms_mode         = getattr(args, "interact", False),
+            page_load_strategy = getattr(args, "page_load_strategy", "domcontentloaded"),
+            dom_wait_time      = getattr(args, "dom_wait_time", 1),
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
