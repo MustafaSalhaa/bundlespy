@@ -51,6 +51,7 @@ from ..discovery.html import (
     extract_htmx_endpoints,
     extract_ping_urls,
 )
+from ..discovery.header_parser import extract_header_urls
 from ..storage.models import JSFile, RouteState, AccessState
 from ..analysis.html_scanner import scan_html
 
@@ -1169,6 +1170,15 @@ class Crawler:
             for js_url in _extract_js_from_link_header(headers, url):
                 if self.scope.in_scope(js_url):
                     self._fetch_js(js_url, url)
+
+            # Response header URL extraction: Content-Location, Link, Refresh.
+            # These surface redirect targets, API gateway endpoints, and CDN
+            # references that never appear anywhere in the HTML body.
+            for header_url in extract_header_urls(headers, url):
+                norm = header_url.rstrip("/")
+                if norm not in self.visited_pages and self.scope.in_scope(header_url):
+                    self.visited_pages.add(norm)
+                    queue.append((header_url, depth + 1))
 
         # Inline scripts
         for script in extract_inline_scripts(content):
