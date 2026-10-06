@@ -224,6 +224,10 @@ RE_PURE_HASH         = re.compile(r'^[0-9a-f]{24,}$', re.IGNORECASE)
 # Base64 blob (contains = padding and long alphanum runs)
 RE_BASE64_BLOB       = re.compile(r'^[A-Za-z0-9+/]{32,}={0,2}$')
 
+# Base64 encoded as slash-segmented path (e.g. /9j/4AAQSkZJRgAB.../2wBD.../...)
+# Catches JPEG/PNG binary data served through img src= that leaks into endpoints
+RE_BASE64_PATH       = re.compile(r'^/?[A-Za-z0-9+/]{8,}(?:/[A-Za-z0-9+/]{8,}){2,}={0,2}$')
+
 # Version strings like "1.2.3", "v1.2.3", "v1.2.3-beta.1"
 RE_VERSION_STRING    = re.compile(
     r'^v?\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.]+)?(?:\+[a-zA-Z0-9.]+)?$',
@@ -859,9 +863,14 @@ def score_endpoint(url: str, surrounding_context: str = "") -> Tuple[int, List[s
     if RE_PURE_HASH.match(url.strip("/")):
         return -1000, [], ["pure_hash"]
 
-    # Base64 blob
+    # Base64 blob (bare or slash-segmented - catches JPEG binary in img src paths)
     if RE_BASE64_BLOB.match(url.strip("/")):
         return -1000, [], ["base64_blob"]
+    if RE_BASE64_PATH.match(url):
+        return -1000, [], ["base64_path"]
+    # JPEG SOI marker in base64 - /9j/ prefix is the canonical tell
+    if url.startswith("/9j/") or url.startswith("9j/"):
+        return -1000, [], ["jpeg_binary"]
 
     # Version string
     if RE_VERSION_STRING.match(url.strip("/")):
