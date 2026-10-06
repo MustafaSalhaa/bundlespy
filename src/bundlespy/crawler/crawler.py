@@ -33,11 +33,15 @@ Design rules:
 """
 
 import re
+import math
+import random
+import time
 import json
 import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from collections import deque
+from threading import Lock
 from typing import Set, List, Tuple, Optional, Dict
 from datetime import datetime
 from urllib.parse import urlparse, urljoin, urldefrag, urlunparse, quote_plus
@@ -350,6 +354,100 @@ RE_ASTRO_CHUNK = re.compile(
     r'["\']([^"\']*/_astro/[^"\']+\.js)["\']',
     re.IGNORECASE,
 )
+
+
+# ── Per-host adaptive backoff ─────────────────────────────────────────────────
+# Tracks consecutive throttle signals per host.
+# On 429/503: sleep exponentially (base * 2^n) + 50% jitter, capped at 30s.
+# On success: decrement so backoff naturally clears.
+
+_BACKOFF_BASE = 1.0   # seconds
+_BACKOFF_MAX  = 30.0  # seconds
+_THROTTLE_CODES = {429, 503}
+
+class _HostBackoff:
+    __slots__ = ("consecutive", "lock")
+    def __init__(self):
+        self.consecutive: int = 0
+        self.lock = Lock()
+
+    def apply(self) -> None:
+        with self.lock:
+            n = self.consecutive
+        if n <= 0:
+            return
+        delay  = min(_BACKOFF_BASE * (2 ** (n - 1)), _BACKOFF_MAX)
+        jitter = random.uniform(0, delay / 2)
+        time.sleep(delay + jitter)
+
+    def throttle(self) -> None:
+        with self.lock:
+            self.consecutive += 1
+
+    def success(self) -> None:
+        with self.lock:
+            if self.consecutive > 0:
+                self.consecutive -= 1
+
+_host_backoffs: Dict[str, _HostBackoff] = {}
+_backoff_lock = Lock()
+
+def _backoff_for(host: str) -> _HostBackoff:
+    with _backoff_lock:
+        if host not in _host_backoffs:
+            _host_backoffs[host] = _HostBackoff()
+        return _host_backoffs[host]
+
+
+# ── Logout URL protection ─────────────────────────────────────────────────────
+# Regex covers logout/signout variants in multiple languages.
+# Skipping these prevents authenticated sessions from being destroyed mid-crawl.
+
+_LOGOUT_PATTERN = re.compile(
+    r'(?i)(log[\s_\-]?out|sign[\s_\-]?out|signout|deconnexion|'
+    r'cerrar[\s_\-]?sesion|sair|abmelden|uitloggen|ausloggen|'
+    r'disconnect|terminate|end[\s_\-]?session|salir|desconectar|'
+    r'afmelden|wyloguj|sign[\s_\-]?off)'
+)
+
+def _is_logout_url(url: str) -> bool:
+    return bool(_LOGOUT_PATTERN.search(url))
+
+
+# ── Path climbing ─────────────────────────────────────────────────────────────
+# From https://target.com/api/v2/users/123 extract and queue parent paths:
+# /api/v2/users/, /api/v2/, /api/, /
+# Useful for finding unlisted admin panels, API roots, directory listings.
+
+def _extract_parent_paths(url: str) -> List[str]:
+    try:
+        p = urlparse(url)
+        parts = [seg for seg in p.path.split("/") if seg]
+        parents: List[str] = []
+        for i in range(len(parts) - 1, 0, -1):
+            parent_path = "/" + "/".join(parts[:i]) + "/"
+            parents.append(urlunparse((p.scheme, p.netloc, parent_path, "", "", "")))
+        # Root
+        parents.append(urlunparse((p.scheme, p.netloc, "/", "", "", "")))
+        return parents
+    except Exception:
+        return []
+
+
+# ── Cycle detection ───────────────────────────────────────────────────────────
+# Tracks the last N base paths seen in the queue per origin.
+# If the same normalized path appears more than _CYCLE_THRESHOLD times across
+# different parameter variants, the crawler is in a redirect/pagination loop.
+
+_CYCLE_THRESHOLD = 5  # same base path this many times = likely cycle
+
+def _url_base_path(url: str) -> str:
+    """Normalized path without query/fragment - used for cycle detection."""
+    try:
+        p = urlparse(url)
+        return f"{p.scheme}://{p.netloc}{p.path}".rstrip("/").lower()
+    except Exception:
+        return url.lower()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1004,27 +1102,46 @@ def _get_source_map_url(content: str, js_url: str) -> Optional[str]:
 class Crawler:
     def __init__(
         self,
-        target_url:   str,
-        fetcher:      Fetcher,
-        scope:        ScopeChecker,
-        max_depth:    int  = 2,
-        max_pages:    int  = 100,
-        max_js_files: int  = 1000,
-        common_paths: bool = False,
+        target_url:       str,
+        fetcher:          Fetcher,
+        scope:            ScopeChecker,
+        max_depth:        int  = 2,
+        max_pages:        int  = 100,
+        max_js_files:     int  = 1000,
+        common_paths:     bool = False,
+        # Per-domain page budget - prevents one large subdomain eating all max_pages.
+        # 0 = unlimited (default). When set, each unique hostname gets at most
+        # max_domain_pages pages visited before it is skipped.
+        max_domain_pages: int  = 0,
+        # When True, URLs matching logout patterns are skipped.
+        # Activate whenever --auth or --cookie is in use so sessions survive.
+        protect_session:  bool = False,
+        # When True, parent directory paths are extracted from every discovered URL
+        # and added to the crawl queue. Discovers unlisted admin panels / API roots.
+        path_climb:       bool = False,
     ):
-        self.target_url   = target_url
-        self.fetcher      = fetcher
-        self.scope        = scope
-        self.max_depth    = max_depth
-        self.max_pages    = max_pages
-        self.max_js_files = max_js_files
-        self.common_paths = common_paths
+        self.target_url       = target_url
+        self.fetcher          = fetcher
+        self.scope            = scope
+        self.max_depth        = max_depth
+        self.max_pages        = max_pages
+        self.max_js_files     = max_js_files
+        self.common_paths     = common_paths
+        self.max_domain_pages = max_domain_pages
+        self.protect_session  = protect_session
+        self.path_climb       = path_climb
 
         # Dedup state
         self.visited_pages:      Set[str] = set()
         self.visited_js:         Set[str] = set()   # normalized URLs
         self.seen_js_hashes:     Set[str] = set()   # content SHA256
         self.seen_inline_hashes: Set[str] = set()
+
+        # Per-domain page counter - key: hostname, value: pages queued for that host
+        self._domain_page_counts: Dict[str, int] = {}
+
+        # Cycle detection - tracks how many times each base path has been enqueued
+        self._path_enqueue_counts: Dict[str, int] = {}
 
         # Output
         self.js_files:       List[JSFile] = []
@@ -1045,6 +1162,66 @@ class Crawler:
     def _origin(self) -> str:
         p = urlparse(self.target_url)
         return f"{p.scheme}://{p.netloc}"
+
+    # ── Central queue gate ────────────────────────────────────────────────────
+
+    def _enqueue_page(self, url: str, depth: int, queue: deque) -> bool:
+        """
+        Gate for adding a page URL to the BFS queue.
+        Applies all validation checks in order and returns True if queued.
+
+        Checks (in order):
+          1. Depth limit
+          2. Already visited
+          3. Scope
+          4. Logout URL protection (when protect_session=True)
+          5. Per-domain page budget (when max_domain_pages > 0)
+          6. Cycle detection - same base path enqueued too many times
+        """
+        if depth > self.max_depth:
+            return False
+
+        # Normalize for visited check - strip trailing slash
+        norm = url.rstrip("/")
+        if norm in self.visited_pages:
+            return False
+
+        if not self.scope.in_scope(url):
+            return False
+
+        # Skip logout endpoints when we have an active session to protect
+        if self.protect_session and _is_logout_url(url):
+            logger.debug("Skipping logout URL (session protection): %s", url)
+            return False
+
+        # Per-domain page budget check
+        if self.max_domain_pages > 0:
+            try:
+                hostname = urlparse(url).hostname or ""
+                if hostname:
+                    count = self._domain_page_counts.get(hostname, 0)
+                    if count >= self.max_domain_pages:
+                        logger.debug(
+                            "Domain page limit (%d) reached for %s, skipping %s",
+                            self.max_domain_pages, hostname, url,
+                        )
+                        return False
+                    self._domain_page_counts[hostname] = count + 1
+            except Exception:
+                pass
+
+        # Cycle detection - same normalized base path seen too many times
+        # (catches pagination loops, infinite redirect chains with varying params)
+        base = _url_base_path(url)
+        path_count = self._path_enqueue_counts.get(base, 0) + 1
+        self._path_enqueue_counts[base] = path_count
+        if path_count > _CYCLE_THRESHOLD:
+            logger.debug("Cycle detected at path %s (%d hits), skipping %s", base, path_count, url)
+            return False
+
+        self.visited_pages.add(norm)
+        queue.append((url, depth))
+        return True
 
     def crawl(self) -> None:
         """Full crawl pipeline - runs all discovery methods."""
@@ -1068,21 +1245,25 @@ class Crawler:
 
         # Phase 5: sitemap -> page queue
         queue: deque = deque()
+        # Seed initial URL directly - bypass _enqueue_page depth/cycle checks for root
+        self.visited_pages.add(self.target_url.rstrip("/"))
         queue.append((self.target_url, 0))
-        self.visited_pages.add(self.target_url)
+        try:
+            root_hostname = urlparse(self.target_url).hostname or ""
+            if root_hostname and self.max_domain_pages > 0:
+                self._domain_page_counts[root_hostname] = 1
+        except Exception:
+            pass
         self._feed_sitemap_to_queue(origin, queue)
 
         # Phase 6: common page probes -> add live ones to queue
         for path in COMMON_PAGE_PATHS:
             probe_url = origin + path
-            if probe_url in self.visited_pages:
-                continue
             c, s, ct, _ = self.fetcher.get(probe_url)
             if s and s > 0:
                 self.page_access_states[probe_url] = s
             if c and 200 <= s < 300 and ("html" in (ct or "").lower() or "text" in (ct or "").lower()):
-                self.visited_pages.add(probe_url)
-                queue.append((probe_url, 1))
+                self._enqueue_page(probe_url, 1, queue)
 
         # Phase 7: BFS HTML crawl
         while queue and self.pages_crawled < self.max_pages:
@@ -1108,10 +1289,26 @@ class Crawler:
 
     def _crawl_page(self, url: str, depth: int, queue: deque) -> None:
         logger.debug("Crawling page: %s (depth %d)", url, depth)
+
+        # Apply per-host backoff before the request
+        try:
+            host = urlparse(url).hostname or ""
+            _backoff_for(host).apply()
+        except Exception:
+            host = ""
+
         content, status, content_type, _sha256, headers = self.fetcher.get_with_headers(url)
 
         if status and status > 0:
             self.page_access_states[url] = status
+
+        # Record throttle or success for adaptive backoff
+        if host:
+            if status in _THROTTLE_CODES:
+                _backoff_for(host).throttle()
+                logger.debug("Throttled by %s (HTTP %d), backing off", host, status)
+            elif status and status > 0:
+                _backoff_for(host).success()
 
         if not content or status not in range(200, 300):
             return
@@ -1185,10 +1382,7 @@ class Crawler:
             # These surface redirect targets, API gateway endpoints, and CDN
             # references that never appear anywhere in the HTML body.
             for header_url in extract_header_urls(headers, url):
-                norm = header_url.rstrip("/")
-                if norm not in self.visited_pages and self.scope.in_scope(header_url):
-                    self.visited_pages.add(norm)
-                    queue.append((header_url, depth + 1))
+                self._enqueue_page(header_url, depth + 1, queue)
 
         # Inline scripts
         for script in extract_inline_scripts(content):
@@ -1204,36 +1398,29 @@ class Crawler:
         effective_base_url = urljoin(url, base_href) if base_href else url
         if depth < self.max_depth:
             for link in extract_links(content, effective_base_url):
-                link_norm = link.rstrip("/")
-                if link_norm not in self.visited_pages and self.scope.in_scope(link):
-                    self.visited_pages.add(link_norm)
-                    queue.append((link, depth + 1))
+                self._enqueue_page(link, depth + 1, queue)
 
             # Gap 1: HTMX endpoints — hx-get/post/put/patch/delete targets
             for htmx_url in extract_htmx_endpoints(content, effective_base_url):
-                norm = htmx_url.rstrip("/")
-                if norm not in self.visited_pages and self.scope.in_scope(htmx_url):
-                    self.visited_pages.add(norm)
-                    queue.append((htmx_url, depth + 1))
+                self._enqueue_page(htmx_url, depth + 1, queue)
 
-            # Gap 3: Static GET form → navigation request
-            # Build ?name=value querystrings from GET forms and crawl them.
+            # Gap 3: Static GET form — build ?name=value querystrings and crawl them
             for form_url in _extract_form_get_urls(content, effective_base_url):
-                norm = form_url.rstrip("/")
-                if norm not in self.visited_pages and self.scope.in_scope(form_url):
-                    self.visited_pages.add(norm)
-                    queue.append((form_url, depth + 1))
+                self._enqueue_page(form_url, depth + 1, queue)
 
-            # Gap 4: <a ping> / <area ping> — add as visited endpoints
-            # These are POST tracking URLs; we don't crawl them but record them
-            # as visited pages so they appear in the access state map.
+            # Gap 4: <a ping> / <area ping> — POST tracking URLs
+            # Record as visited endpoints but don't recurse into them.
             for ping_url in extract_ping_urls(content, effective_base_url):
                 norm = ping_url.rstrip("/")
                 if norm not in self.visited_pages and self.scope.in_scope(ping_url):
                     self.visited_pages.add(norm)
-                    # Record at depth+1 but don't recurse — ping targets are
-                    # POST endpoints that return 200 with no navigable content.
                     self.page_access_states[ping_url] = 0  # unverified
+
+            # Path climbing — queue parent directory paths of the current URL
+            # Helps discover unlisted API roots, admin panels, and directory listings.
+            if self.path_climb:
+                for parent_url in _extract_parent_paths(url):
+                    self._enqueue_page(parent_url, depth + 1, queue)
 
     def _extract_all_js_from_html(
         self,
@@ -1522,9 +1709,7 @@ class Crawler:
                             for loc in child_root.findall(".//sm:url/sm:loc", ns):
                                 if loc.text:
                                     page = loc.text.strip()
-                                    if page not in self.visited_pages and self.scope.in_scope(page):
-                                        self.visited_pages.add(page)
-                                        queue.append((page, 1))
+                                    if self._enqueue_page(page, 1, queue):
                                         total_queued += 1
                         except Exception:
                             pass
@@ -1533,9 +1718,7 @@ class Crawler:
                 for loc in root.findall(".//sm:url/sm:loc", ns):
                     if loc.text:
                         page = loc.text.strip()
-                        if page not in self.visited_pages and self.scope.in_scope(page):
-                            self.visited_pages.add(page)
-                            queue.append((page, 1))
+                        if self._enqueue_page(page, 1, queue):
                             total_queued += 1
 
                 if total_queued > 0:
