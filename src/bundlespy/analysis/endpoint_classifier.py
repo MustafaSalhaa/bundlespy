@@ -960,6 +960,20 @@ def score_endpoint(url: str, surrounding_context: str = "") -> Tuple[int, List[s
     if stripped in _CHART_TOKENS and "/" not in stripped:
         return -1000, [], ["chart_token_bare"]
 
+    # ---- Opaque token check -------------------------------------------------
+    # Netlify short-link tokens, deploy IDs, content hashes that leak from
+    # analytics/RUM scripts. Two rules (same as headless.py):
+    #   1. Purely alphanumeric seg with mixed case - e.g. tNKgr4GnJ5SCpBpu, siJv
+    #   2. All-uppercase seg with digit, >= 4 chars - e.g. ALLTKG5, BUQ7X
+    _opaque_segs = [s for s in url.strip("/").split("/") if s]
+    for _seg in _opaque_segs:
+        if not re.match(r'^[A-Za-z0-9]{3,64}$', _seg):
+            continue
+        if _seg != _seg.lower() and _seg != _seg.upper():
+            return -1000, [], ["opaque_token_mixed_case"]
+        if _seg == _seg.upper() and any(c.isdigit() for c in _seg) and len(_seg) >= 4:
+            return -1000, [], ["opaque_token_upper_digit"]
+
     # ---- Structural signals ------------------------------------------------
 
     if RE_STARTS_SLASH.match(url):
