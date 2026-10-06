@@ -3,13 +3,25 @@ HTML parser for discovering JavaScript files and links from HTML pages.
 
 Extraction coverage:
   - <script src> / <link rel=preload as=script>
+  - <link href> — all relations (preload, prefetch, canonical, alternate, api…)
   - <a href> crawlable links
   - <form action> — static form submission as navigation request
+  - <button formaction> — per-button form override target
+  - <html manifest> — PWA manifest JSON reference
   - <a ping> / <area ping> — tracking ping URLs
+  - <area href> — image-map navigation links
   - HTMX attributes: hx-get, hx-post, hx-put, hx-patch, hx-delete
-  - <iframe srcdoc> — inline HTML content (extracts relative endpoints)
-  - SVG internal hrefs: <image href>, <script href> inside SVG
+  - <iframe src> / <iframe srcdoc> — frame navigation + inline HTML endpoints
+  - <frame src> / <embed src> — legacy frame and plugin targets
+  - <object data> / <object codebase> + param value — plugin/PDF endpoints
+  - SVG: <image href/xlink:href>, <script href/xlink:href>
   - <isindex action> — legacy isindex tag
+  - <import implementation> — HTML import (deprecated Web Components spec)
+  - <base href> — document base URL hint
+  - <blockquote cite> — cited source URL
+  - Media: <audio src>, <video src/poster>, <img src/srcset/dynsrc/lowsrc/longdesc>
+  - Table backgrounds: <table background>, <td background>
+  - <body background> — legacy background image URL
   - onclick / data-href / meta-refresh
 """
 
@@ -34,14 +46,82 @@ RE_PRELOAD_ALT     = re.compile(
     re.IGNORECASE,
 )
 
+# ── Generic <link href> ───────────────────────────────────────────────────────
+# Captures ALL <link href> values regardless of rel= type.
+# Covers prefetch, canonical, alternate, api, manifest, stylesheet, and more.
+# Preload/modulepreload above are kept separately for the extract_js_urls path.
+RE_LINK_HREF       = re.compile(r'<link\b[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
+
 # ── Standard link sources ─────────────────────────────────────────────────────
 
-RE_HREF            = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_HREF            = re.compile(r'<a\b[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
 RE_INLINE          = re.compile(r'<script(?:[^>]*)>(.*?)</script>', re.IGNORECASE | re.DOTALL)
-RE_FORM_ACTION     = re.compile(r'<form[^>]+action=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_FORM_ACTION     = re.compile(r'<form\b[^>]+action=["\']([^"\']+)["\']', re.IGNORECASE)
 RE_ONCLICK_LOC     = re.compile(r'(?:location\.href|window\.location)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 RE_DATA_HREF       = re.compile(r'data-(?:href|url|link|target)=["\']([^"\']+)["\']', re.IGNORECASE)
 RE_META_REFRESH    = re.compile(r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^;]+;\s*url=([^"\']+)["\']', re.IGNORECASE)
+
+# ── Button / form overrides ───────────────────────────────────────────────────
+# <button formaction="/api/delete"> overrides the parent <form action>.
+# The browser submits to formaction, not action — so it's a distinct endpoint.
+RE_BUTTON_FORMACTION = re.compile(r'<button\b[^>]+formaction=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# ── PWA manifest ─────────────────────────────────────────────────────────────
+# <html manifest="/app.appcache"> — legacy AppCache.
+# <link rel="manifest" href="/manifest.json"> is caught by RE_LINK_HREF above.
+RE_HTML_MANIFEST   = re.compile(r'<html\b[^>]+manifest=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# ── Blockquote cite ───────────────────────────────────────────────────────────
+RE_BLOCKQUOTE_CITE = re.compile(r'<blockquote\b[^>]+cite=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# ── Meta content endpoint extraction ─────────────────────────────────────────
+# <meta name="..." content="..."> values occasionally embed relative endpoints.
+# We extract any value that looks like a path (starts with /).
+RE_META_CONTENT    = re.compile(r'<meta\b[^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
+_RE_META_PATH      = re.compile(r'(/[a-zA-Z0-9/_\-%.?=&]{2,})')
+
+# ── Media tags ───────────────────────────────────────────────────────────────
+# These carry real resource URLs. <object data> is particularly interesting
+# because it can point to internal PDF viewers, internal service endpoints,
+# or legacy Flash/Silverlight resources.
+
+# <audio src> and <video src/poster>
+RE_AUDIO_SRC       = re.compile(r'<audio\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_VIDEO_SRC       = re.compile(r'<video\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_VIDEO_POSTER    = re.compile(r'<video\b[^>]+poster=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <source src/srcset> nested inside <audio>/<video>
+RE_SOURCE_SRC      = re.compile(r'<source\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_SOURCE_SRCSET   = re.compile(r'<source\b[^>]+srcset=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <img> - full attribute set including non-standard ones
+RE_IMG_SRC         = re.compile(r'<img\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_IMG_SRCSET      = re.compile(r'<img\b[^>]+srcset=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_IMG_DYNSRC      = re.compile(r'<img\b[^>]+dynsrc=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_IMG_LOWSRC      = re.compile(r'<img\b[^>]+lowsrc=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_IMG_LONGDESC    = re.compile(r'<img\b[^>]+longdesc=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <object data/codebase> + nested <param value>
+RE_OBJECT_DATA     = re.compile(r'<object\b[^>]+data=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_OBJECT_CODEBASE = re.compile(r'<object\b[^>]+codebase=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_PARAM_VALUE     = re.compile(r'<param\b[^>]+value=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <table background> and <td background> (legacy HTML attribute)
+RE_TABLE_BG        = re.compile(r'<table\b[^>]+background=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_TD_BG           = re.compile(r'<td\b[^>]+background=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <body background> - even older legacy attribute
+RE_BODY_BG         = re.compile(r'<body\b[^>]+background=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <frame src> and <embed src>
+RE_FRAME_SRC       = re.compile(r'<frame\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_EMBED_SRC       = re.compile(r'<embed\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# <iframe src> — the URL target (not srcdoc which is handled separately)
+RE_IFRAME_SRC      = re.compile(r'<iframe\b[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# srcset parser - "url1 1x, url2 2x" or "url1 640w, url2 1280w"
+_RE_SRCSET_ENTRY   = re.compile(r'([^\s,][^\s,]*)(?:\s+\d+(?:\.\d+)?[wx])?')
 
 # ── Gap 1: HTMX attributes ────────────────────────────────────────────────────
 # hx-get/post/put/patch/delete fire AJAX requests that carry real endpoints.
@@ -116,27 +196,46 @@ def extract_links(html: str, base_url: str) -> List[str]:
     Covers:
       - <a href> — standard navigation
       - <form action> — GET form targets as navigation
+      - <button formaction> — per-button form action override
+      - <html manifest> — PWA/AppCache manifest reference
+      - <link href> — ALL rel types (preload, prefetch, canonical, alternate…)
+      - <area href> — image map navigation links
       - onclick= window.location / location.href assignments
       - data-href / data-url / data-link / data-target attributes
       - <meta http-equiv="refresh"> redirects
-      - HTMX hx-get/post/put/patch/delete endpoints  [Gap 1]
-      - <a ping> / <area ping> tracking URLs          [Gap 4]
-      - <iframe srcdoc> inline HTML endpoints         [Gap 5]
-      - SVG <image href> resource references          [Gap 6]
-      - <isindex action> legacy form targets          [Gap 8]
+      - <meta content> embedded path references
+      - HTMX hx-get/post/put/patch/delete endpoints
+      - <a ping> / <area ping> tracking URLs
+      - <iframe src> / <frame src> / <embed src> — frame navigation
+      - <iframe srcdoc> inline HTML endpoints (one level deep)
+      - <object data/codebase> + <param value> — plugin/PDF endpoints
+      - SVG <image href/xlink:href> and <script href/xlink:href>
+      - <isindex action> / <import implementation> legacy targets
+      - <blockquote cite> — cited source URL
+      - <base href> — document base hint
+      - Media: <audio src>, <video src/poster>, <source src/srcset>
+      - <img src/srcset/dynsrc/lowsrc/longdesc>
+      - <table background>, <td background>, <body background>
     """
     links: Set[str] = set()
 
     def _add(raw: str) -> None:
         raw = raw.strip()
-        if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
+        if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "#", "data:", "vbscript:")):
             return
         absolute = _make_absolute(raw, base_url)
         if absolute:
             url_no_fragment, _ = urldefrag(absolute)
             links.add(url_no_fragment)
 
-    # Standard sources
+    def _add_srcset(srcset_val: str) -> None:
+        """Parse a srcset attribute: 'url1 1x, url2 2x' or 'url1 640w, url2 1280w'."""
+        for entry in srcset_val.split(","):
+            parts = entry.strip().split()
+            if parts:
+                _add(parts[0])
+
+    # Standard navigation
     for match in RE_HREF.finditer(html):
         _add(match.group(1))
     for match in RE_FORM_ACTION.finditer(html):
@@ -148,18 +247,37 @@ def extract_links(html: str, base_url: str) -> List[str]:
     for match in RE_META_REFRESH.finditer(html):
         _add(match.group(1))
 
-    # Gap 1: HTMX attributes — every hx-* value is a live backend endpoint
+    # Button formaction - overrides parent form action, distinct endpoint
+    for match in RE_BUTTON_FORMACTION.finditer(html):
+        _add(match.group(1))
+
+    # PWA/AppCache manifest reference on <html> element
+    for match in RE_HTML_MANIFEST.finditer(html):
+        _add(match.group(1))
+
+    # <link href> — all rel types, not just preload
+    for match in RE_LINK_HREF.finditer(html):
+        raw = match.group(1).strip()
+        # Skip CSS/font/icon links — they're not navigation targets
+        if raw and not any(raw.endswith(ext) for ext in (".css", ".woff", ".woff2", ".ttf", ".otf", ".ico")):
+            _add(raw)
+
+    # HTMX attributes — every hx-* value is a live backend endpoint
     for match in RE_HTMX_ATTRS.finditer(html):
         _add(match.group(1))
 
-    # Gap 4: <a ping> / <area ping> — space-separated list of POST ping URLs
+    # <a ping> / <area ping> — space-separated list of POST ping URLs
     for pattern in (RE_A_PING, RE_AREA_PING):
         for match in pattern.finditer(html):
             for url in match.group(1).split():
                 _add(url)
 
-    # Gap 5: <iframe srcdoc> — recurse into the inline HTML (one level deep).
-    # We try double-quoted pattern first, then single-quoted.
+    # <frame src>, <embed src>, <iframe src>
+    for pattern in (RE_FRAME_SRC, RE_EMBED_SRC, RE_IFRAME_SRC):
+        for match in pattern.finditer(html):
+            _add(match.group(1))
+
+    # <iframe srcdoc> — recurse into the inline HTML (one level deep)
     _srcdoc_seen: Set[str] = set()
     for pattern in (RE_IFRAME_SRCDOC_DQ, RE_IFRAME_SRCDOC_SQ):
         for match in pattern.finditer(html):
@@ -168,20 +286,68 @@ def extract_links(html: str, base_url: str) -> List[str]:
                 continue
             _srcdoc_seen.add(raw_srcdoc)
             srcdoc_html = _unescape_attr(raw_srcdoc)
-            # Pull links from the inline document; they resolve relative to base_url
             for link in extract_links(srcdoc_html, base_url):
                 links.add(link)
 
-    # Gap 6: SVG <image href> — external image/resource references inside SVG
+    # <object data/codebase> and nested <param value>
+    for pattern in (RE_OBJECT_DATA, RE_OBJECT_CODEBASE, RE_PARAM_VALUE):
+        for match in pattern.finditer(html):
+            raw = match.group(1).strip()
+            # Param values are often not URLs — only add if they look like paths
+            if raw and (raw.startswith("/") or raw.startswith("http")):
+                _add(raw)
+
+    # SVG <image href/xlink:href> and <script href/xlink:href>
     for match in RE_SVG_IMAGE_HREF.finditer(html):
         raw = match.group(1).strip()
-        # Skip inline data URIs and fragment-only references
         if not raw.startswith("data:") and not raw.startswith("#"):
             _add(raw)
 
-    # Gap 8: <isindex action> — legacy form target URL
+    # <isindex action> — legacy HTML4 form target
     for match in RE_ISINDEX_ACTION.finditer(html):
         _add(match.group(1))
+
+    # <blockquote cite> — cited source URL
+    for match in RE_BLOCKQUOTE_CITE.finditer(html):
+        _add(match.group(1))
+
+    # <meta content> — extract path-like values (e.g. Open Graph URLs, API paths)
+    for match in RE_META_CONTENT.finditer(html):
+        content_val = match.group(1).strip()
+        # Full absolute URL in content= value
+        if content_val.startswith(("http://", "https://")):
+            _add(content_val)
+        else:
+            # Extract embedded relative paths like /api/v1/something
+            for path_m in _RE_META_PATH.finditer(content_val):
+                _add(path_m.group(1))
+
+    # Media: <audio src>, <video src/poster>
+    for pattern in (RE_AUDIO_SRC, RE_VIDEO_SRC, RE_VIDEO_POSTER):
+        for match in pattern.finditer(html):
+            _add(match.group(1))
+
+    # <source src/srcset> nested inside audio/video
+    for match in RE_SOURCE_SRC.finditer(html):
+        _add(match.group(1))
+    for match in RE_SOURCE_SRCSET.finditer(html):
+        _add_srcset(match.group(1))
+
+    # <img> — skip data: URIs, capture src + srcset + legacy attributes
+    for match in RE_IMG_SRC.finditer(html):
+        raw = match.group(1).strip()
+        if not raw.startswith("data:"):
+            _add(raw)
+    for match in RE_IMG_SRCSET.finditer(html):
+        _add_srcset(match.group(1))
+    for pattern in (RE_IMG_DYNSRC, RE_IMG_LOWSRC, RE_IMG_LONGDESC):
+        for match in pattern.finditer(html):
+            _add(match.group(1))
+
+    # Table and body backgrounds (legacy HTML attribute)
+    for pattern in (RE_TABLE_BG, RE_TD_BG, RE_BODY_BG):
+        for match in pattern.finditer(html):
+            _add(match.group(1))
 
     return list(links)
 
