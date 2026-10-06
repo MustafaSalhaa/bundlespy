@@ -535,7 +535,8 @@ def _extract_form_get_urls(html: str, base_url: str) -> List[str]:
             # Form has no named fields — just add the action URL as a link
             urls.append(action_url)
 
-    return urls
+    # Final dedup - same URL from multiple form matches only appears once
+    return list(dict.fromkeys(urls))
 
 
 def _extract_js_from_manifest(content: str, base_url: str) -> List[str]:
