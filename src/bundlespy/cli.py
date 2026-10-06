@@ -1165,6 +1165,8 @@ def run_scan(args) -> int:
         from .storage.models import Endpoint as _Endpoint
         _crawled_pages = getattr(crawler, "visited_pages", set()) or set()
         _seen_ep = {ep.url.rstrip("/").lower().split("?")[0] for ep in all_endpoints}
+        import re as _re
+        _RE_B64_SEG = _re.compile(r'^[A-Za-z0-9+/]{32,}={0,2}$')
         for _page_url in _crawled_pages:
             _pp   = _up(_page_url)
             _path = _pp.path or "/"
@@ -1176,6 +1178,14 @@ def run_scan(args) -> int:
                 continue
             # Skip if the full URL is just the target root
             if _page_url.rstrip("/").lower() == target.rstrip("/").lower():
+                continue
+            # Skip binary/base64 garbage paths - JPEG SOI prefix, long base64 segments
+            _path_segs = [s for s in _path.split("/") if s]
+            if _path.startswith("/9j/"):
+                continue
+            if any(len(s) > 128 for s in _path_segs):
+                continue
+            if any(_RE_B64_SEG.match(s) for s in _path_segs):
                 continue
             _seen_ep.add(_key)
             # Categorize the page route
@@ -1591,6 +1601,13 @@ def run_scan(args) -> int:
     elif args.quiet and file_paths:
         for fmt, path in file_paths.items():
             print(path)
+
+    # Close the session - releases all urllib3 keep-alive sockets so the
+    # process exits cleanly without waiting for the connection pool to drain.
+    try:
+        fetcher.close()
+    except Exception:
+        pass
 
     critical = [f for f in all_findings
                 if f.severity == "CRITICAL" and f.status != "likely_false_positive"]
