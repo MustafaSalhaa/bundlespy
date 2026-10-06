@@ -291,6 +291,18 @@ def _is_valid_route(path: str) -> bool:
     if any(len(s) > 128 for s in _segs):
         return False
 
+    # Opaque token check - short-link tokens, deploy IDs, content hashes.
+    # Rules match headless.py _is_opaque_token_path():
+    #   1. Purely alphanumeric with mixed case (e.g. tNKgr4GnJ5SCpBpu, siJv)
+    #   2. All-uppercase with a digit, >= 4 chars (e.g. ALLTKG5, BUQ7X)
+    for _seg in _segs:
+        if not re.match(r'^[A-Za-z0-9]{3,64}$', _seg):
+            continue
+        if _seg != _seg.lower() and _seg != _seg.upper():
+            return False
+        if _seg == _seg.upper() and any(c.isdigit() for c in _seg) and len(_seg) >= 4:
+            return False
+
     # Skip known noise prefixes
     for prefix in _SKIP_PREFIXES:
         if path.startswith(prefix):
