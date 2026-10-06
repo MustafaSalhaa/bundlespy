@@ -101,9 +101,12 @@ other:
     _cg.add_argument("--max-js",       type=int, default=1000, metavar="N", help="Max JS files to collect (default: 1000)")
     _cg.add_argument("--rate",         type=int, default=3,    metavar="N", help="Requests per second (default: 3)")
     _cg.add_argument("--timeout",      type=int, default=10,   metavar="S", help="Per-request timeout in seconds (default: 10)")
-    _cg.add_argument("--common-paths", action="store_true",                  help="Probe common paths (/robots.txt, /sitemap.xml, etc.)")
-    _cg.add_argument("--subdomains",   action="store_true",                  help="Follow links to subdomains of the target")
-    _cg.add_argument("--exclude",      nargs="+", default=[],  metavar="PAT", help="URL patterns to exclude from crawl (substring match)")
+    _cg.add_argument("--common-paths",     action="store_true",                  help="Probe common paths (/robots.txt, /sitemap.xml, etc.)")
+    _cg.add_argument("--subdomains",       action="store_true",                  help="Follow links to subdomains of the target")
+    _cg.add_argument("--exclude",          nargs="+", default=[],  metavar="PAT", help="URL patterns to exclude from crawl (substring match)")
+    _cg.add_argument("--max-domain-pages", type=int,  default=0,   metavar="N",   help="Max pages per hostname - prevents one subdomain eating the full budget (default: 0 = unlimited)")
+    _cg.add_argument("--protect-session",  action="store_true",                   help="Skip logout/signout URLs to keep authenticated sessions alive during crawl")
+    _cg.add_argument("--path-climb",       action="store_true",                   help="Queue parent directory paths of every discovered URL to find unlisted admin panels and API roots")
 
     # Features
     _fg = scan.add_argument_group("features")
@@ -607,6 +610,9 @@ def run_scan(args) -> int:
             target_url=target, fetcher=fetcher, scope=scope,
             max_depth=args.depth, max_pages=args.max_pages,
             max_js_files=args.max_js, common_paths=args.common_paths,
+            max_domain_pages=getattr(args, "max_domain_pages", 0) or 0,
+            protect_session=getattr(args, "protect_session", False),
+            path_climb=getattr(args, "path_climb", False),
         )
         try:
             crawler.crawl()
