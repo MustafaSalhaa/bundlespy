@@ -122,6 +122,8 @@ other:
     _hg = scan.add_argument_group("headless options (require --headless)")
     _hg.add_argument("--workers",     type=int, default=5, metavar="N",
                      help="Parallel browser instances for headless scan (default: 5; lower to 1-2 if WAF is active)")
+    _hg.add_argument("--interact",    action="store_true",
+                     help="Enable safe UI interaction: expand nav tabs, accordions, dropdowns (whitelist-only, never submits forms or clicks destructive elements)")
 
     # Auth
     _ag = scan.add_argument_group("authentication")
@@ -816,13 +818,13 @@ def run_scan(args) -> int:
             max_pages     = args.max_pages,
             external_seen = crawler_seen,
             seed_urls     = all_seed_urls,
-            interact      = False,   # passive mode - interaction retired
+            interact      = getattr(args, "interact", False),
             workers       = getattr(args, "workers", 5),
             num_browsers  = getattr(args, "workers", 5),
             cookies       = _playwright_cookies,
             extra_headers = extra_headers,
             seen_hashes   = _crawler_js_hashes,
-            forms_mode    = False,   # passive mode - form interaction retired
+            forms_mode    = getattr(args, "interact", False),
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
