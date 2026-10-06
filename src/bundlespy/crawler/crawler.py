@@ -464,6 +464,9 @@ def _extract_form_get_urls(html: str, base_url: str) -> List[str]:
     The headless FormInteractor handles them under --forms.
     """
     urls: List[str] = []
+    # Dedup by action URL - same <form action> appearing multiple times (e.g. from
+    # nested HTML, shortcodes, or widget wrappers) should only generate one GET URL
+    seen_actions: Set[str] = set()
 
     for form_match in RE_FORM_BLOCK.finditer(html):
         attrs_str  = form_match.group(1)
@@ -484,34 +487,45 @@ def _extract_form_get_urls(html: str, base_url: str) -> List[str]:
         if not action_url.startswith(("http://", "https://")):
             continue
 
-        # Collect field names - URL-encode everything, deduplicate by normalized name
+        # Skip if we already built a URL for this action - handles duplicate form matches
+        action_key = action_url.rstrip("/").lower()
+        if action_key in seen_actions:
+            continue
+        seen_actions.add(action_key)
+
+        # Collect field names - dedup by normalized (lowercase, stripped) name
         params: List[str] = []
         seen_names: Set[str] = set()
 
-        def _add_field(name: str, val: str = "test") -> None:
-            # Normalize name for dedup: lowercase, strip whitespace
-            key = name.strip().lower()
-            if not key or key in seen_names:
-                return
-            seen_names.add(key)
-            # URL-encode both name and value - spaces become %20, special chars escaped
-            params.append(f"{quote_plus(name.strip())}={quote_plus(val.strip() or 'test')}")
-
-        # <input name="foo" value="bar"> - name-then-value attribute order
         for inp_m in RE_INPUT_NAME_VAL.finditer(form_body):
-            _add_field(inp_m.group(1), inp_m.group(2) or "")
+            name = inp_m.group(1).strip()
+            val  = (inp_m.group(2) or "").strip() or "test"
+            key  = name.lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                params.append(f"{quote_plus(name)}={quote_plus(val)}")
 
-        # <input value="bar" name="foo"> - value-before-name attribute order
         for inp_m in RE_INPUT_VAL_NAME.finditer(form_body):
-            _add_field(inp_m.group(2), inp_m.group(1) or "")
+            name = inp_m.group(2).strip()
+            val  = (inp_m.group(1) or "").strip() or "test"
+            key  = name.lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                params.append(f"{quote_plus(name)}={quote_plus(val)}")
 
-        # <select name="sort">
         for sel_m in RE_SELECT_NAME.finditer(form_body):
-            _add_field(sel_m.group(1), "0")
+            name = sel_m.group(1).strip()
+            key  = name.lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                params.append(f"{quote_plus(name)}=0")
 
-        # <textarea name="message">
         for ta_m in RE_TEXTAREA_NAME.finditer(form_body):
-            _add_field(ta_m.group(1), "test")
+            name = ta_m.group(1).strip()
+            key  = name.lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                params.append(f"{quote_plus(name)}=test")
 
         if params:
             qs  = "&".join(params)
