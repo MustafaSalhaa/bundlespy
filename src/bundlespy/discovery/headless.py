@@ -53,6 +53,33 @@ from .form_interactor import FormInteractor
 
 logger = logging.getLogger("bundlespy.discovery.headless")
 
+# ── Opaque token filter ────────────────────────────────────────────────────────
+# Rejects short-link tokens, deploy IDs, and content hashes that look like
+# routes but are not - e.g. /tNKgr4GnJ5SCpBpu, /AAq8cLij, /ALLTKG5, /siJv
+# Rules:
+#   1. Purely alphanumeric segment (no hyphens/underscores/dots) with mixed case
+#   2. Purely alphanumeric, all-uppercase, >= 4 chars, contains a digit (e.g. ALLTKG5)
+# Real routes are lowercase words or use separators: /admin, /api, /sign-in, /v2
+_RE_OPAQUE_TOKEN = re.compile(r'^[A-Za-z0-9]{3,64}$')
+
+def _is_opaque_token_path(path: str) -> bool:
+    """Return True when the path looks like a short-link/deploy token, not a route."""
+    segs = [s for s in path.strip("/").split("/") if s]
+    if not segs:
+        return False
+    for seg in segs:
+        if not _RE_OPAQUE_TOKEN.match(seg):
+            # Contains separator chars - could be a real route word
+            continue
+        # Mixed case (both upper and lower letters) - classic token pattern
+        if seg != seg.lower() and seg != seg.upper():
+            return True
+        # All-uppercase with at least one digit and >= 4 chars - e.g. ALLTKG5, BUQ7X
+        # Real uppercase route segments don't contain digits: /API, /V2 are fine at len 2-3
+        if seg == seg.upper() and any(c.isdigit() for c in seg) and len(seg) >= 4:
+            return True
+    return False
+
 # Max response body size captured eagerly in the on_response callback.
 # Larger bodies are skipped for body-dependent features (ResponseParser,
 # tech fingerprinting, raw capture) but JS files still get captured via
@@ -2895,6 +2922,10 @@ class ResponseParser:
             if any(path_lower.endswith(ext) for ext in _RP_SKIP_EXTS):
                 continue
 
+            # Reject opaque token paths - short-link tokens and deploy IDs
+            if _is_opaque_token_path(parsed.path):
+                continue
+
             # Normalize: strip tracking params, keep functional query strings
             _TRACKING = frozenset([
                 "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
@@ -4164,6 +4195,11 @@ class HeadlessEngine:
         and the second always returns False, preventing anything from being added.
         """
         path_only = route.split("?")[0]
+        # Reject opaque token paths - short-link tokens, deploy IDs, content hashes.
+        # These come from Netlify RUM scripts, analytics beacons, and CDN responses
+        # that embed token URLs in JS strings. They are NOT application routes.
+        if _is_opaque_token_path(path_only):
+            return False
         # Register bare path for coverage stats ONLY when route has a query string.
         # If path_only == route (no query), skip this call — we do it below.
         if path_only != route:
