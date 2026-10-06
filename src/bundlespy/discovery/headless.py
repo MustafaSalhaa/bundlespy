@@ -100,12 +100,12 @@ class ActionType(Enum):
 class CrawlAction:
     """
     A typed crawl action — models a state transition, not just a URL visit.
-    Inspired by Katana's action-based crawl graph.
+    Inspired by BundleSpy's action-based crawl graph.
 
     origin_id: SHA-256 prefix of the DOM fingerprint of the page state from
     which this action was discovered.  Before executing the action the engine
     checks that the browser is still on that state; if not it navigates back
-    (navigateBackToStateOrigin pattern from Katana's crawler.go).
+    (navigateBackToStateOrigin pattern from BundleSpy's crawler.go).
     """
     action_type: ActionType
     url:         str
@@ -137,7 +137,7 @@ class _PageState:
 class CrawlGraph:
     """
     Directed Acyclic Graph of page states and the action edges that connect them.
-    Mirrors Katana's CrawlGraph (crawler.go).
+    Mirrors BundleSpy's CrawlGraph (crawler.go).
 
     Nodes = page states (keyed by DOM fingerprint / origin_id).
     Edges = CrawlActions that transition between states.
@@ -170,7 +170,7 @@ class CrawlGraph:
     def find_similar_state(self, simhash: int, threshold: int = 2) -> Optional["_PageState"]:
         """Return the first stored state whose simhash Hamming distance from
         the given value is <= threshold. Returns None if nothing is close enough.
-        Uses the same threshold as Katana (default 2 bits)."""
+        Uses the same threshold as BundleSpy (default 2 bits)."""
         with self._lock:
             for state in self._nodes.values():
                 if state.simhash == 0:
@@ -258,7 +258,7 @@ class DiagnosticsWriter:
     is printed to the log at startup.  Screenshots are written as PNG files
     named by action index.  A JSON-lines action log is also written.
 
-    Mirrors Katana's DiagnosticsWriter pattern.
+    Mirrors BundleSpy's DiagnosticsWriter pattern.
     """
 
     def __init__(self, label: str = "bundlespy") -> None:
@@ -310,7 +310,7 @@ class DiagnosticsWriter:
 class LoginStep:
     """
     One step in a recorded authentication flow.
-    Mirrors Katana's auth.StepsFromFile / RecordedFlow replay.
+    Mirrors BundleSpy's auth.StepsFromFile / RecordedFlow replay.
 
     step_type values:
       "navigate"       — navigate the browser to `url`
@@ -336,7 +336,7 @@ class CrawlHooks:
     relevant) and are called synchronously in the Playwright thread.
     None = no-op for that hook.
 
-    Mirrors Katana's Hooks interface.
+    Mirrors BundleSpy's Hooks interface.
     (Enhancement 4 — Hooks system)
     """
     before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
@@ -525,7 +525,7 @@ _CAPTCHA_TEXT_MARKERS = (
 )
 
 # ── DIT-style login form heuristics (enhanced) ───────────────────────────────
-# Katana uses a DIT classifier for login form detection that handles obfuscated
+# BundleSpy uses a DIT classifier for login form detection that handles obfuscated
 # field names and React-rendered forms where field names are hashed or minified.
 # These patterns capture field name variants used by common obfuscated forms.
 
@@ -1190,7 +1190,7 @@ EXTRACT_ROUTES_JS = """
     } catch(e) {}
 
     // Anchor links — preserve query strings so filter URLs like
-    // /projects?category=E-Commerce are discovered (Katana gap fix)
+    // /projects?category=E-Commerce are discovered (BundleSpy gap fix)
     document.querySelectorAll('a[href],[routerLink],[ng-href]').forEach(el => {
         try {
             const h = el.getAttribute('href') || el.getAttribute('routerLink') || el.getAttribute('ng-href') || '';
@@ -1212,8 +1212,8 @@ EXTRACT_ROUTES_JS = """
         });
     });
 
-    // link[rel] tags — manifest, canonical, alternate (Katana gap fix)
-    // Katana picks up /site.webmanifest via link[rel=manifest]; we were missing it
+    // link[rel] tags — manifest, canonical, alternate (BundleSpy gap fix)
+    // BundleSpy picks up /site.webmanifest via link[rel=manifest]; we were missing it
     document.querySelectorAll('link[rel][href]').forEach(el => {
         try {
             const rel = (el.getAttribute('rel') || '').toLowerCase();
@@ -1334,7 +1334,7 @@ class AssetRegistry:
         fragments are always stripped.
 
         This lets BundleSpy discover filter pages like
-        /projects?category=E-Commerce that Katana finds via anchor hrefs,
+        /projects?category=E-Commerce that BundleSpy finds via anchor hrefs,
         while still collapsing pagination noise like ?page=2&page=3.
         """
         # Tracking / noise params to always strip
@@ -1527,9 +1527,9 @@ class PageStabilizer:
 
 def _wait_heuristic(page, max_ms: int = 15000) -> None:
     """
-    Gap 1: Heuristic page-load strategy — ported from Katana's WaitPageLoadHeurisitics.
+    Gap 1: Heuristic page-load strategy — ported from BundleSpy's WaitPageLoadHeurisitics.
 
-    Katana's heuristic is the most robust strategy for modern SPAs. Instead of
+    BundleSpy's heuristic is the most robust strategy for modern SPAs. Instead of
     blindly waiting for a fixed event, it:
 
     1. Waits for the basic load event (DOMContentLoaded).
@@ -1644,10 +1644,10 @@ def _attach_cdp_fetch_interception(
     capture_response_types: Optional[set] = None,
 ) -> Optional[object]:
     """
-    Gap 2: CDP-level Fetch.requestPaused interception — ported from Katana's
+    Gap 2: CDP-level Fetch.requestPaused interception — ported from BundleSpy's
     FetchRequestStage/FetchResponseStage pipeline in browser.go.
 
-    Katana intercepts every request and response at the CDP Fetch domain level,
+    BundleSpy intercepts every request and response at the CDP Fetch domain level,
     giving access to raw POST bodies and raw response bytes that Playwright's
     high-level response event can miss (cached responses, service-worker
     intercepts, partial reads).
@@ -1869,7 +1869,7 @@ def _parse_extra_headers(extra_headers: dict) -> dict:
 
 
 # ── PathTrie — URL structural deduplication ───────────────────────────────────
-# Mirrors Katana's FilterSimilar / PathTrie implementation.
+# Mirrors BundleSpy's FilterSimilar / PathTrie implementation.
 # Replaces numeric / UUID path segments with a wildcard token so that
 # /item/1, /item/2, /item/1337 all collapse to /item/* and are treated as
 # one unique structural pattern.  Configurable threshold controls how many
@@ -2153,7 +2153,7 @@ def load_cookie_jar(path: str) -> List[dict]:
 
 
 # ── ResponseParser — extract URLs from every HTTP response body ───────────────
-# Mirrors Katana's ResponseParser (engine/parser).
+# Mirrors BundleSpy's ResponseParser (engine/parser).
 #
 # Runs on EVERY response body the browser receives — HTML, JS, JSON, CSS.
 # Extracts embedded URLs that the browser would never navigate to on its own
@@ -2229,6 +2229,252 @@ _RP_SKIP_DOMAINS = frozenset({
 _RP_MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
+# ── Passive sub-parsers ────────────────────────────────────────────────────────
+
+# Additional HTML data-* attributes for route mining
+_RP_HTML_DATA_ATTRS = _re.compile(
+    r'''(?:data-route|data-path|data-link|data-navigate|data-target|data-redirect|data-destination)\s*=\s*["']([^"'#\s]{4,400})["']''',
+    _re.IGNORECASE,
+)
+
+# Static JS navigation: location assignments and history API calls
+_RP_JS_NAV = _re.compile(
+    r'''(?:location\.(?:href|assign|replace)\s*=\s*["'`]([^"'`\s]{4,400})["'`]'''
+    r'''|history\.(?:pushState|replaceState)\s*\([^,]*,\s*[^,]*,\s*["'`]([^"'`\s]{4,400})["'`])''',
+    _re.IGNORECASE,
+)
+
+# Static onclick: window.location assignments in onclick attributes
+_RP_ONCLICK_NAV = _re.compile(
+    r'''onclick\s*=\s*["'][^"']*(?:location\.href|location\.assign|location\.replace|window\.location)\s*=?\s*["'`]?(/[^\s"'`>]{2,300})''',
+    _re.IGNORECASE,
+)
+
+# Framework router patterns: React Router / Vue Router / Angular / Next.js / Nuxt / SvelteKit
+_RP_REACT_ROUTER = _re.compile(
+    r'''(?:path|to)\s*:\s*["'`](/[^"'`\s]{1,300})["'`]|<Route[^>]+path\s*=\s*["']([^"']{1,300})["']''',
+)
+_RP_VUE_ROUTER = _re.compile(
+    r'''path\s*:\s*["'`](/[^"'`\s]{1,300})["'`]|component\s*:\s*\(\s*\)\s*=>.*?["'`](/[^"'`\s]{1,300})["'`]''',
+)
+_RP_NEXT_PAGES = _re.compile(
+    r'''["'`]((?:/[a-zA-Z0-9_\-\[\]]+){1,8})["'`]\s*(?::|,)''',
+)
+_RP_ANGULAR_ROUTER = _re.compile(
+    r'''path\s*:\s*["'`]([^"'`\s]{1,300})["'`]\s*,\s*(?:component|loadChildren|redirectTo)''',
+)
+_RP_SVELTE_ROUTER = _re.compile(
+    r'''["'`](/[a-zA-Z0-9_\-/\[\]]+)["'`]\s*:\s*(?:\(|{|\[)''',
+)
+
+# Framework SSR state variable names embedded in HTML <script> tags
+_RP_SSR_STATE_VARS = _re.compile(
+    r'''<script[^>]*>\s*(?:window\.)?(__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|__PRELOADED_STATE__|__APOLLO_STATE__|__RELAY__)\s*=\s*(\{.*?\})\s*;?\s*</script>''',
+    _re.IGNORECASE | _re.DOTALL,
+)
+_RP_NEXT_DATA_TAG = _re.compile(
+    r'''<script[^>]+id=["']__NEXT_DATA__["'][^>]*>\s*(\{.*?\})\s*</script>''',
+    _re.IGNORECASE | _re.DOTALL,
+)
+
+# <link rel="canonical|alternate|next|prev"> and <meta property="og:url">
+_RP_LINK_REL = _re.compile(
+    r'''<link[^>]+rel\s*=\s*["'](?:canonical|alternate|next|prev)["'][^>]+href\s*=\s*["']([^"'#\s]{4,400})["']''',
+    _re.IGNORECASE,
+)
+_RP_META_URL = _re.compile(
+    r'''<meta[^>]+(?:property|name)\s*=\s*["'](?:og:url|twitter:url)["'][^>]+content\s*=\s*["']([^"']{4,400})["']''',
+    _re.IGNORECASE,
+)
+
+# Link: response header parsing (RFC 5988)
+_RP_LINK_HEADER = _re.compile(
+    r'''<([^>]+)>\s*;\s*rel=["']?(\w+)["']?''',
+)
+
+# Hash route detection: /#/path (SPA) vs /page#anchor (fragment)
+_RP_HASH_ROUTE = _re.compile(r'''["'`](/#/[a-zA-Z0-9_\-/]{1,200})["'`]''')
+
+# JSON property names that suggest a URL value (for recursive walker)
+_RP_JSON_URL_KEYS = frozenset({
+    "url", "href", "endpoint", "path", "next", "prev", "link", "action",
+    "redirect", "location", "uri", "src", "source", "route", "to", "from",
+    "api", "base", "origin", "target", "destination", "canonical",
+    "self", "related", "about", "profile", "image", "avatar",
+})
+
+# Template element contents
+_RP_TEMPLATE_CONTENT = _re.compile(
+    r'''<template[^>]*>(.*?)</template>''',
+    _re.IGNORECASE | _re.DOTALL,
+)
+
+
+def _rp_is_route_like(s: str) -> int:
+    """Score a string 0-3 for route-likeness. Higher = more confident."""
+    if not s or len(s) < 2:
+        return 0
+    score = 0
+    if s.startswith("/"):
+        score += 2
+    elif s.startswith("./") or s.startswith("../"):
+        score += 1
+    if "/" in s[1:]:
+        score += 1
+    # API-like segment keywords
+    if any(seg in s for seg in ("/api/", "/v1/", "/v2/", "/v3/", "/admin/", "/user/", "/account/")):
+        score += 1
+    return score
+
+
+def _rp_walk_json(obj, depth: int = 0, parent_key: str = "") -> Set[str]:
+    """Recursively walk a JSON object and collect route-like string values."""
+    if depth > 10:
+        return set()
+    found: Set[str] = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            k_lower = k.lower()
+            if isinstance(v, str):
+                if k_lower in _RP_JSON_URL_KEYS or _rp_is_route_like(v) >= 2:
+                    found.add(v)
+            else:
+                found.update(_rp_walk_json(v, depth + 1, k))
+    elif isinstance(obj, list):
+        for item in obj:
+            found.update(_rp_walk_json(item, depth + 1, parent_key))
+    return found
+
+
+class HTMLExtractor:
+    """Extract URLs from HTML responses."""
+
+    def extract(self, text: str) -> Set[str]:
+        found: Set[str] = set()
+        found.update(_RP_HTML_ATTRS.findall(text))
+        found.update(_RP_HTML_DATA_ATTRS.findall(text))
+        found.update(_RP_ONCLICK_NAV.findall(text))
+        found.update(_RP_LINK_REL.findall(text))
+        found.update(_RP_META_URL.findall(text))
+        # Extract template contents and recurse shallowly
+        for tmpl in _RP_TEMPLATE_CONTENT.findall(text):
+            found.update(_RP_HTML_ATTRS.findall(tmpl))
+        return found
+
+    def extract_hash_routes(self, text: str) -> Set[str]:
+        return set(_RP_HASH_ROUTE.findall(text))
+
+
+class JSExtractor:
+    """Extract URLs from JavaScript responses."""
+
+    def extract(self, text: str, response_url: str = "") -> Set[str]:
+        found: Set[str] = set()
+        found.update(_RP_JS_CALLS.findall(text))
+        found.update(_RP_JS_STRINGS.findall(text))
+        found.update(self._extract_nav(text))
+        found.update(self._extract_sourcemaps(text))
+        found.update(self._extract_framework_routes(text))
+        found.update(_RP_HASH_ROUTE.findall(text))
+        return found
+
+    def _extract_nav(self, text: str) -> Set[str]:
+        """Extract location/history navigation targets."""
+        found: Set[str] = set()
+        for m in _RP_JS_NAV.finditer(text):
+            for g in m.groups():
+                if g:
+                    found.add(g)
+        return found
+
+    def _extract_sourcemaps(self, text: str) -> Set[str]:
+        refs: Set[str] = set()
+        for m in _RP_SOURCEMAP.finditer(text):
+            ref = m.group(1).strip()
+            if not ref.startswith("data:"):
+                refs.add(ref)
+        return refs
+
+    def _extract_framework_routes(self, text: str) -> Set[str]:
+        """Extract routes from framework router patterns."""
+        found: Set[str] = set()
+        for m in _RP_REACT_ROUTER.finditer(text):
+            for g in m.groups():
+                if g:
+                    found.add(g)
+        for m in _RP_VUE_ROUTER.finditer(text):
+            for g in m.groups():
+                if g:
+                    found.add(g)
+        for m in _RP_ANGULAR_ROUTER.finditer(text):
+            g = m.group(1)
+            if g and g != "" and g != "**":
+                found.add("/" + g.lstrip("/"))
+        for m in _RP_SVELTE_ROUTER.finditer(text):
+            g = m.group(1)
+            if g:
+                found.add(g)
+        return found
+
+
+class JSONExtractor:
+    """Extract URLs from JSON responses using recursive walker."""
+
+    def extract(self, text: str) -> Set[str]:
+        # Try full JSON parse first - most accurate
+        try:
+            obj = json.loads(text)
+            return _rp_walk_json(obj)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Fallback: regex on named properties (original behavior)
+        return set(_RP_JSON_URLS.findall(text))
+
+
+class CSSExtractor:
+    """Extract URLs from CSS responses."""
+
+    def extract(self, text: str) -> Set[str]:
+        return set(_RP_CSS_URLS.findall(text))
+
+
+class HeaderExtractor:
+    """Extract URLs from HTTP response headers."""
+
+    def extract(self, headers: dict) -> Set[str]:
+        """headers: dict of header name -> value strings."""
+        found: Set[str] = set()
+        link_val = headers.get("link") or headers.get("Link") or ""
+        if link_val:
+            for m in _RP_LINK_HEADER.finditer(link_val):
+                url = m.group(1).strip()
+                if url:
+                    found.add(url)
+        return found
+
+
+class FrameworkStateParser:
+    """Extract routes from SSR framework state blobs embedded in HTML."""
+
+    def extract(self, html: str) -> Set[str]:
+        found: Set[str] = set()
+        # <script id="__NEXT_DATA__"> pattern
+        for m in _RP_NEXT_DATA_TAG.finditer(html):
+            try:
+                obj = json.loads(m.group(1))
+                found.update(_rp_walk_json(obj))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # window.__VAR__ = {...} assignments
+        for m in _RP_SSR_STATE_VARS.finditer(html):
+            try:
+                obj = json.loads(m.group(2))
+                found.update(_rp_walk_json(obj))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return found
+
+
 class ResponseParser:
     """
     Parses HTTP response bodies for embedded URLs.
@@ -2256,6 +2502,13 @@ class ResponseParser:
         parsed = urlparse(target_origin)
         self._origin  = f"{parsed.scheme}://{parsed.netloc}"
         self._netloc  = parsed.netloc.lower()
+        # sub-parsers
+        self._html            = HTMLExtractor()
+        self._js              = JSExtractor()
+        self._json            = JSONExtractor()
+        self._css             = CSSExtractor()
+        self._headers         = HeaderExtractor()
+        self._framework_state = FrameworkStateParser()
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -2287,25 +2540,26 @@ class ResponseParser:
             ct_lower = (content_type or "").lower()
             found: Set[str] = set()
 
-            # Choose extraction strategy based on content type
+            # Delegate to specialized sub-parsers based on content type
             if "html" in ct_lower:
-                found.update(self._extract_html(text))
-                found.update(self._extract_js_strings(text))
+                found.update(self._html.extract(text))
+                found.update(self._html.extract_hash_routes(text))
+                found.update(self._js.extract(text, response_url))
+                found.update(self._framework_state.extract(text))
             elif "javascript" in ct_lower or "ecmascript" in ct_lower or self._is_js_url(response_url):
-                found.update(self._extract_js_calls(text))
-                found.update(self._extract_js_strings(text))
-                found.update(self._extract_sourcemaps(text, response_url))
+                found.update(self._js.extract(text, response_url))
             elif "json" in ct_lower:
-                found.update(self._extract_json_urls(text))
+                found.update(self._json.extract(text))
             elif "css" in ct_lower:
-                found.update(self._extract_css_urls(text))
+                found.update(self._css.extract(text))
             else:
-                # Unknown type — run all extractors
-                found.update(self._extract_html(text))
-                found.update(self._extract_js_strings(text))
-                found.update(self._extract_json_urls(text))
+                # Unknown - run all extractors
+                found.update(self._html.extract(text))
+                found.update(self._html.extract_hash_routes(text))
+                found.update(self._js.extract(text, response_url))
+                found.update(self._json.extract(text))
 
-            # Always run generic sweep — catches anything above missed
+            # Generic sweep - catches anything above missed
             found.update(self._extract_generic(text))
 
             # Normalize + filter
@@ -2313,6 +2567,15 @@ class ResponseParser:
 
         except Exception as e:
             logger.debug("ResponseParser.extract error for %s: %s", response_url, e)
+            return []
+
+    def extract_from_headers(self, response_url: str, headers: dict) -> List[str]:
+        """Extract URLs from HTTP response headers (e.g. Link: header)."""
+        try:
+            raw = self._headers.extract(headers)
+            return self._normalize_and_filter(raw, response_url)
+        except Exception as e:
+            logger.debug("ResponseParser.extract_from_headers error for %s: %s", response_url, e)
             return []
 
     # ── extraction layers ─────────────────────────────────────────────────────
@@ -2464,7 +2727,7 @@ def _is_login_page(page) -> bool:
        with hashed attribute values, and input elements that lack type="password"
        but carry password-related name/id/placeholder attributes.
 
-    This mirrors Katana's tryAutoLogin / DIT classifier approach.
+    This mirrors BundleSpy's tryAutoLogin / DIT classifier approach.
     """
     try:
         if _is_login_url(page.url):
@@ -2763,23 +3026,23 @@ class HeadlessEngine:
         cookies:            List[dict] = None,
         extra_headers:      dict       = None,
         seen_hashes:        Set[str]   = None,
-        # ── Katana enhancements ─────────────────────────────────────────────
+        # ── BundleSpy enhancements ─────────────────────────────────────────────
         max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
         max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
         enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
         captcha_handler     = None,        # Optional callable(page) -> bool; called when captcha detected
         cookie_consent_bypass: bool = True, # Auto-dismiss GDPR consent banners before crawling
-        # New Katana enhancements (session 2)
+        # New BundleSpy enhancements (session 2)
         auth_steps:         Optional[List["LoginStep"]] = None,  # Recorded auth flow replay
         page_load_strategy: str   = "domcontentloaded",          # eager/domcontentloaded/load/networkidle
         hooks:              Optional["CrawlHooks"] = None,        # Lifecycle callback hooks
-        # New Katana enhancements (session 3)
+        # New BundleSpy enhancements (session 3)
         cookie_jar_path:    Optional[str]  = None,   # Path to Netscape cookie file (Burp export)
         url_filter_similar: bool           = False,  # Enable URL structural dedup (PathTrie)
         url_filter_threshold: int          = 3,      # PathTrie wildcard threshold (default 3)
         response_body_extract: bool        = True,   # Parse response bodies for embedded URLs
-        # New Katana enhancements (session 4)
+        # New BundleSpy enhancements (session 4)
         max_onclick_links:         int   = 50,   # Max a[onclick] links to simulate per page (0=disabled)
         capture_raw_traffic:       bool  = False, # Store raw HTTP req/resp bytes alongside api_calls
         content_similarity_threshold: float = 0.0, # Skip pages with >X% structural similarity (0=disabled)
@@ -2801,27 +3064,27 @@ class HeadlessEngine:
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
 
-        # Katana enhancement params
+        # BundleSpy enhancement params
         self.max_failures          = max(1, max_failures)
         self.max_crawl_duration    = max(0, max_crawl_duration)
         self.enable_diagnostics    = enable_diagnostics
         self.slow_mo               = max(0, slow_mo)
         self.captcha_handler       = captcha_handler
         self.cookie_consent_bypass = cookie_consent_bypass
-        # Session 2 Katana enhancements
+        # Session 2 BundleSpy enhancements
         self.auth_steps            = auth_steps or []
         self.page_load_strategy    = page_load_strategy or "domcontentloaded"
         self.hooks                 = hooks or CrawlHooks()
         self._logged_in:      bool = False   # loggedIn flag - avoids re-auth mid-crawl
         self._page_type:      str  = "unknown"  # set in Phase 1: "spa", "static", or "unknown"
 
-        # Session 3 Katana enhancements
+        # Session 3 BundleSpy enhancements
         self.cookie_jar_path       = cookie_jar_path
         self.url_filter_similar    = url_filter_similar
         self.url_filter_threshold  = max(1, url_filter_threshold)
         self.response_body_extract = response_body_extract
 
-        # Session 4 Katana enhancements
+        # Session 4 BundleSpy enhancements
         self.max_onclick_links        = max_onclick_links
         self.capture_raw_traffic      = capture_raw_traffic
         self.content_similarity_threshold = content_similarity_threshold
@@ -2896,25 +3159,25 @@ class HeadlessEngine:
         self._action_queue:   deque         = deque()
         self._seen_actions:   Set[str]      = set()
 
-        # CrawlGraph — DAG of page states and action edges (Katana enhancement 1)
+        # CrawlGraph — DAG of page states and action edges (BundleSpy enhancement 1)
         self.crawl_graph: CrawlGraph = CrawlGraph()
 
-        # DiagnosticsWriter — optional (Katana enhancement 11)
+        # DiagnosticsWriter — optional (BundleSpy enhancement 11)
         self._diagnostics: Optional[DiagnosticsWriter] = (
             DiagnosticsWriter() if enable_diagnostics else None
         )
 
-        # MaxCrawlDuration start time — set after auth completes (Katana enhancement 10)
+        # MaxCrawlDuration start time — set after auth completes (BundleSpy enhancement 10)
         self._crawl_start_time: float = 0.0
 
-        # Consecutive failure counter for MaxFailureCount guard (Katana enhancement 4)
+        # Consecutive failure counter for MaxFailureCount guard (BundleSpy enhancement 4)
         self._consecutive_failures: int = 0
 
         # Seed urls provided externally (from crawler/static analysis)
         self.seed_urls:  List[str]     = []
         self.external_seen = external_seen or set()
 
-    # ── Katana enhancement helpers ────────────────────────────────────────────
+    # ── BundleSpy enhancement helpers ────────────────────────────────────────────
 
     def _slow_mo_wait(self, page) -> None:
         """SlowMotion mode: inject a configurable delay between interactions.
@@ -3024,7 +3287,7 @@ class HeadlessEngine:
     def _is_element_match(current: dict, target_selector: str, target_xpath: str) -> bool:
         """Stronger element identity check before trusting an XPath lookup result.
 
-        Mirrors Katana's isElementMatch: identical non-empty ID is a definitive
+        Mirrors BundleSpy's isElementMatch: identical non-empty ID is a definitive
         match; otherwise requires at least 2 of (classes, textContent, tagName)
         to agree. Reduces false positives where the XPath resolves to a different
         element after a SPA re-render.
@@ -3066,7 +3329,7 @@ class HeadlessEngine:
         Strategy 2 - browser history walk: step back N times using go_back().
         Strategy 3 - hard goto: navigate directly to the action's source URL.
 
-        Mirrors Katana's navigateBackToStateOrigin with tryElementNavigation,
+        Mirrors BundleSpy's navigateBackToStateOrigin with tryElementNavigation,
         tryBrowserHistoryNavigation, and tryShortestPathNavigation."""
 
         # ── Fast path: already on the right state ────────────────────────────
@@ -3090,7 +3353,7 @@ class HeadlessEngine:
                 if current_sim:
                     xor = origin_state.simhash ^ current_sim
                     distance = bin(xor).count("1")
-                    if distance <= 2:  # Katana's simhashThreshold = 2
+                    if distance <= 2:  # BundleSpy's simhashThreshold = 2
                         logger.debug(
                             "navigateBack: SimHash distance %d - treating as origin state %s",
                             distance, action.origin_id,
@@ -3229,7 +3492,7 @@ class HeadlessEngine:
 
     def _check_element_interactable(self, page, el) -> bool:
         """Interactability check: verify the element is not covered by an overlay
-        (modal, cookie banner, spinner) before clicking it.  Mirrors Katana's
+        (modal, cookie banner, spinner) before clicking it.  Mirrors BundleSpy's
         CoveredError / interactability check. (Enhancement 5)
 
         Returns True if the element is safe to click.
@@ -3261,11 +3524,11 @@ class HeadlessEngine:
             # If the check fails we fall back to attempting the click anyway
             return True
 
-    # ── Session 2 Katana enhancement helpers ─────────────────────────────────
+    # ── Session 2 BundleSpy enhancement helpers ─────────────────────────────────
 
     def _scroll_into_view(self, page, el) -> None:
         """Universal ScrollIntoView — call before every click, not just Phase 3.
-        Mirrors Katana's ScrollIntoView() call before every action.
+        Mirrors BundleSpy's ScrollIntoView() call before every action.
         Falls back silently if the element is gone or raises. (Enhancement 6)"""
         try:
             el.scroll_into_view_if_needed(timeout=600)
@@ -3327,12 +3590,12 @@ class HeadlessEngine:
         """Return True if any step in the recorded flow is an assert_visible step.
         A terminal visible assertion is an explicit UI check that login succeeded
         (e.g. 'Welcome back' is visible). Mirrors HasTerminalVisibleAssertion in
-        Katana. (Enhancement 5)"""
+        BundleSpy. (Enhancement 5)"""
         return any(s.step_type == "assert_visible" for s in steps)
 
     def _run_recorded_auth_flow(self, page, stabilizer) -> bool:
         """Replay a recorded authentication flow (multi-step SSO/MFA).
-        Mirrors Katana's auth.StepsFromFile + replay loop.
+        Mirrors BundleSpy's auth.StepsFromFile + replay loop.
 
         Executes each LoginStep in order:
           navigate        — page.goto(url)
@@ -3472,7 +3735,7 @@ class HeadlessEngine:
         or no recorded flow exists but we land on a login page.
 
         Attempts to fill detected username/password fields and submit.
-        Uses the same DIT classifier patterns as Katana's auto-login.
+        Uses the same DIT classifier patterns as BundleSpy's auto-login.
         Only attempted when we have a user:pass from an auth header or the
         caller injected credentials via a special auth_credentials dict.
         Returns True if a session delta confirms login. (Enhancement 2)"""
@@ -3722,7 +3985,7 @@ class HeadlessEngine:
 
         Two responsibilities:
         1. ResponseParser — parse every response body for URLs not visible in the DOM
-           (Katana enhancement: response body URL extraction). Discovered URLs are
+           (BundleSpy enhancement: response body URL extraction). Discovered URLs are
            staged into self._rp_discovered and drained into the BFS queue in run().
         2. JS capture — three-layer detection, body dedup, JS file creation (existing).
         """
@@ -3750,9 +4013,18 @@ class HeadlessEngine:
             # ── ResponseParser: extract embedded URLs from every response ────────
             # Runs on ALL responses (HTML, JS, JSON, CSS) — before the JS-only
             # guard below — so we harvest routes that live in non-JS responses too.
-            if self._response_parser is not None and _resp_body:
+            if self._response_parser is not None:
                 try:
-                    found = self._response_parser.extract(url, ct, _resp_body)
+                    found: List[str] = []
+                    if _resp_body:
+                        found = self._response_parser.extract(url, ct, _resp_body)
+                    # also harvest Link: header even when body is empty
+                    try:
+                        _hdrs = dict(response.headers)
+                        hdr_found = self._response_parser.extract_from_headers(url, _hdrs)
+                        found.extend(hdr_found)
+                    except Exception:
+                        pass
                     if found:
                         with self._rp_lock:
                             self._rp_discovered.extend(found)
@@ -3762,7 +4034,7 @@ class HeadlessEngine:
                 except Exception as rp_err:
                     logger.debug("ResponseParser error for %s: %s", url, rp_err)
 
-            # Technology fingerprinting — Katana hybrid feature 6
+            # Technology fingerprinting — BundleSpy hybrid feature 6
             if self.technology_detection and _resp_body is not None:
                 try:
                     techs = self._fingerprint_technologies(url, dict(response.headers), _resp_body)
@@ -3775,7 +4047,7 @@ class HeadlessEngine:
                     logger.debug("Technology detection error for %s: %s", url, tech_err)
 
             # Raw capture — store request+response bytes alongside api_call entries
-            # Katana's FetchRequestStageResponse captures full wire-level traffic;
+            # BundleSpy's FetchRequestStageResponse captures full wire-level traffic;
             # we approximate with Playwright's response object fields.
             if self.capture_raw_traffic and _resp_body is not None:
                 try:
@@ -3980,9 +4252,15 @@ class HeadlessEngine:
             _resp_body    = rec.body  # may be None
 
             # ── ResponseParser ───────────────────────────────────────────────
-            if self._response_parser is not None and _resp_body:
+            if self._response_parser is not None:
                 try:
-                    found = self._response_parser.extract(url, ct, _resp_body)
+                    found: List[str] = []
+                    if _resp_body:
+                        found = self._response_parser.extract(url, ct, _resp_body)
+                    # harvest Link: header from captured response headers
+                    if rec.resp_headers:
+                        hdr_found = self._response_parser.extract_from_headers(url, rec.resp_headers)
+                        found.extend(hdr_found)
                     if found:
                         with self._rp_lock:
                             self._rp_discovered.extend(found)
@@ -4071,7 +4349,7 @@ class HeadlessEngine:
         """
         Return True if the element is a logout/sign-out link.
         Checks visible text, href path segments, id, and class — same approach
-        as Katana's isLogoutPage() which catches CSS-icon logout buttons whose
+        as BundleSpy's isLogoutPage() which catches CSS-icon logout buttons whose
         visible text is empty but whose href is /logout or /signout.
         """
         try:
@@ -4143,7 +4421,7 @@ class HeadlessEngine:
     def _discover_form_actions(self, page, source_url: str) -> None:
         """
         Discover forms on the current page and queue them as FILL_FORM actions
-        for dedicated follow-up crawling — same pattern Katana uses for FillForm
+        for dedicated follow-up crawling — same pattern BundleSpy uses for FillForm
         action type. This ensures form-triggered API calls are captured even if
         the form wasn't visible during the main page visit.
 
@@ -5054,11 +5332,6 @@ class HeadlessEngine:
             # Adaptive framework wait
             stabilizer.wait_for_framework(max_ms=3000)
 
-            # Interact if enabled
-            if self.interact:
-                self._interact(page, stabilizer)
-                self._observe_forms(page, stabilizer)
-
             # Extract everything
             new_routes  = self._extract_routes(page)
             api_calls   = self._extract_api_calls(page)
@@ -5130,7 +5403,7 @@ class HeadlessEngine:
         Routes may be bare paths (/about), paths with query strings
         (/projects?category=foo), or absolute URLs (https://...).
         Query strings are preserved — they represent distinct filterable
-        pages that differ in content (Katana gap fix).
+        pages that differ in content (BundleSpy gap fix).
         """
         parsed = urlparse(self.target_url)
         base   = f"{parsed.scheme}://{parsed.netloc}"
@@ -5398,7 +5671,7 @@ class HeadlessEngine:
         """Return a normalized DOM string with scripts, styles, comments, and
         dynamic attributes (data-*, aria-hidden, style) stripped.
 
-        Mirrors Katana's getStrippedDOM / domNormalizer — removes noise so
+        Mirrors BundleSpy's getStrippedDOM / domNormalizer — removes noise so
         two renders of the same SPA component hash identically even when
         minor dynamic attributes differ between page loads."""
         try:
@@ -5444,7 +5717,7 @@ class HeadlessEngine:
     def _dom_simhash(self, stripped: str) -> int:
         """Compute a 64-bit SimHash from a stripped DOM string.
 
-        Uses 3-character shingle hashing — same n-gram size as Katana's
+        Uses 3-character shingle hashing — same n-gram size as BundleSpy's
         simhash.Fingerprint(reader, 3). Returns 0 on empty input.
 
         SimHash algorithm: for each shingle, hash it to 64 bits, then for
@@ -5507,12 +5780,12 @@ class HeadlessEngine:
 
     def _simulate_onclick_links(self, page, source_url: str, max_links: int = 50) -> list:
         """
-        Click every a[onclick] element and record URL changes — Katana hybrid approach.
+        Click every a[onclick] element and record URL changes — BundleSpy hybrid approach.
 
         Standard crawlers miss JS redirects anchored to onclick handlers:
             <a href="#" onclick="window.location='/admin/dashboard'">Admin</a>
 
-        Katana's navigateRequest() clicks each a[onclick] individually, records
+        BundleSpy's navigateRequest() clicks each a[onclick] individually, records
         the URL drift after click, then navigates back. We do the same:
         1. Collect all a[onclick] selectors before clicking anything
         2. For each: click -> measure URL drift -> navigate back
@@ -5607,7 +5880,7 @@ class HeadlessEngine:
         technologies. No external service — all patterns are inline regexes.
         Returns a list of detected technology names for this response.
 
-        Katana runs Wappalyzer per-response in hybrid/crawl.go; we do the same
+        BundleSpy runs Wappalyzer per-response in hybrid/crawl.go; we do the same
         with a curated inline fingerprint database covering the most common stacks.
         """
         import re as _re
@@ -5687,7 +5960,7 @@ class HeadlessEngine:
         link count) and checks Hamming distance against previously seen fingerprints.
         Threshold 0.0 = disabled. Threshold 0.85 = skip if 85%+ structurally similar.
 
-        Katana's SimhashOracle uses simhash with configurable threshold; we use
+        BundleSpy's SimhashOracle uses simhash with configurable threshold; we use
         a simpler but effective structural hash approach that doesn't require
         external dependencies.
         """
@@ -5736,7 +6009,7 @@ class HeadlessEngine:
         invisible to standard scraping. CDP with pierce=True crosses every shadow
         boundary in a single call, returning the full composed tree.
 
-        Katana does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
+        BundleSpy does the same in hybrid/crawl.go: dom.GetDocument with depth=-1,
         pierce=True, then walks nodes collecting href/action attributes.
         """
         found = set()
@@ -5873,7 +6146,7 @@ class HeadlessEngine:
         # Shadow DOM traversal — extract routes hidden inside Web Components.
         # Playwright's page.content() only sees the light DOM; shadow roots require
         # CDP DOMGetDocument with pierce=True to pierce every shadow boundary.
-        # Katana uses this same approach in hybrid/crawl.go navigateRequest().
+        # BundleSpy uses this same approach in hybrid/crawl.go navigateRequest().
         try:
             shadow_routes = self._extract_shadow_dom_routes(page)
             new_routes.update(shadow_routes)
@@ -6117,7 +6390,7 @@ class HeadlessEngine:
             page = ctx.new_page()
             stabilizer = PageStabilizer(page)
 
-            # JS navigation tracking — Katana's PageFrameNavigated approach.
+            # JS navigation tracking — BundleSpy's PageFrameNavigated approach.
             # page.on("framenavigated") fires for window.location=, meta-refresh,
             # history.pushState, and client-side router transitions that the
             # response handler misses because they don't produce a new HTTP response.
@@ -6141,7 +6414,7 @@ class HeadlessEngine:
             page.on("framenavigated", _on_frame_navigated)
 
             # ── Gap 2: CDP FetchRequestPaused interception (Phase 1 page) ────
-            # Katana's FetchRequestStage/FetchResponseStage pipeline gives us
+            # BundleSpy's FetchRequestStage/FetchResponseStage pipeline gives us
             # raw POST bodies and raw response bytes at the CDP level — things
             # Playwright's high-level response event can miss (cached hits,
             # service-worker intercepts, partial streaming bodies).
@@ -6396,7 +6669,7 @@ class HeadlessEngine:
             # Gap 2: CDP-level raw traffic handlers for pool slots.
             # When capture_raw_traffic is on, each pool slot's page gets a CDP
             # Fetch interception session that captures POST bodies and response
-            # bytes before the browser can consume them — the same data Katana
+            # bytes before the browser can consume them — the same data BundleSpy
             # captures via FetchRequestStage/FetchResponseStage in browser.go.
             # The handlers are thread-safe (self._raw_lock guards the list).
             def _pool_cdp_request_fn(url: str, method: str, headers: dict,
@@ -6636,30 +6909,11 @@ class HeadlessEngine:
                             logger.debug("Content similarity gate: skipping %s", url)
                             return [], 0, True, False
 
-                    if self.interact:
-                        self._interact(slot_page, slot_stabilizer)
-                        self._observe_forms(slot_page, slot_stabilizer)
-                        # Drain any responses triggered by JS interactions.
-                        _browser_pool.drain_thread_responses(slot)
-
+                    # passive-only: no interact, no form actions, no onclick simulation
                     new_routes = self._flush_page_intel(slot_page, url)
-                    self._discover_form_actions(slot_page, url)
-                    self._discover_click_actions(slot_page, url)
 
                     new_urls   = self._build_urls(new_routes)
                     _oc_count  = 0
-
-                    if self.max_onclick_links > 0:
-                        try:
-                            onclick_new = self._simulate_onclick_links(
-                                slot_page, url, max_links=self.max_onclick_links
-                            )
-                            for onclick_url in onclick_new:
-                                if onclick_url not in new_urls:
-                                    new_urls.append(onclick_url)
-                                    _oc_count += 1
-                        except Exception as e:
-                            logger.debug("onclick simulation failed for %s: %s", url, e)
 
                     # Final drain before closing — captures any late-arriving
                     # responses (async resource loads, lazy fetches, etc.).
@@ -6979,124 +7233,14 @@ class HeadlessEngine:
                     self._slow_mo_wait(page)
 
                     if action.action_type == ActionType.FILL_FORM:
-                        try:
-                            form = page.query_selector("form")
-                            if form and form.is_visible():
-                                self._interact_forms(page, stabilizer)
-                                new_routes = self._flush_page_intel(page, action.url)
-                                for r in new_routes:
-                                    if self._add_route(r):
-                                        full = self._build_urls({r})
-                                        for u in full:
-                                            if not self.registry.seen_url(u):
-                                                if self._path_trie is not None:
-                                                    _fp = self._path_trie.fingerprint(u)
-                                                    if _fp in self._trie_seen:
-                                                        _trie_filtered_count += 1
-                                                        continue
-                                                    self._trie_seen.add(_fp)
-                                                bfs_queue.append(u)
-                                _action_pages_visited += 1
-                                phase3_consecutive_failures = 0
-                                # Diagnostics: record post-action state (Enhancement 11)
-                                if self._diagnostics:
-                                    self._diagnostics.record(page, action, note="post-fill_form")
-                                # after_action hook (Enhancement 4)
-                                if self.hooks.after_action:
-                                    try:
-                                        self.hooks.after_action(page, action)
-                                    except Exception:
-                                        pass
-                        except Exception as e:
-                            logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
-                            phase3_consecutive_failures += 1
+                        # passive mapper - form submission disabled
+                        logger.debug("Skipping FILL_FORM action (passive mode): %s", action.url)
+                        phase3_consecutive_failures += 1
 
                     elif action.action_type == ActionType.LEFT_CLICK:
-                        try:
-                            el = page.query_selector(action.selector)
-                            if el and el.is_visible() and el.is_enabled():
-                                # Universal ScrollIntoView before click (Enhancement 6)
-                                self._scroll_into_view(page, el)
-                                # Interactability check: verify no overlay covers
-                                # the element before clicking (Enhancement 5)
-                                if not self._check_element_interactable(page, el):
-                                    logger.debug(
-                                        "Element covered by overlay, skipping: %s on %s",
-                                        action.selector, action.url,
-                                    )
-                                    # Try consent bypass — a cookie banner may be covering it
-                                    if self.cookie_consent_bypass:
-                                        self._dismiss_cookie_consent(page)
-                                    phase3_consecutive_failures += 1
-                                    continue
-                                # SlowMotion delay before click (Enhancement 12)
-                                self._slow_mo_wait(page)
-                                try:
-                                    el.click(timeout=800)
-                                except Exception as click_err:
-                                    # Typed error classification (Enhancement 3)
-                                    typed_err = self._classify_click_error(click_err, page, el)
-                                    if isinstance(typed_err, ElementCoveredError):
-                                        logger.debug(
-                                            "ElementCoveredError on %s — trying consent bypass",
-                                            action.selector,
-                                        )
-                                        if self.cookie_consent_bypass:
-                                            self._dismiss_cookie_consent(page)
-                                        # Retry once after banner dismissal
-                                        try:
-                                            el.click(timeout=600)
-                                        except Exception:
-                                            phase3_consecutive_failures += 1
-                                            continue
-                                    elif isinstance(typed_err, ElementInvisibleError):
-                                        logger.debug(
-                                            "ElementInvisibleError on %s — skipping",
-                                            action.selector,
-                                        )
-                                        phase3_consecutive_failures += 1
-                                        continue
-                                    elif isinstance(typed_err, ElementNoPointerEventsError):
-                                        logger.debug(
-                                            "ElementNoPointerEventsError on %s — JS click fallback",
-                                            action.selector,
-                                        )
-                                        # JS click bypasses pointer-events:none
-                                        try:
-                                            page.evaluate("el => el.click()", el)
-                                        except Exception:
-                                            phase3_consecutive_failures += 1
-                                            continue
-                                    else:
-                                        raise typed_err
-                                stabilizer.wait_after_interaction(max_ms=1000)
-                                new_routes = self._flush_page_intel(page, action.url)
-                                for r in new_routes:
-                                    if self._add_route(r):
-                                        full = self._build_urls({r})
-                                        for u in full:
-                                            if not self.registry.seen_url(u):
-                                                if self._path_trie is not None:
-                                                    _fp = self._path_trie.fingerprint(u)
-                                                    if _fp in self._trie_seen:
-                                                        _trie_filtered_count += 1
-                                                        continue
-                                                    self._trie_seen.add(_fp)
-                                                bfs_queue.append(u)
-                                _action_pages_visited += 1
-                                phase3_consecutive_failures = 0
-                                # Diagnostics: record post-click state (Enhancement 11)
-                                if self._diagnostics:
-                                    self._diagnostics.record(page, action, note="post-left_click")
-                                # after_action hook (Enhancement 4)
-                                if self.hooks.after_action:
-                                    try:
-                                        self.hooks.after_action(page, action)
-                                    except Exception:
-                                        pass
-                        except Exception as e:
-                            logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
-                            phase3_consecutive_failures += 1
+                        # passive mapper - click actions disabled
+                        logger.debug("Skipping LEFT_CLICK action (passive mode): %s", action.url)
+                        phase3_consecutive_failures += 1
 
                 except Exception as e:
                     logger.debug("Action processing error: %s", e)
@@ -7206,10 +7350,10 @@ class HeadlessEngine:
             "actions_queued":     len(self._seen_actions),
             "crawl_graph":        crawl_graph_summary,
             "timings":            timings,
-            # Katana enhancements (session 3)
+            # BundleSpy enhancements (session 3)
             "response_parser_urls": _rp_added_count,
             "trie_filtered":        _trie_filtered_count,
-            # Katana enhancements (session 4)
+            # BundleSpy enhancements (session 4)
             "onclick_navigations":  _onclick_nav_count,
             "js_nav_urls":          _js_nav_count,
             "technologies":         dict(self._tech_detections),
@@ -7267,24 +7411,24 @@ def collect_headless_full(
     cookies:              list           = None,
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
-    # Katana enhancements (session 1)
+    # BundleSpy enhancements (session 1)
     max_failures:         int            = 10,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
     captcha_handler       = None,
     cookie_consent_bypass: bool          = True,
-    # Katana enhancements (session 2)
+    # BundleSpy enhancements (session 2)
     auth_steps:           Optional[List[LoginStep]] = None,
     page_load_strategy:   str            = "domcontentloaded",
     hooks:                Optional[CrawlHooks] = None,
     auth_credentials:     Optional[dict] = None,
-    # Katana enhancements (session 3)
+    # BundleSpy enhancements (session 3)
     cookie_jar_path:      Optional[str]  = None,
     url_filter_similar:   bool           = False,
     url_filter_threshold: int            = 3,
     response_body_extract: bool          = True,
-    # Katana enhancements (session 4)
+    # BundleSpy enhancements (session 4)
     max_onclick_links:    int            = 50,
     capture_raw_traffic:  bool           = False,
     content_similarity_threshold: float  = 0.0,
@@ -7295,7 +7439,7 @@ def collect_headless_full(
     num_browsers:         int            = 5,
 ) -> dict:
     """
-    Full headless scan — all Katana enhancements exposed.
+    Full headless scan — all BundleSpy enhancements exposed.
 
     seed_urls:             routes from static analysis to pre-seed the engine.
     workers:               concurrent page processing (default 3).
