@@ -223,9 +223,27 @@ def extract_links(html: str, base_url: str) -> List[str]:
         raw = raw.strip()
         if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "#", "data:", "vbscript:")):
             return
+        # Skip static asset extensions - not crawlable navigation targets
+        _lower_raw = raw.split("?")[0].split("#")[0].lower()
+        if _lower_raw.endswith((
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".tiff", ".tif",
+            ".svg", ".ico", ".cur",
+            ".mp4", ".webm", ".ogg", ".ogv", ".avi", ".mov", ".mkv", ".flv", ".wmv",
+            ".mp3", ".wav", ".flac", ".aac", ".opus", ".m4a",
+            ".pdf", ".swf", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        )):
+            return
         absolute = _make_absolute(raw, base_url)
         if absolute:
             url_no_fragment, _ = urldefrag(absolute)
+            _path_check = urlparse(url_no_fragment).path
+            # JPEG base64 SOI - /9j/ prefix is unmistakable binary image data
+            if _path_check.startswith("/9j/"):
+                return
+            # Drop URLs where any path segment is longer than 64 chars
+            # (base64-encoded images, binary blobs, obfuscated junk)
+            if any(len(seg) > 64 for seg in _path_check.split("/")):
+                return
             links.add(url_no_fragment)
 
     def _add_srcset(srcset_val: str) -> None:
