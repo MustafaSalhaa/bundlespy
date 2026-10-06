@@ -282,6 +282,15 @@ def _is_valid_route(path: str) -> bool:
     if not path or len(path) < MIN_PATH_LEN:
         return False
 
+    # JPEG base64 SOI marker - binary image data masquerading as a path
+    if path.startswith("/9j/") or path.startswith("9j/"):
+        return False
+
+    # Any segment longer than 128 chars is binary/base64 garbage, not a route
+    _segs = [s for s in path.split("/") if s]
+    if any(len(s) > 128 for s in _segs):
+        return False
+
     # Skip known noise prefixes
     for prefix in _SKIP_PREFIXES:
         if path.startswith(prefix):
