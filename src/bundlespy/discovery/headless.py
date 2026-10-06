@@ -85,6 +85,11 @@ class ResponseRecord:
     source_page:  str
     body:         Optional[bytes]   # None when skipped (redirect, too large, error)
     body_skipped: bool = False      # True when body exists but was not fetched
+    # Pre-built wire-level representations — populated while still on the
+    # Playwright greenlet so all data is fresh. Empty string when capture
+    # is disabled or body was skipped.
+    raw_request:  str  = ""
+    raw_response: str  = ""
 
 
 # ── Typed crawl actions — models page state transitions ──────────────────────
@@ -361,12 +366,19 @@ class CrawlHooks:
 
     Mirrors Katana's Hooks interface.
     (Enhancement 4 — Hooks system)
+
+    before_navigate: fired after headers/cookies are applied to the page,
+    before page.goto() is called. Signature: (page, url: str) -> None.
+    Use it for per-navigation setup — EvalOnNewDocument injection, extra
+    cookies on specific domains, request interception. Errors are caught
+    and logged; they do not abort the navigation.
     """
     before_action:       Optional[callable] = None  # (page, action: CrawlAction) -> None
     after_action:        Optional[callable] = None  # (page, action: CrawlAction) -> None
     on_navigation:       Optional[callable] = None  # (url: str) -> None
     on_login_detected:   Optional[callable] = None  # (page) -> None
     on_captcha_detected: Optional[callable] = None  # (page) -> None
+    before_navigate:     Optional[callable] = None  # (page, url: str) -> None
 
 
 # ── Typed click error classes — precise failure recovery ──────────────────────
@@ -4450,6 +4462,23 @@ class HeadlessEngine:
                         logger.debug("body() failed for %s: %s", url, be)
                         body_skipped = True
 
+            # Build raw wire-level representations here — we're still on the
+            # Playwright greenlet with all data live. Deferred paths rebuild
+            # from stored fields, which is fine, but doing it here keeps the
+            # two paths consistent and avoids duplicating the string-building
+            # logic in _handle_response_record.
+            raw_request  = ""
+            raw_response = ""
+            if self.capture_raw_traffic and body is not None:
+                try:
+                    rh_str  = "\r\n".join(f"{k}: {v}" for k, v in req_headers.items())
+                    rsp_str = "\r\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                    body_str = body.decode("utf-8", errors="replace")[:4096]
+                    raw_request  = f"{req_method} {req_url} HTTP/1.1\r\n{rh_str}\r\n\r\n{req_post}"
+                    raw_response = f"HTTP/1.1 {status}\r\n{rsp_str}\r\n\r\n{body_str}"
+                except Exception:
+                    pass
+
             return ResponseRecord(
                 url          = url,
                 status       = status,
@@ -4463,6 +4492,8 @@ class HeadlessEngine:
                 source_page  = source_page,
                 body         = body,
                 body_skipped = body_skipped,
+                raw_request  = raw_request,
+                raw_response = raw_response,
             )
 
         except Exception as e:
@@ -4513,13 +4544,20 @@ class HeadlessEngine:
                     logger.debug("Technology detection error for %s: %s", url, tech_err)
 
             # ── Raw traffic capture ──────────────────────────────────────────
+            # Use pre-built fields from ResponseRecord when available (they were
+            # built on the Playwright greenlet with live data). Fall back to
+            # rebuilding from stored fields for backward compatibility.
             if self.capture_raw_traffic and _resp_body is not None:
                 try:
-                    req_headers_str  = "\r\n".join(f"{k}: {v}" for k, v in rec.req_headers.items())
-                    resp_headers_str = "\r\n".join(f"{k}: {v}" for k, v in rec.resp_headers.items())
-                    resp_body_str    = _resp_body.decode("utf-8", errors="replace")[:4096]
-                    raw_req  = f"{rec.req_method} {rec.req_url} HTTP/1.1\r\n{req_headers_str}\r\n\r\n{rec.req_post}"
-                    raw_resp = f"HTTP/1.1 {rec.status}\r\n{resp_headers_str}\r\n\r\n{resp_body_str}"
+                    if rec.raw_request and rec.raw_response:
+                        raw_req  = rec.raw_request
+                        raw_resp = rec.raw_response
+                    else:
+                        req_headers_str  = "\r\n".join(f"{k}: {v}" for k, v in rec.req_headers.items())
+                        resp_headers_str = "\r\n".join(f"{k}: {v}" for k, v in rec.resp_headers.items())
+                        resp_body_str    = _resp_body.decode("utf-8", errors="replace")[:4096]
+                        raw_req  = f"{rec.req_method} {rec.req_url} HTTP/1.1\r\n{req_headers_str}\r\n\r\n{rec.req_post}"
+                        raw_resp = f"HTTP/1.1 {rec.status}\r\n{resp_headers_str}\r\n\r\n{resp_body_str}"
                     with self._raw_lock:
                         self._raw_traffic.append({
                             "url":         url,
@@ -4572,6 +4610,52 @@ class HeadlessEngine:
 
         except Exception as e:
             logger.debug("_handle_response_record error for %s: %s", rec.url if rec else "?", e)
+
+    def _run_after_action_hook(self, page, action: "CrawlAction",
+                               timeout_s: float = 5.0) -> None:
+        """
+        Fire hooks.after_action with its own dedicated timeout budget.
+
+        Mirrors Katana's AfterLoad hook pattern - the callback gets a fresh
+        deadline instead of whatever is left after click + stabilization.
+        The timeout is enforced via threading.Timer: if the callback runs
+        longer than timeout_s seconds the timer fires and the page is closed,
+        which unblocks any Playwright call inside the hook. This matches how
+        Katana's hookCtx cancellation unblocks rod CDP calls.
+
+        Errors (including timeout-caused close errors) are caught and logged;
+        they never propagate to the action loop.
+        """
+        if not self.hooks.after_action:
+            return
+
+        _hook_done   = threading.Event()
+        _hook_timed_out = threading.Event()
+
+        def _timeout_cb():
+            if _hook_done.is_set():
+                return
+            _hook_timed_out.set()
+            logger.debug(
+                "after_action hook timed out (%.1fs) for %s — closing page to unblock",
+                timeout_s, action.url,
+            )
+            try:
+                page.close()
+            except Exception:
+                pass
+
+        _timer = threading.Timer(timeout_s, _timeout_cb)
+        _timer.daemon = True
+        _timer.start()
+        try:
+            self.hooks.after_action(page, action)
+        except Exception as _he:
+            if not _hook_timed_out.is_set():
+                logger.debug("after_action hook error for %s: %s", action.url, _he)
+        finally:
+            _hook_done.set()
+            _timer.cancel()
 
     def _is_destructive(self, text: str) -> bool:
         lower = (text or "").lower().strip()
@@ -6987,6 +7071,12 @@ class HeadlessEngine:
                 _drain_phase1_responses()
             else:
                 try:
+                    # before_navigate hook - fires after headers applied, before goto
+                    if self.hooks.before_navigate:
+                        try:
+                            self.hooks.before_navigate(page, self.target_url)
+                        except Exception as _hn_err:
+                            logger.debug("before_navigate hook error: %s", _hn_err)
                     page.goto(self.target_url, timeout=self.timeout * 1000,
                               wait_until=_wait_until)
                     if _use_heuristic:
@@ -7235,6 +7325,13 @@ class HeadlessEngine:
                     _job_timer = threading.Timer(_JOB_DEADLINE, _job_timeout_cb)
                     _job_timer.daemon = True
                     _job_timer.start()
+
+                    # before_navigate hook - fires after headers applied, before goto
+                    if self.hooks.before_navigate:
+                        try:
+                            self.hooks.before_navigate(slot_page, url)
+                        except Exception as _hn_err:
+                            logger.debug("before_navigate hook error for %s: %s", url, _hn_err)
 
                     slot_page.goto(
                         url,
@@ -7692,11 +7789,8 @@ class HeadlessEngine:
                                     phase3_consecutive_failures = 0
                                     if self._diagnostics:
                                         self._diagnostics.record(page, action, note="post-fill_form")
-                                    if self.hooks.after_action:
-                                        try:
-                                            self.hooks.after_action(page, action)
-                                        except Exception:
-                                            pass
+                                    # after_action gets its own fresh timeout budget
+                                    self._run_after_action_hook(page, action)
                             except Exception as e:
                                 logger.debug("Action FILL_FORM failed %s: %s", action.url, e)
                                 phase3_consecutive_failures += 1
@@ -7782,11 +7876,8 @@ class HeadlessEngine:
                                     phase3_consecutive_failures = 0
                                     if self._diagnostics:
                                         self._diagnostics.record(page, action, note="post-left_click")
-                                    if self.hooks.after_action:
-                                        try:
-                                            self.hooks.after_action(page, action)
-                                        except Exception:
-                                            pass
+                                    # after_action gets its own fresh timeout budget
+                                    self._run_after_action_hook(page, action)
                             except Exception as e:
                                 logger.debug("Action LEFT_CLICK failed %s: %s", action.url, e)
                                 phase3_consecutive_failures += 1
