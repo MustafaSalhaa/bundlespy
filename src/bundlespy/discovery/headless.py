@@ -45,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Set, Dict, Optional, Tuple
 from datetime import datetime
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 
 from ..storage.models import JSFile, Endpoint
 from ..safety.network import validate_url
@@ -2177,7 +2177,7 @@ _RP_HTML_ATTRS = _re.compile(
 
 # JS string literals — URLs passed to common HTTP call patterns
 _RP_JS_CALLS = _re.compile(
-    r'''(?:fetch|axios\.(?:get|post|put|patch|delete|request)|'XMLHttpRequest'|xhr\.open|'\.ajax'|'\$\.get'|'\$\.post')\s*\(\s*["'`]([^"'`\s]{4,400})["'`]''',
+    r'''(?:fetch|axios\.(?:get|post|put|patch|delete|request)|\$\.(?:ajax|get|post)|xhr\.open|XMLHttpRequest\.prototype\.open)\s*\(\s*["'`]([^"'`\s]{4,400})["'`]''',
     _re.IGNORECASE,
 )
 
@@ -2395,8 +2395,16 @@ class ResponseParser:
             if any(path_lower.endswith(ext) for ext in _RP_SKIP_EXTS):
                 continue
 
-            # Normalize: drop query + fragment for dedup
-            norm = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+            # Normalize: strip tracking params, keep functional query strings
+            _TRACKING = frozenset([
+                "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+                "fbclid", "gclid", "msclkid", "_ga", "ref", "referrer",
+                "source", "sid", "session_id", "ts", "t", "rand", "_", "cb",
+            ])
+            qs_pairs = parse_qsl(parsed.query, keep_blank_values=False)
+            kept = [(k, v) for k, v in qs_pairs if k.lower() not in _TRACKING and len(v) <= 120]
+            qs_norm = urlencode(sorted(kept)) if kept else ""
+            norm = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", qs_norm, ""))
             if norm in seen:
                 continue
             seen.add(norm)
@@ -4187,6 +4195,19 @@ class HeadlessEngine:
             ctx = f.get("ctx", "")
             if any(kw in ctx for kw in skip_kws):
                 continue
+
+            # Register explicit form action URL as a route immediately - don't wait for Phase 3
+            raw_action = f.get("action", "").strip()
+            if raw_action and not raw_action.startswith(("#", "javascript:", "mailto:", "tel:")):
+                resolved = urljoin(source_url, raw_action)
+                parsed_action = urlparse(resolved)
+                if parsed_action.scheme in ("http", "https"):
+                    # Build a normalized path+query route (same format _add_route expects)
+                    qs = parsed_action.query
+                    route_str = parsed_action.path + ("?" + qs if qs else "")
+                    if route_str:
+                        self._add_route(route_str)
+
             # pseudo-forms (div.form, role=form) use a different selector
             if f.get("pseudo"):
                 fid = f.get("id", "")
