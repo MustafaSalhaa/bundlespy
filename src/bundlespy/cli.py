@@ -972,16 +972,16 @@ def run_scan(args) -> int:
     # Upgrade any UNKNOWN endpoint that the crawler actually visited to ROUTE.
     # These are real pages confirmed to exist - no reason to show them as UNKNOWN.
     import re as _re_cli
-    _RE_OPAQUE_SEG = _re_cli.compile(r'^[A-Za-z0-9]{3,64}$')
+    _RE_OPAQUE_SEG = _re_cli.compile(r'^[A-Za-z0-9]{2,64}$')
 
     def _is_opaque_seg(s: str) -> bool:
         """True when a single path segment looks like a token - not a real route word."""
         if not _RE_OPAQUE_SEG.match(s):
             return False
-        # Mixed case (both upper and lower) - classic token
+        # Mixed case (both upper and lower) - classic token: siJv, Na, pF, tNKgr4GnJ5SCpBpu
         if s != s.lower() and s != s.upper():
             return True
-        # All-uppercase with digit, >= 4 chars - e.g. ALLTKG5, BUQ7X
+        # All-uppercase with digit, >= 4 chars: ALLTKG5, BUQ7X
         if s == s.upper() and any(c.isdigit() for c in s) and len(s) >= 4:
             return True
         return False
@@ -1215,6 +1215,11 @@ def run_scan(args) -> int:
                 continue
             if any(_RE_B64_SEG.match(s) for s in _path_segs):
                 continue
+            # Skip opaque token paths - Netlify short-link tokens, deploy IDs,
+            # RUM beacon tokens. The crawler visits these URLs (they 404) but
+            # they are never real application routes.
+            if any(_is_opaque_seg(s) for s in _path_segs):
+                continue
             _seen_ep.add(_key)
             # Categorize the page route
             _lower = _path.lower()
@@ -1251,6 +1256,10 @@ def run_scan(args) -> int:
         for ep in all_endpoints_extra:
             key = ep.url.rstrip("/").lower().split("?")[0]
             if key not in seen_ep_keys:
+                # Drop opaque token URLs - RUM beacon tokens, short-link IDs
+                _ep_path_segs = [s for s in (_upep(ep.url).path or "").split("/") if s]
+                if any(_is_opaque_seg(s) for s in _ep_path_segs):
+                    continue
                 # Bug fix: filter out-of-scope external URLs (portfolio links, 3rd-party)
                 if not scope.in_scope(ep.url):
                     ep.category = "EXTERNAL"
