@@ -40,7 +40,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from typing import Set, List, Tuple, Optional, Dict
 from datetime import datetime
-from urllib.parse import urlparse, urljoin, urldefrag, urlunparse
+from urllib.parse import urlparse, urljoin, urldefrag, urlunparse, quote_plus
 
 from .fetcher import Fetcher
 from .scope import ScopeChecker
@@ -484,39 +484,34 @@ def _extract_form_get_urls(html: str, base_url: str) -> List[str]:
         if not action_url.startswith(("http://", "https://")):
             continue
 
-        # Collect field names (we use placeholder values — no real data)
+        # Collect field names - URL-encode everything, deduplicate by normalized name
         params: List[str] = []
-
-        # <input name="foo" value="bar"> — prefer name-then-value order
         seen_names: Set[str] = set()
-        for inp_m in RE_INPUT_NAME_VAL.finditer(form_body):
-            name = inp_m.group(1).strip()
-            val  = (inp_m.group(2) or "").strip()
-            if name and name not in seen_names:
-                seen_names.add(name)
-                # Use the existing value if present, else a safe placeholder
-                params.append(f"{name}={val or 'test'}")
-        # Catch value-before-name attribute order
-        for inp_m in RE_INPUT_VAL_NAME.finditer(form_body):
-            val  = (inp_m.group(1) or "").strip()
-            name = inp_m.group(2).strip()
-            if name and name not in seen_names:
-                seen_names.add(name)
-                params.append(f"{name}={val or 'test'}")
 
-        # <select name="sort"> — add a placeholder option value
+        def _add_field(name: str, val: str = "test") -> None:
+            # Normalize name for dedup: lowercase, strip whitespace
+            key = name.strip().lower()
+            if not key or key in seen_names:
+                return
+            seen_names.add(key)
+            # URL-encode both name and value - spaces become %20, special chars escaped
+            params.append(f"{quote_plus(name.strip())}={quote_plus(val.strip() or 'test')}")
+
+        # <input name="foo" value="bar"> - name-then-value attribute order
+        for inp_m in RE_INPUT_NAME_VAL.finditer(form_body):
+            _add_field(inp_m.group(1), inp_m.group(2) or "")
+
+        # <input value="bar" name="foo"> - value-before-name attribute order
+        for inp_m in RE_INPUT_VAL_NAME.finditer(form_body):
+            _add_field(inp_m.group(2), inp_m.group(1) or "")
+
+        # <select name="sort">
         for sel_m in RE_SELECT_NAME.finditer(form_body):
-            name = sel_m.group(1).strip()
-            if name and name not in seen_names:
-                seen_names.add(name)
-                params.append(f"{name}=0")
+            _add_field(sel_m.group(1), "0")
 
         # <textarea name="message">
         for ta_m in RE_TEXTAREA_NAME.finditer(form_body):
-            name = ta_m.group(1).strip()
-            if name and name not in seen_names:
-                seen_names.add(name)
-                params.append(f"{name}=test")
+            _add_field(ta_m.group(1), "test")
 
         if params:
             qs  = "&".join(params)
