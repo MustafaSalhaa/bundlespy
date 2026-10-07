@@ -871,9 +871,10 @@ def run_scan(args) -> int:
 
         _js_new          = len(headless_files)
         _js_intercepted  = headless_stats.get("js_intercepted", 0)
-        # When headless found 0 new files but intercepted >0 JS responses, the
-        # static crawler already captured those files (dedup working correctly).
-        # Show both counts so the operator isn't misled.
+        # When headless intercepted JS responses but added 0 new files, the static
+        # crawler already fetched all of them before headless ran - dedup is working.
+        # Label it "already known" so the operator isn't misled into thinking no JS
+        # was collected.
         if _js_intercepted > _js_new:
             _js_label = f"{_js_new} JS new ({_js_intercepted} already known)"
         else:
@@ -1088,7 +1089,7 @@ def run_scan(args) -> int:
                 len(_top),
                 ", ".join(_reason_parts),
             )
-            if getattr(args, "verbose", False) or getattr(args, "debug", False):
+            if getattr(args, "debug", False):
                 for _c in _dropped:
                     _reason = _c.signals_missed[0] if _c.signals_missed else "score_below_threshold"
                     _logger.info("  DROPPED  score=%+d  %-60s  reason: %s",
