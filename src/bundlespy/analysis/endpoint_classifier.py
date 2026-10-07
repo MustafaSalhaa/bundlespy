@@ -662,6 +662,11 @@ _REAL_RESOURCE_WORDS: Set[str] = {
     "internal", "external", "public", "private",
     "admin", "management", "dashboard",
     "me", "self", "current",
+    # Common page/nav routes that are valid endpoints
+    "contact", "about", "services", "home", "pricing", "careers",
+    "blog", "news", "faq", "help", "support", "portfolio",
+    "gallery", "cv", "resume", "skills", "experience", "certificates",
+    "work", "hire", "team", "clients", "testimonials",
 }
 
 # Words that commonly appear in non-URL strings and are NOT REST resources
@@ -914,8 +919,8 @@ def score_endpoint(url: str, surrounding_context: str = "") -> Tuple[int, List[s
     if RE_I18N_KEY.match(url) and "/" not in url:
         return -1000, [], ["i18n_key"]
 
-    # SQL fragment
-    if RE_SQL_FRAGMENT.search(url):
+    # SQL fragment - only check bare path strings, not full URLs (slugs contain FROM/TO/etc.)
+    if RE_SQL_FRAGMENT.search(url) and not RE_FULL_URL.match(url):
         return -1000, [], ["sql_fragment"]
 
     # Regex pattern string
@@ -980,12 +985,8 @@ def score_endpoint(url: str, surrounding_context: str = "") -> Tuple[int, List[s
     # only applies when the full URL path is a single short segment
     if len(_opaque_segs) == 1:
         _s = _opaque_segs[0]
-        if re.match(r'^[A-Za-z0-9]{2,8}$', _s) and not re.match(
-            r'^(?:api|auth|admin|login|logout|register|signup|user|users|'
-            r'shop|cart|checkout|products?|orders?|search|account|profile|'
-            r'about|contact|home|index|page|pages|blog|news|faq|help|'
-            r'stock|toggle|v\d|v\d+)$', _s, re.IGNORECASE
-        ):
+        # Only reject short segments that are not known real resource/page words
+        if re.match(r'^[A-Za-z0-9]{2,8}$', _s) and _s.lower() not in _REAL_RESOURCE_WORDS:
             return -1000, [], ["opaque_token_short_seg"]
 
     # ---- Structural signals ------------------------------------------------
