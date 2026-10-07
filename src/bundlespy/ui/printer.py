@@ -45,6 +45,23 @@ def _section(title: str, count: str = "", color: str = "") -> None:
     _p(f"  {A.GREY}{_line()}{A.RESET}")
 
 
+def _fmt_detail(detail: str) -> str:
+    """
+    Color numeric tokens cyan inside a stat string.
+    "47 pages  3 JS files" -> "47" cyan, rest grey.
+    Also normalizes whitespace runs into " · " separators.
+    """
+    if not detail:
+        return ""
+    # Replace 2+ spaces with a separator
+    normalized = re.sub(r"  +", "  ·  ", detail.strip())
+    # Color each numeric token
+    def _col_num(m):
+        return f"{A.CYAN}{m.group(0)}{A.RESET}"
+    colored = re.sub(r"\b(\d+)\b", _col_num, normalized)
+    return f"  {A.GREY}·{A.RESET}  {A.GREY}{colored}{A.RESET}"
+
+
 SEV_COLOR = {
     "CRITICAL": A.RED    + A.BOLD,
     "HIGH":     A.ORANGE + A.BOLD,
@@ -59,11 +76,10 @@ SEV_COLOR = {
 def print_header(target, mode="Active", scope="Strict", version="1.0.0", author="Mustafa Salha"):
     ts = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
     _p()
-    _p(f"  {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
+    _p(f"  {A.CYAN}▸{A.RESET} {A.WHITE}{A.BOLD}BundleSpy{A.RESET}  {A.GREY}v{version}{A.RESET}")
     _p(f"  {A.GREY}{_line()}{A.RESET}")
-    _p(f"  {_label('Target')}{A.CYAN}{target}{A.RESET}")
-    _p(f"  {_label('Mode')}{mode}")
-    _p(f"  {_label('Scope')}{scope}")
+    _p(f"  {_label('Target')}{A.CYAN}{A.BOLD}{target}{A.RESET}")
+    _p(f"  {_label('Mode')}{mode}  {A.GREY}·  {scope} scope{A.RESET}")
     _p(f"  {_label('Started')}{A.GREY}{ts}{A.RESET}")
     _p()
 
@@ -180,16 +196,16 @@ def print_auth_result(auth: dict) -> None:
 # ── Phase lines ───────────────────────────────────────────────────────────────
 
 def phase(label):
-    _p(f"  {A.GREY}›{A.RESET}  {label}")
+    _p(f"  {A.GREY}·{A.RESET}  {label}")
 
 
 def phase_done(label, detail=""):
-    det = f"  {A.GREY}{detail}{A.RESET}" if detail else ""
-    _p(f"  {A.GREEN}✓{A.RESET}  {label}{det}")
+    det = _fmt_detail(detail) if detail else ""
+    _p(f"  {A.GREEN}✓{A.RESET}  {A.WHITE}{label}{A.RESET}{det}")
 
 
 def phase_warn(label):
-    _p(f"  {A.YELLOW}!{A.RESET}  {label}")
+    _p(f"  {A.YELLOW}⚠{A.RESET}  {label}")
 
 
 def phase_error(label):
