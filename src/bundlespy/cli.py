@@ -1585,6 +1585,10 @@ def run_scan(args) -> int:
     extras["coverage_ledger"] = coverage_ledger
 
     # ── Attack Testing Engine ─────────────────────────────────────────────────
+    # Pass library findings to the scan result so the surface mappers can skip
+    # known library files (React, Angular, jQuery, etc.) when emitting candidates.
+    result.library_findings = extras.get("lib_findings", [])
+
     attack_report = None
     if not args.passive:
         try:
@@ -1741,6 +1745,7 @@ def run_local(args) -> int:
         findings=all_findings, endpoints=all_endpoints,
         infrastructure=all_infra, errors=[],
     )
+    result.library_findings = lib_findings
 
     # ── Coverage metrics ──────────────────────────────────────────────────────
     from .analysis.coverage import compute_coverage
