@@ -777,7 +777,7 @@ def run_scan(args) -> int:
     # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
         if not args.quiet:
-            phase("Launching advanced headless browser")
+            phase("Launching headless browser")
         from .discovery.headless import collect_headless_full, _parse_cookie_string
         # Extract routes from already-collected JS files
         # so headless visits every Angular/React/Vue route
@@ -1319,7 +1319,7 @@ def run_scan(args) -> int:
                 all_endpoints.append(ep)
     if not args.quiet:
         phase_done("Analysis complete",
-            f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infrastructure")
+            f"{len(all_findings)} findings  {len(all_endpoints)} endpoints  {len(all_infra)} infra")
 
     # Deduplicate findings by rule + value — same secret on multiple pages
     # becomes ONE finding with all occurrences listed
@@ -1553,7 +1553,7 @@ def run_scan(args) -> int:
         from .analysis.coverage import build_coverage_ledger
 
         if not getattr(args, "no_passive_validate", False):
-            phase("Stage 5 — passive validation of HIGH/CRITICAL findings (background)")
+            phase("Passive validation  (background)")
 
             def _run_validation():
                 try:
