@@ -1,7 +1,7 @@
 """
 Endpoint Intelligence Extractor.
 
-Goes beyond raw URL extraction — pulls out for each endpoint:
+Goes beyond raw URL extraction - pulls out for each endpoint:
 - HTTP method (from the actual call context)
 - Query parameters
 - Path parameters
@@ -10,14 +10,17 @@ Goes beyond raw URL extraction — pulls out for each endpoint:
 - Authentication context (Bearer / Cookie / ApiKey)
 - Category (AUTH / ADMIN / API / GRAPHQL / etc)
 
-Recognizes: fetch, axios, XMLHttpRequest, Angular HttpClient, jQuery ajax.
-Only assigns a method when there is real evidence — otherwise UNKNOWN.
+Recognizes: fetch, axios, XMLHttpRequest, Angular HttpClient, jQuery ajax,
+superagent, ky, React Query / TanStack Query (useQuery / useMutation /
+useInfiniteQuery), and url/endpoint constants assigned in the same file.
+
+Only assigns a method when there is real evidence - otherwise UNKNOWN.
 """
 
 import re
 import json
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse, parse_qs
 
 from ..storage.models import Endpoint
@@ -81,6 +84,139 @@ RE_JQUERY_SHORT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# superagent: request.get("/url") / request.post("/url").send({...})
+RE_SUPERAGENT = re.compile(
+    r'(?:request|superagent)\s*\.\s*(get|post|put|delete|patch)\s*\(\s*'
+    r'[`"\']((?:/|https?://)[^`"\']+)[`"\']',
+    re.IGNORECASE,
+)
+
+# ky: ky.get("/url") / ky.post("/url", { json: {...} })
+RE_KY = re.compile(
+    r'\bky\s*\.\s*(get|post|put|delete|patch)\s*\(\s*'
+    r'[`"\']((?:/|https?://)[^`"\']+)[`"\']'
+    r'(?:\s*,\s*(\{[^;]{0,400}?\}))?',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# React Query / TanStack: useQuery({ queryKey: [...], queryFn: () => fetch("/url") })
+# Captures the key string plus any nested fetch/axios URL
+RE_USE_QUERY = re.compile(
+    r'(?:useQuery|useInfiniteQuery)\s*\(\s*\{([^;]{0,600}?)\}\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# useMutation({ mutationFn: (data) => api.post("/url", data) })
+RE_USE_MUTATION = re.compile(
+    r'useMutation\s*\(\s*\{([^;]{0,600}?)\}\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# React Query v5 array-key form: useQuery(["key", id], () => fetch("/url"))
+RE_USE_QUERY_V4 = re.compile(
+    r'(?:useQuery|useInfiniteQuery)\s*\(\s*\[([^\]]{0,200})\]\s*,\s*(?:\([^)]*\)\s*=>\s*)?'
+    r'(?:fetch|axios\s*\.(?:get|post)|api\s*\.(?:get|post))\s*\(\s*'
+    r'[`"\']((?:/|https?://)[^`"\']+)[`"\']',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# $http (AngularJS legacy): $http.get("/url") / $http({ method: "POST", url: "/url" })
+RE_ANGULARJS_HTTP_SHORT = re.compile(
+    r'\$http\s*\.\s*(get|post|put|delete|patch)\s*\(\s*'
+    r'[`"\']((?:/|https?://)[^`"\']+)[`"\']'
+    r'(?:\s*,\s*(\{[^;]{0,400}?\}))?',
+    re.IGNORECASE | re.DOTALL,
+)
+RE_ANGULARJS_HTTP_CONFIG = re.compile(
+    r'\$http\s*\(\s*(\{[^;]{0,500}?\})\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# WebSocket: new WebSocket("wss://host/path")
+RE_WEBSOCKET = re.compile(
+    r'new\s+WebSocket\s*\(\s*[`"\'](wss?://[^`"\']+)[`"\']',
+    re.IGNORECASE,
+)
+
+# GraphQL: client.query({ query: gql`...`, variables: {...} })
+# Also apollo client: useLazyQuery / useSubscription
+RE_GQL_OPERATION = re.compile(
+    r'(?:client\.(?:query|mutate|subscribe)|useLazyQuery|useSubscription)\s*\(\s*\{([^;]{0,600}?)\}\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# ── Constant / variable resolution ────────────────────────────────────────────
+# Scan for const/let/var assignments of URL-like strings and build a substitution
+# table. Used to resolve fetch(ENDPOINT_CONST) where the literal is assigned nearby.
+
+RE_CONST_URL = re.compile(
+    r'(?:const|let|var)\s+([A-Z_][A-Z0-9_]{1,50})\s*=\s*[`"\']((?:/|https?://)[^`"\']+)[`"\']',
+    re.IGNORECASE,
+)
+
+# Also capture: const ENDPOINT = BASE_URL + "/path" (static suffix after +)
+RE_CONST_CONCAT = re.compile(
+    r'(?:const|let|var)\s+([A-Z_][A-Z0-9_]{1,50})\s*=\s*[A-Z_][A-Z0-9_]*\s*\+\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+# fetch with a variable as URL: fetch(SOME_CONST, opts)
+RE_FETCH_VAR = re.compile(
+    r'fetch\s*\(\s*([A-Z_][A-Z0-9_]{1,50})\s*(?:,\s*(\{[^;]{0,400}?\}))?\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# axios.get(SOME_CONST) / axios.post(SOME_CONST, body)
+RE_AXIOS_VAR = re.compile(
+    r'axios\s*\.\s*(get|post|put|delete|patch)\s*\(\s*([A-Z_][A-Z0-9_]{1,50})\s*'
+    r'(?:,\s*(\{[^;]{0,400}?\}))?\s*\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# ── Template literal static prefix extraction ─────────────────────────────────
+# `${BASE}/users/${userId}` → treat "/users/*" as the structural endpoint
+RE_TEMPLATE_LITERAL_API = re.compile(
+    r'fetch\s*\(\s*`([^`]+)`',
+    re.IGNORECASE,
+)
+
+
+def _build_constant_map(content: str) -> Dict[str, str]:
+    """
+    One-pass constant resolution. Scans file for URL-valued const/let/var
+    declarations and returns {VAR_NAME: url_string}.
+    Concat form produces only the path suffix as a relative path.
+    """
+    constants: Dict[str, str] = {}
+    for m in RE_CONST_URL.finditer(content):
+        name, url = m.group(1), m.group(2)
+        constants[name] = url
+    for m in RE_CONST_CONCAT.finditer(content):
+        name, suffix = m.group(1), m.group(2)
+        if suffix.startswith("/"):
+            constants[name] = suffix
+    return constants
+
+
+def _resolve_template_literal(tmpl: str) -> Optional[str]:
+    """
+    Extract the static prefix from a template literal URL.
+    `${BASE}/users/${id}/orders` -> /users/*/orders
+    Returns None if there is no useful static prefix.
+    """
+    # Replace ${...} with a wildcard placeholder
+    normalized = re.sub(r'\$\{[^}]+\}', '*', tmpl)
+    # Must start with / or http to be a real path
+    if not (normalized.startswith("/") or normalized.startswith("http")):
+        return None
+    # If it is nothing but wildcards and slashes, not useful
+    stripped = normalized.replace("*", "").replace("/", "").strip()
+    if not stripped:
+        return None
+    return normalized
+
 
 # ── Field extractors ──────────────────────────────────────────────────────────
 
@@ -110,25 +246,25 @@ def _extract_body_fields(options: str) -> List[Dict]:
     if stringify:
         body_block = stringify.group(1)
     else:
-        # body: {...} or data: {...}
-        m = re.search(r'(?:body|data)\s*:\s*\{([^}]{0,400})\}',
+        # body: {...} or data: {...} or json: {...} (ky uses json:)
+        m = re.search(r'(?:body|data|json)\s*:\s*\{([^}]{0,400})\}',
                       options, re.IGNORECASE)
         if m:
             body_block = m.group(1)
 
     # If no stringify/body/data block found, treat the whole thing as a body object
-    # (axios/jquery pass the body as a direct object argument)
     if not body_block and options.strip().startswith("{"):
         body_block = options.strip()[1:-1] if options.strip().endswith("}") else options.strip()[1:]
 
     if body_block:
-        # Extract keys: word before colon
         for km in re.finditer(r'["\']?([A-Za-z_][A-Za-z0-9_]{1,40})["\']?\s*:',
                               body_block):
             key = km.group(1)
             if key.lower() not in ("method", "headers", "body", "data",
-                                    "url", "type", "params", "content-type",
-                                    "authorization") and key not in seen:
+                                    "json", "url", "type", "params",
+                                    "content-type", "authorization",
+                                    "queryfn", "mutationfn", "querykey",
+                                    "enabled", "staletime", "cachetime") and key not in seen:
                 seen.add(key)
                 fields.append({"name": key})
 
@@ -180,7 +316,7 @@ def _extract_query_params(url: str) -> List[Dict]:
 
 def _extract_path_params(path: str) -> List[Dict]:
     """
-    Detect path parameters — :id, {id}, ${var}, [id].
+    Detect path parameters - :id, {id}, ${var}, [id], *.
     Returns positions in the path.
     """
     params  = []
@@ -256,7 +392,8 @@ def _make_endpoint(url: str, method: str, source_file: str,
 
 def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]:
     """
-    Extract endpoints WITH full intelligence — method, params, body, auth.
+    Extract endpoints WITH full intelligence - method, params, body, auth.
+    Includes constant resolution and React Query pattern detection.
     """
     endpoints: List[Endpoint] = []
     seen: Dict[str, Endpoint] = {}
@@ -267,7 +404,7 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
     def _add(ep: Endpoint) -> None:
         k = _key(ep.url, ep.method)
         if k in seen:
-            # Merge — prefer the one with more intelligence
+            # Merge - prefer the one with more intelligence
             existing = seen[k]
             if ep.body_fields and not existing.body_fields:
                 existing.body_fields = ep.body_fields
@@ -278,6 +415,9 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
             return
         seen[k] = ep
         endpoints.append(ep)
+
+    # Build constant map for this file - resolves fetch(CONST) patterns
+    constant_map = _build_constant_map(content)
 
     # ── fetch with options ────────────────────────────────────────────────────
     for m in RE_FETCH_FULL.finditer(content):
@@ -296,6 +436,28 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
         _add(_make_endpoint(url, "GET", file_url, _get_line(content, m.start()),
                             evidence=m.group(0), confidence=0.85))
 
+    # ── fetch with variable URL ───────────────────────────────────────────────
+    for m in RE_FETCH_VAR.finditer(content):
+        var_name = m.group(1)
+        options  = m.group(2) or ""
+        resolved = constant_map.get(var_name)
+        if not resolved:
+            continue
+        method  = _extract_method_from_options(options) or "GET"
+        body    = _extract_body_fields(options)
+        headers = _extract_headers(options)
+        auth    = _detect_auth_context(options, headers)
+        _add(_make_endpoint(resolved, method, file_url, _get_line(content, m.start()),
+                            body, headers, auth, m.group(0), 0.88))
+
+    # ── template literal fetch ─────────────────────────────────────────────
+    for m in RE_TEMPLATE_LITERAL_API.finditer(content):
+        tmpl = m.group(1)
+        resolved = _resolve_template_literal(tmpl)
+        if resolved and (resolved.startswith("/") or resolved.startswith("http")):
+            _add(_make_endpoint(resolved, "GET", file_url, _get_line(content, m.start()),
+                                evidence=m.group(0), confidence=0.80))
+
     # ── axios.method ──────────────────────────────────────────────────────────
     for m in RE_AXIOS_METHOD.finditer(content):
         method  = m.group(1).upper()
@@ -306,6 +468,20 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
         auth    = _detect_auth_context(options, headers)
         _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
                             body, headers, auth, m.group(0), 0.92))
+
+    # ── axios.method with variable URL ────────────────────────────────────────
+    for m in RE_AXIOS_VAR.finditer(content):
+        method   = m.group(1).upper()
+        var_name = m.group(2)
+        options  = m.group(3) or ""
+        resolved = constant_map.get(var_name)
+        if not resolved:
+            continue
+        body    = _extract_body_fields(options)
+        headers = _extract_headers(options)
+        auth    = _detect_auth_context(options, headers)
+        _add(_make_endpoint(resolved, method, file_url, _get_line(content, m.start()),
+                            body, headers, auth, m.group(0), 0.88))
 
     # ── axios config object ───────────────────────────────────────────────────
     for m in RE_AXIOS_CONFIG.finditer(content):
@@ -335,7 +511,6 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
         args   = m.group(4) or ""
         if not url or not (url.startswith("/") or url.startswith("http") or url.startswith("./")):
             continue
-        # Clean up ./ and template placeholders
         url = url.replace("./", "/")
         url = re.sub(r'\$\{[^}]+\}', '*', url)
         if len(url) < 2:
@@ -344,6 +519,30 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
         auth = _detect_auth_context(args, {})
         _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
                             body, {}, auth, m.group(0), 0.88))
+
+    # ── AngularJS $http ───────────────────────────────────────────────────────
+    for m in RE_ANGULARJS_HTTP_SHORT.finditer(content):
+        method  = m.group(1).upper()
+        url     = m.group(2)
+        options = m.group(3) or ""
+        body    = _extract_body_fields(options)
+        headers = _extract_headers(options)
+        auth    = _detect_auth_context(options, headers)
+        _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
+                            body, headers, auth, m.group(0), 0.88))
+
+    for m in RE_ANGULARJS_HTTP_CONFIG.finditer(content):
+        block = m.group(1)
+        url_m = re.search(r'url\s*:\s*["\']((?:/|https?://)[^"\']+)["\']', block, re.IGNORECASE)
+        if not url_m:
+            continue
+        url    = url_m.group(1)
+        method = _extract_method_from_options(block) or "GET"
+        body   = _extract_body_fields(block)
+        headers = _extract_headers(block)
+        auth   = _detect_auth_context(block, headers)
+        _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
+                            body, headers, auth, m.group(0), 0.88))
 
     # ── jQuery ajax ───────────────────────────────────────────────────────────
     for m in RE_JQUERY_AJAX.finditer(content):
@@ -368,5 +567,66 @@ def extract_endpoint_intelligence(content: str, file_url: str) -> List[Endpoint]
         body    = _extract_body_fields(options)
         _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
                             body, evidence=m.group(0), confidence=0.85))
+
+    # ── superagent ────────────────────────────────────────────────────────────
+    for m in RE_SUPERAGENT.finditer(content):
+        method = m.group(1).upper()
+        url    = m.group(2)
+        _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
+                            evidence=m.group(0), confidence=0.88))
+
+    # ── ky ────────────────────────────────────────────────────────────────────
+    for m in RE_KY.finditer(content):
+        method  = m.group(1).upper()
+        url     = m.group(2)
+        options = m.group(3) or ""
+        body    = _extract_body_fields(options)
+        headers = _extract_headers(options)
+        auth    = _detect_auth_context(options, headers)
+        _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
+                            body, headers, auth, m.group(0), 0.90))
+
+    # ── React Query v5 / TanStack: useQuery({ queryKey, queryFn }) ────────────
+    for m in RE_USE_QUERY.finditer(content):
+        block = m.group(1)
+        # queryFn may contain a fetch/axios call - extract any URL inside it
+        inner_urls = re.findall(
+            r'[`"\']((?:/|https?://)[^`"\']{2,100})[`"\']',
+            block,
+        )
+        for url in inner_urls:
+            if any(url.endswith(ext) for ext in (".js", ".css", ".png", ".jpg")):
+                continue
+            _add(_make_endpoint(url, "GET", file_url, _get_line(content, m.start()),
+                                evidence=m.group(0)[:200], confidence=0.82))
+
+    # ── React Query v4 array-key form ─────────────────────────────────────────
+    for m in RE_USE_QUERY_V4.finditer(content):
+        url = m.group(2)
+        _add(_make_endpoint(url, "GET", file_url, _get_line(content, m.start()),
+                            evidence=m.group(0)[:200], confidence=0.85))
+
+    # ── useMutation ───────────────────────────────────────────────────────────
+    for m in RE_USE_MUTATION.finditer(content):
+        block = m.group(1)
+        # Look for method + URL inside mutationFn
+        inner_matches = re.finditer(
+            r'(?:axios|fetch|api|request|ky)\s*[.(]\s*(?:(post|put|delete|patch)\s*[.(]\s*)?'
+            r'[`"\']((?:/|https?://)[^`"\']{2,100})[`"\']',
+            block, re.IGNORECASE,
+        )
+        for im in inner_matches:
+            method = (im.group(1) or "POST").upper()
+            url    = im.group(2)
+            if any(url.endswith(ext) for ext in (".js", ".css", ".png")):
+                continue
+            _add(_make_endpoint(url, method, file_url, _get_line(content, m.start()),
+                                evidence=m.group(0)[:200], confidence=0.83))
+
+    # ── WebSocket ─────────────────────────────────────────────────────────────
+    for m in RE_WEBSOCKET.finditer(content):
+        url = m.group(1)
+        _add(_make_endpoint(url, "WS", file_url, _get_line(content, m.start()),
+                            evidence=m.group(0), confidence=0.92))
 
     return endpoints
