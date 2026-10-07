@@ -875,8 +875,14 @@ def _detect_file_ops(
 
     has_upload_path   = any(s in ("upload", "uploads", "import") for s in segs)
     has_download_path = any(s in ("download", "downloads", "export") for s in segs)
-    has_file_path     = any(s in ("files", "file", "documents", "attachments",
-                                   "media", "images", "assets") for s in segs)
+    has_file_path     = any(s in ("files", "file", "documents", "attachments") for s in segs)
+
+    # "media", "images", "assets" alone are too common on CDN/static paths.
+    # Only flag them when the method is mutating OR a file-operation param is present.
+    has_generic_media_path = any(s in ("media", "images", "assets") for s in segs)
+    has_file_param         = any(_norm_name(p) in _FILE_HINTS for _, p, _ in params)
+    if has_generic_media_path and (_http_method_is_mutating(method) or has_file_param):
+        has_file_path = True
 
     # Path-level: file-storage endpoints with no recognized params still classify
     for path_flag, sub, reason_str, base_conf in (
@@ -1787,6 +1793,224 @@ def _detect_deserialization(
     )
 
 
+# Token storage key names - auth material that should not be in localStorage/sessionStorage
+_TOKEN_STORAGE_KEYS: Set[str] = {_norm(x) for x in {
+    "token", "access_token", "accesstoken", "refresh_token", "refreshtoken",
+    "id_token", "idtoken", "jwt", "auth_token", "authtoken",
+    "api_key", "apikey", "api_secret", "apisecret",
+    "session", "session_token", "sessiontoken",
+    "credentials", "credential", "secret", "private_key",
+    "password", "passwd",
+}}
+
+# Regex: localStorage.setItem('key', ...) or sessionStorage.setItem('key', ...)
+_RE_STORAGE_SETITEM = re.compile(
+    r'(?:localStorage|sessionStorage)\s*\.\s*setItem\s*\(\s*["\']([^"\']{1,80})["\']',
+    re.IGNORECASE,
+)
+# Regex: localStorage['key'] = ... or sessionStorage["key"] = ...
+_RE_STORAGE_BRACKET = re.compile(
+    r'(?:localStorage|sessionStorage)\s*\[\s*["\']([^"\']{1,80})["\']\s*\]\s*=',
+    re.IGNORECASE,
+)
+
+
+def _detect_token_storage(
+    ep, method: str, path: str,
+    sources: List[str], seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """
+    Detect auth tokens written to localStorage or sessionStorage.
+    Reads evidence from the endpoint's source_code or evidence field.
+    localStorage/sessionStorage tokens are vulnerable to XSS exfiltration.
+    """
+    items: List[AttackSurfaceItem] = []
+
+    # Pull source evidence - check evidence list, notes, and any attached source snippet
+    evidence_text = ""
+    for attr in ("evidence", "notes", "source_snippet", "raw_evidence"):
+        val = getattr(ep, attr, None)
+        if isinstance(val, str):
+            evidence_text += val + "\n"
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, str):
+                    evidence_text += item + "\n"
+                elif isinstance(item, dict):
+                    evidence_text += str(item.get("snippet", "")) + "\n"
+
+    if not evidence_text.strip():
+        return items
+
+    found_keys: List[Tuple[str, str]] = []  # (storage_type, key_name)
+
+    for match in _RE_STORAGE_SETITEM.finditer(evidence_text):
+        key_name = match.group(1)
+        storage  = "localStorage" if "localStorage" in match.group(0) else "sessionStorage"
+        norm_key = _norm(key_name)
+        if norm_key in _TOKEN_STORAGE_KEYS or any(
+            norm_key.startswith(pfx) for pfx in ("token", "auth", "jwt", "secret", "key", "cred")
+        ):
+            found_keys.append((storage, key_name))
+
+    for match in _RE_STORAGE_BRACKET.finditer(evidence_text):
+        key_name = match.group(1)
+        storage  = "localStorage" if "localStorage" in match.group(0) else "sessionStorage"
+        norm_key = _norm(key_name)
+        if norm_key in _TOKEN_STORAGE_KEYS or any(
+            norm_key.startswith(pfx) for pfx in ("token", "auth", "jwt", "secret", "key", "cred")
+        ):
+            found_keys.append((storage, key_name))
+
+    for storage, key_name in found_keys:
+        dedup_key = _dedup_key("TOKEN_STORAGE", path, key_name, storage, method)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        # sessionStorage is slightly less severe (tab-scoped) but still XSS-exploitable
+        base_confidence = 72 if storage == "localStorage" else 65
+        confidence = min(base_confidence + _source_confidence_boost(sources), 88)
+
+        items.append(AttackSurfaceItem(
+            endpoint_url=ep.url,
+            method=method,
+            param_name=key_name,
+            vuln_class="TOKEN_STORAGE",
+            reason=(
+                f"Auth material '{key_name}' written to {storage} - "
+                "XSS can exfiltrate token; use HttpOnly cookie instead"
+            ),
+            priority=_confidence_to_priority(confidence),
+            source_file=getattr(ep, "source_file", "") or "",
+            param_location=storage,
+            sub_class="INSECURE_TOKEN_STORAGE",
+            confidence=confidence,
+            status=SurfaceStatus.CANDIDATE,
+            evidence_sources=list(sources),
+            provenance=",".join(sources),
+        ))
+
+    return items
+
+
+def _build_endpoint_field_index(endpoints: List) -> Dict[str, Set[str]]:
+    """
+    Build a map of {field_name -> set of endpoint URLs} from body/query params.
+    Used for cross-endpoint IDOR correlation.
+    """
+    index: Dict[str, Set[str]] = {}
+    for ep in endpoints:
+        params = _collect_params(ep)
+        for _, pname, _ in params:
+            norm = _norm_name(pname)
+            if norm not in index:
+                index[norm] = set()
+            index[norm].add(ep.url)
+    return index
+
+
+def _correlate_cross_endpoint_idor(
+    endpoints: List,
+    idor_items: List[AttackSurfaceItem],
+    seen: Set[str],
+) -> List[AttackSurfaceItem]:
+    """
+    Cross-endpoint IDOR correlation.
+
+    Finds resource reference chains: endpoint A returns an ID field in its response
+    (e.g. userId, orderId) and endpoint B accepts that same field name as a parameter.
+    This pattern is a strong BOLA/IDOR signal - suggests you can enumerate B by
+    harvesting IDs from A.
+
+    We detect this statically using param name overlap across endpoints.
+    Any param name that is an IDOR hint AND appears in multiple endpoints is flagged.
+    """
+    correlated: List[AttackSurfaceItem] = []
+
+    # Build per-URL param name sets
+    url_params: Dict[str, Set[str]] = {}
+    for ep in endpoints:
+        url  = getattr(ep, "url", "") or ""
+        if not url:
+            continue
+        params = _collect_params(ep)
+        url_params[url] = {_norm_name(p) for _, p, _ in params if _norm_name(p) in _IDOR_HINTS or _ends_with_id_suffix(_norm_name(p))}
+
+    # Group endpoints by shared IDOR param names
+    # param_name -> [url1, url2, ...]
+    param_to_urls: Dict[str, List[str]] = {}
+    for url, param_set in url_params.items():
+        for p in param_set:
+            if p not in param_to_urls:
+                param_to_urls[p] = []
+            param_to_urls[p].append(url)
+
+    # Only flag when the same IDOR-hint param appears in 2+ endpoints
+    # (single-endpoint IDOR is already covered by _detect_idor)
+    ep_by_url = {getattr(ep, "url", ""): ep for ep in endpoints}
+
+    for param_norm, urls in param_to_urls.items():
+        if len(urls) < 2:
+            continue
+
+        # Sort for consistent key generation
+        urls_sorted = sorted(urls)
+        chain_key   = f"xidor:{param_norm}:{':'.join(urls_sorted[:3])}"
+        if chain_key in seen:
+            continue
+        seen.add(chain_key)
+
+        # Build confidence from chain length and source quality
+        chain_len   = min(len(urls_sorted), 5)
+        base_conf   = 45 + (chain_len - 2) * 8  # 45 for 2-endpoint, +8 per extra
+
+        # Collect combined sources from all chained endpoints
+        combined_sources: List[str] = []
+        for url in urls_sorted[:5]:
+            ep = ep_by_url.get(url)
+            if ep:
+                for s in _evidence_sources(ep):
+                    if s not in combined_sources:
+                        combined_sources.append(s)
+
+        confidence = min(base_conf + _source_confidence_boost(combined_sources), 85)
+
+        # Use the first endpoint as the anchor for the finding
+        anchor_ep = ep_by_url.get(urls_sorted[0])
+        if not anchor_ep:
+            continue
+
+        anchor_method = (getattr(anchor_ep, "method", None) or "GET").upper()
+        src_file      = getattr(anchor_ep, "source_file", "") or ""
+
+        # Unpack the normalized param name back to a readable form
+        display_param = param_norm  # already normalized, but descriptive enough
+
+        correlated.append(AttackSurfaceItem(
+            endpoint_url=urls_sorted[0],
+            method=anchor_method,
+            param_name=display_param,
+            vuln_class="IDOR_CHAIN",
+            reason=(
+                f"Param '{display_param}' shared across {chain_len} endpoints - "
+                f"cross-endpoint object reference chain; IDs from one endpoint may "
+                f"enumerate others: {', '.join(urls_sorted[1:3])}"
+            ),
+            priority=_confidence_to_priority(confidence),
+            source_file=src_file,
+            param_location="cross_endpoint",
+            sub_class="CROSS_ENDPOINT_BOLA",
+            confidence=confidence,
+            status=SurfaceStatus.CANDIDATE,
+            evidence_sources=combined_sources,
+            provenance=",".join(combined_sources),
+            notes=f"Chain ({chain_len} endpoints): " + " | ".join(urls_sorted[:5]),
+        ))
+
+    return correlated
+
+
 def _detect_privesc_chain(
     ep, method: str, path: str, segs: List[str],
     params: List[Tuple[str, str, Optional[str]]],
@@ -1839,9 +2063,20 @@ def _detect_privesc_chain(
 
 # ── Main analysis function ────────────────────────────────────────────────────
 
-def analyze_attack_surface(endpoints: List) -> Dict:
+def analyze_attack_surface(
+    endpoints: List,
+    validation_results: Optional[Dict[str, Any]] = None,
+) -> Dict:
     """
     Analyze discovered endpoints and return the security-relevant attack surface.
+
+    Args:
+        endpoints:          List of Endpoint objects to analyze.
+        validation_results: Optional dict keyed by URL to ValidationResult objects
+                            (from endpoint_validator.validation_results_by_url).
+                            When provided, CANDIDATE items are promoted to VALIDATED
+                            for any endpoint whose HTTP probe confirmed existence,
+                            and CORS/cookie/sensitive-field findings are merged in.
 
     Returns a backward-compatible dict. All original keys are preserved.
     Additional categories are additive.
@@ -1872,6 +2107,8 @@ def analyze_attack_surface(endpoints: List) -> Dict:
     exposed_files:      List[AttackSurfaceItem] = []
     deserialization:    List[AttackSurfaceItem] = []
     privesc_chain:      List[AttackSurfaceItem] = []
+    token_storage:      List[AttackSurfaceItem] = []
+    idor_chain:         List[AttackSurfaceItem] = []
     # Diagnostic: endpoints that raised exceptions
     analysis_errors:    List[Dict] = []
 
@@ -1897,6 +2134,8 @@ def analyze_attack_surface(endpoints: List) -> Dict:
     seen_expfil: Set[str] = set()
     seen_deser : Set[str] = set()
     seen_priesc: Set[str] = set()
+    seen_tokst : Set[str] = set()
+    seen_xidor : Set[str] = set()
     # State-change / auth / admin / privilege dedup by method+path
     seen_sc    : Set[str] = set()
     seen_auth  : Set[str] = set()
@@ -2043,6 +2282,9 @@ def analyze_attack_surface(endpoints: List) -> Dict:
             if deser_item:
                 deserialization.append(deser_item)
 
+            # ── Token storage (localStorage/sessionStorage with auth keys) ───────
+            token_storage.extend(_detect_token_storage(ep, method, path, sources, seen_tokst))
+
             # ── Privilege escalation chain ────────────────────────────────────
             # Use already-collected IDOR items for this endpoint
             ep_idor_items = [it for it in idor if it.endpoint_url == ep.url]
@@ -2058,6 +2300,123 @@ def analyze_attack_surface(endpoints: List) -> Dict:
             analysis_errors.append({"url": ep_url, "error": str(exc)})
             continue
 
+    # ── Cross-endpoint IDOR correlation (post-loop) ───────────────────────────
+    # Run after all per-endpoint IDOR items are collected so the full param
+    # index is populated. Only fires when a param name appears in 2+ endpoints.
+    idor_chain.extend(_correlate_cross_endpoint_idor(endpoints, idor, seen_xidor))
+
+    # ── Validation status promotion ───────────────────────────────────────────
+    # If the caller provided HTTP probe results, promote CANDIDATE items to VALIDATED
+    # for any URL that the probe confirmed exists. Also inject CORS/cookie/sensitive
+    # field findings as new AttackSurfaceItems.
+    if validation_results:
+        all_items: List[AttackSurfaceItem] = (
+            idor + injection + file_ops + ssrf + open_redirect + mass_assign +
+            privilege_surface + graphql_surface + websocket_surface + infra_surface +
+            import_export + payment_surface + proto_pollution + xxe_surface +
+            business_logic + oauth_surface + session_fixation + method_override +
+            exposed_files + deserialization + privesc_chain + token_storage + idor_chain
+        )
+        cors_items:    List[AttackSurfaceItem] = []
+        cookie_items:  List[AttackSurfaceItem] = []
+        sensfld_items: List[AttackSurfaceItem] = []
+        seen_val_cors  : Set[str] = set()
+        seen_val_cookie: Set[str] = set()
+        seen_val_sensfld: Set[str] = set()
+
+        for item in all_items:
+            vr = validation_results.get(item.endpoint_url)
+            if not vr:
+                continue
+
+            # Promote to VALIDATED when HTTP probe confirmed endpoint existence
+            if getattr(vr, "validation_status", "") == "VALIDATED":
+                if item.status == SurfaceStatus.CANDIDATE:
+                    item.status = SurfaceStatus.VALIDATED
+                    if "VALIDATED" not in item.evidence_sources:
+                        item.evidence_sources.append("VALIDATED")
+                    # Boost confidence slightly - real HTTP evidence beats static analysis
+                    item.confidence = min(item.confidence + 10, 95)
+                    item.priority   = _confidence_to_priority(item.confidence)
+
+        # Emit CORS misconfig items from validation data
+        for url, vr in validation_results.items():
+            cors_issues = getattr(vr, "cors_issues", []) or []
+            for issue in cors_issues:
+                key = f"cors_validated:{url}:{issue[:40]}"
+                if key in seen_val_cors:
+                    continue
+                seen_val_cors.add(key)
+                confidence = 82  # live HTTP evidence makes this high confidence
+                cors_items.append(AttackSurfaceItem(
+                    endpoint_url=url,
+                    method=getattr(vr, "method", "GET"),
+                    param_name="(CORS header)",
+                    vuln_class="CORS_MISCONFIG",
+                    reason=issue,
+                    priority=_confidence_to_priority(confidence),
+                    source_file="",
+                    param_location="header",
+                    sub_class="CORS_VALIDATED",
+                    confidence=confidence,
+                    status=SurfaceStatus.VALIDATED,
+                    evidence_sources=["VALIDATED", "HTTP_PROBE"],
+                    provenance="HTTP_PROBE",
+                ))
+
+            # Emit cookie flag issues from validation data
+            cookie_issues = getattr(vr, "cookie_issues", []) or []
+            for issue in cookie_issues:
+                key = f"cookie_validated:{url}:{issue[:40]}"
+                if key in seen_val_cookie:
+                    continue
+                seen_val_cookie.add(key)
+                confidence = 78
+                cookie_items.append(AttackSurfaceItem(
+                    endpoint_url=url,
+                    method=getattr(vr, "method", "GET"),
+                    param_name="(Set-Cookie)",
+                    vuln_class="COOKIE_FLAGS",
+                    reason=issue,
+                    priority=_confidence_to_priority(confidence),
+                    source_file="",
+                    param_location="header",
+                    sub_class="COOKIE_FLAGS_VALIDATED",
+                    confidence=confidence,
+                    status=SurfaceStatus.VALIDATED,
+                    evidence_sources=["VALIDATED", "HTTP_PROBE"],
+                    provenance="HTTP_PROBE",
+                ))
+
+            # Emit sensitive-field-in-response items from validation data
+            sensitive_fields = getattr(vr, "sensitive_response_fields", []) or []
+            for fld in sensitive_fields:
+                key = f"sensfld_validated:{url}:{fld}"
+                if key in seen_val_sensfld:
+                    continue
+                seen_val_sensfld.add(key)
+                confidence = 80
+                sensfld_items.append(AttackSurfaceItem(
+                    endpoint_url=url,
+                    method=getattr(vr, "method", "GET"),
+                    param_name=fld,
+                    vuln_class="SENSITIVE_DATA_EXPOSURE",
+                    reason=f"Response body contains sensitive field '{fld}' - data exposure surface",
+                    priority=_confidence_to_priority(confidence),
+                    source_file="",
+                    param_location="response_body",
+                    sub_class="SENSITIVE_FIELD_IN_RESPONSE",
+                    confidence=confidence,
+                    status=SurfaceStatus.VALIDATED,
+                    evidence_sources=["VALIDATED", "HTTP_PROBE"],
+                    provenance="HTTP_PROBE",
+                ))
+
+    else:
+        cors_items    = []
+        cookie_items  = []
+        sensfld_items = []
+
     # total_items: counts all AttackSurfaceItem-typed categories.
     # Legacy categories that contain raw endpoints (state_change, auth_surface,
     # admin_surface) are excluded to avoid double-counting.
@@ -2071,7 +2430,9 @@ def analyze_attack_surface(endpoints: List) -> Dict:
         + len(business_logic) + len(oauth_surface)
         + len(session_fixation) + len(method_override)
         + len(exposed_files) + len(deserialization)
-        + len(privesc_chain)
+        + len(privesc_chain) + len(token_storage)
+        + len(idor_chain) + len(cors_items)
+        + len(cookie_items) + len(sensfld_items)
     )
 
     return {
@@ -2103,5 +2464,11 @@ def analyze_attack_surface(endpoints: List) -> Dict:
         "exposed_files":     exposed_files,
         "deserialization":   deserialization,
         "privesc_chain":     privesc_chain,
+        # New categories
+        "token_storage":     token_storage,
+        "idor_chain":        idor_chain,
+        "cors_misconfig":    cors_items,
+        "cookie_flags":      cookie_items,
+        "sensitive_exposure": sensfld_items,
         "analysis_errors":   analysis_errors,
     }
