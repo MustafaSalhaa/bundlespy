@@ -1067,10 +1067,32 @@ def run_scan(args) -> int:
 
     _after = len(all_endpoints)
     if not args.quiet and _before != _after:
+        _dropped_count = _before - _after
         _logger.info(
             "Endpoint classifier: %d candidates -> %d kept, %d dropped as noise",
-            _before, _after, _before - _after,
+            _before, _after, _dropped_count,
         )
+        # Surface the top drop reasons so the operator can see what was filtered
+        _dropped = [c for c in _candidates if c.is_dropped()]
+        if _dropped:
+            from collections import Counter
+            # Pull the first negative signal as the primary drop reason
+            _reasons = Counter()
+            for _c in _dropped:
+                _reason = _c.signals_missed[0] if _c.signals_missed else "score_below_threshold"
+                _reasons[_reason] += 1
+            _top = _reasons.most_common(3)
+            _reason_parts = [f"{r} ({n})" for r, n in _top]
+            _logger.info(
+                "Dropped endpoint reasons (top %d): %s",
+                len(_top),
+                ", ".join(_reason_parts),
+            )
+            if getattr(args, "verbose", False) or getattr(args, "debug", False):
+                for _c in _dropped:
+                    _reason = _c.signals_missed[0] if _c.signals_missed else "score_below_threshold"
+                    _logger.info("  DROPPED  score=%+d  %-60s  reason: %s",
+                                 _c.raw_score, _c.url[:60], _reason)
 
     # Merge HTML attribute findings BEFORE building per-file stats
     # so html: findings are visible to the stats builder
