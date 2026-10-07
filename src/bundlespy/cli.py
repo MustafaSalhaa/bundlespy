@@ -875,7 +875,7 @@ def run_scan(args) -> int:
         # static crawler already captured those files (dedup working correctly).
         # Show both counts so the operator isn't misled.
         if _js_intercepted > _js_new:
-            _js_label = f"{_js_new} JS new ({_js_intercepted} seen)"
+            _js_label = f"{_js_new} JS new ({_js_intercepted} already known)"
         else:
             _js_label = f"{_js_new} JS"
 
