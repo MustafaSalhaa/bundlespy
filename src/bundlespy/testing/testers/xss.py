@@ -5,6 +5,7 @@ Pure static analysis of endpoints and JS content. Zero HTTP requests.
 from typing import List, Dict, Set
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint, JSFile
 
 # ─── DOM SINKS ───────────────────────────────────────────────────────────────
@@ -403,6 +404,10 @@ def _find_strong_sinks(content: str) -> List[str]:
 def _find_nav_sinks(content: str) -> List[str]:
     return [s for s in _NAVIGATION_SINKS if s in content]
 
+def _find_js_sinks(content: str) -> List[str]:
+    """All JS sinks - strong + navigation combined."""
+    return _find_strong_sinks(content) + _find_nav_sinks(content)
+
 def _find_sources(content: str) -> List[str]:
     return [s for s in _DOM_SOURCES if s in content]
 
@@ -586,6 +591,46 @@ class XssMapper(BaseSurfaceMapper):
                     burp_notes   = burp_notes,
                     auth_context = auth_ctx,
                 )
+                ev_list = [
+                    Evidence(
+                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                        source        = "static",
+                        endpoint      = ep.url or "",
+                        method        = method,
+                        parameter     = name,
+                        context       = (
+                            "JSONP callback parameter" if is_jsonp else
+                            f"High-signal reflection param '{name}'" if is_high else
+                            f"Reflection param '{name}'"
+                        ),
+                        details       = evidence[0] if evidence else "",
+                    ),
+                ]
+                if source_sinks:
+                    ev_list.append(Evidence(
+                        evidence_type = EvidenceType.STATIC_JS,
+                        source        = "static",
+                        asset         = ep.source_file or "",
+                        endpoint      = ep.url or "",
+                        context       = "JS sinks cross-referenced from source file",
+                        details       = ", ".join(source_sinks[:3]),
+                    ))
+                if is_authed:
+                    ev_list.append(Evidence(
+                        evidence_type = EvidenceType.METADATA,
+                        source        = "static",
+                        endpoint      = ep.url or "",
+                        method        = method,
+                        context       = f"Auth-gated endpoint: {auth_ctx}",
+                    ))
+                self._emit_evidence(
+                    evidence     = ev_list,
+                    surface_type = "Reflected XSS",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = name,
+                    notes        = burp_notes,
+                )
 
             # ── 2. STORED XSS - POST/PUT/PATCH body fields ───────────────────
             if method in ("POST", "PUT", "PATCH"):
@@ -627,10 +672,53 @@ class XssMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_STORED,
                         auth_context = auth_ctx,
                     )
+                    stored_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            endpoint      = ep.url or "",
+                            method        = method,
+                            parameter     = name,
+                            context       = (
+                                f"High-signal stored field '{name}' - likely rendered for other users"
+                                if is_stored_high else
+                                f"Medium-signal stored field '{name}' - may be rendered"
+                            ),
+                            details       = evidence[0] if evidence else "",
+                        ),
+                    ]
+                    if is_stored_authed:
+                        stored_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            endpoint      = ep.url or "",
+                            method        = method,
+                            context       = f"Auth-gated submission: {auth_ctx}",
+                        ))
+                    self._emit_evidence(
+                        evidence     = stored_ev,
+                        surface_type = "Stored XSS",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = name,
+                        notes        = _BURP_NOTES_STORED,
+                    )
 
         # ── 3. DOM XSS - per JS file sink/source analysis ────────────────────
+        # Build set of library file URLs so we skip them entirely.
+        # Findings in react.development.js, angular.min.js, etc. are not exploitable -
+        # the sinks are internal to the library, not reachable from app code.
+        _lib_urls: Set[str] = {
+            lf.source_file
+            for lf in getattr(result, "library_findings", [])
+            if lf.source_file
+        }
+
         for js in result.js_files:
             if not js.content:
+                continue
+            # Skip known library files - internal sinks are not attack surface
+            if js.url and js.url in _lib_urls:
                 continue
             content = js.content
 
@@ -695,6 +783,31 @@ class XssMapper(BaseSurfaceMapper):
                     evidence     = pm_evidence,
                     burp_notes   = _BURP_NOTES_POSTMESSAGE,
                 )
+                pm_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.DOM,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "postMessage listener without origin check",
+                        details       = "addEventListener('message') or .onmessage with no event.origin validation",
+                    ),
+                ]
+                if strong_sinks:
+                    pm_ev.append(Evidence(
+                        evidence_type = EvidenceType.STATIC_JS,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "Strong DOM sinks in same file as postMessage handler",
+                        details       = ", ".join(strong_sinks[:4]),
+                    ))
+                self._emit_evidence(
+                    evidence     = pm_ev,
+                    surface_type = "DOM XSS via postMessage",
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = "event.data",
+                    notes        = _BURP_NOTES_POSTMESSAGE,
+                )
 
             # ── Angular bypassSecurityTrust* detection ────────────────────────
             # Each method found gets its own finding because they represent
@@ -744,6 +857,39 @@ class XssMapper(BaseSurfaceMapper):
                     evidence     = ang_evidence,
                     burp_notes   = bypass["burp_notes"],
                 )
+                ang_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.AST,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = f"Angular security bypass: {bypass['method']}()",
+                        details       = bypass["risk"],
+                    ),
+                ]
+                if angular_sources or sources:
+                    ang_ev.append(Evidence(
+                        evidence_type = EvidenceType.DOM,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "User-controlled Angular/DOM sources in same file",
+                        details       = ", ".join((angular_sources + sources)[:4]),
+                    ))
+                if suppressors:
+                    ang_ev.append(Evidence(
+                        evidence_type = EvidenceType.AST,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "Sanitization suppressor also present",
+                        details       = ", ".join(suppressors),
+                    ))
+                self._emit_evidence(
+                    evidence     = ang_ev,
+                    surface_type = bypass["label"],
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = bypass["method"],
+                    notes        = bypass["burp_notes"],
+                )
 
             # Sanitization suppressor without a bypass call - still worth flagging
             # because any [innerHTML] binding in the same component loses protection
@@ -766,6 +912,23 @@ class XssMapper(BaseSurfaceMapper):
                     confidence   = ConfidenceLevel.MEDIUM,
                     evidence     = supp_evidence,
                     burp_notes   = _BURP_NOTES_ANGULAR_SANITIZER_SUPPRESSOR,
+                )
+                supp_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.AST,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "Angular sanitization suppressor weakens schema-level protection",
+                        details       = ", ".join(suppressors),
+                    ),
+                ]
+                self._emit_evidence(
+                    evidence     = supp_ev,
+                    surface_type = "Angular Sanitization Suppressor",
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = suppressors[0] if suppressors else "",
+                    notes        = _BURP_NOTES_ANGULAR_SANITIZER_SUPPRESSOR,
                 )
 
             # Skip sink/source analysis if no sinks present
@@ -791,6 +954,30 @@ class XssMapper(BaseSurfaceMapper):
                     evidence     = evidence,
                     burp_notes   = _sink_burp_notes(strong_sinks, frameworks),
                 )
+                dom_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.DOM,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "User-controlled DOM sources",
+                        details       = ", ".join(sources[:3]),
+                    ),
+                    Evidence(
+                        evidence_type = EvidenceType.STATIC_JS,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "Strong DOM sinks in same file as user-controlled sources",
+                        details       = ", ".join(strong_sinks[:4]),
+                    ),
+                ]
+                self._emit_evidence(
+                    evidence     = dom_ev,
+                    surface_type = "DOM XSS Surface",
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = strong_sinks[0] if strong_sinks else "",
+                    notes        = _sink_burp_notes(strong_sinks, frameworks),
+                )
 
             elif sources and nav_sinks:
                 # Navigation sink + source = DOM open redirect / javascript: XSS
@@ -806,6 +993,30 @@ class XssMapper(BaseSurfaceMapper):
                     confidence   = ConfidenceLevel.MEDIUM,
                     evidence     = evidence,
                     burp_notes   = _BURP_NOTES_NAV_SINK,
+                )
+                nav_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.DOM,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "User-controlled sources feeding navigation sink",
+                        details       = ", ".join(sources[:3]),
+                    ),
+                    Evidence(
+                        evidence_type = EvidenceType.STATIC_JS,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "Navigation sinks - javascript: URI injection potential",
+                        details       = ", ".join(nav_sinks[:3]),
+                    ),
+                ]
+                self._emit_evidence(
+                    evidence     = nav_ev,
+                    surface_type = "DOM XSS via Navigation Sink",
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = nav_sinks[0] if nav_sinks else "",
+                    notes        = _BURP_NOTES_NAV_SINK,
                 )
 
             elif strong_sinks:
@@ -824,6 +1035,23 @@ class XssMapper(BaseSurfaceMapper):
                     confidence   = ConfidenceLevel.LOW,
                     evidence     = evidence_lines,
                     burp_notes   = _BURP_NOTES_DOM_SINK,
+                )
+                sink_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.STATIC_JS,
+                        source        = "static",
+                        asset         = js.url or "",
+                        context       = "DOM sink present - no user-controlled source confirmed in this file",
+                        details       = ", ".join(strong_sinks[:4]),
+                    ),
+                ]
+                self._emit_evidence(
+                    evidence     = sink_ev,
+                    surface_type = "DOM Sink",
+                    endpoint     = ep_url,
+                    method       = "GET",
+                    parameter    = strong_sinks[0] if strong_sinks else "",
+                    notes        = _BURP_NOTES_DOM_SINK,
                 )
 
         return self._results
