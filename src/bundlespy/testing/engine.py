@@ -14,6 +14,7 @@ from .models import SurfaceReport, SurfaceSummary, SurfaceStatus, AttackCategory
 from .safety import SurfaceSafetyPolicy
 from .prioritizer import prioritize_surfaces, prioritize_findings
 from .fingerprint import deduplicate
+from .correlator import correlate
 from .testers.access_control import AccessControlMapper
 from .testers.xss import XssMapper
 from .testers.injection import InjectionMapper
@@ -24,6 +25,11 @@ from .testers.path_traversal import PathTraversalMapper
 from .testers.configuration import ConfigurationMapper
 from .testers.cors import CorsMapper
 from .testers.prototype_pollution import PrototypePollutionMapper
+from .testers.deserialization import DeserializationMapper
+from .testers.cache_poisoning import CachePoisoningMapper
+from .testers.oauth import OAuthMapper
+from .testers.websocket import WebSocketMapper
+from .testers.business_logic import BusinessLogicMapper
 from ..storage.models import ScanResult
 
 # Keep the old name as an alias for backwards compatibility
@@ -76,6 +82,11 @@ class SurfaceMappingEngine:
             AttackCategory.CONFIGURATION,
             AttackCategory.CORS,
             AttackCategory.PROTOTYPE_POLLUTION,
+            AttackCategory.DESERIALIZATION,
+            AttackCategory.CACHE_POISONING,
+            AttackCategory.OAUTH,
+            AttackCategory.WEBSOCKET,
+            AttackCategory.BUSINESS_LOGIC,
         ])
 
     def _build_mappers(self):
@@ -93,6 +104,11 @@ class SurfaceMappingEngine:
             ConfigurationMapper(**config_kwargs),
             CorsMapper(**static_kwargs),
             PrototypePollutionMapper(**static_kwargs),
+            DeserializationMapper(**static_kwargs),
+            CachePoisoningMapper(**static_kwargs),
+            OAuthMapper(**static_kwargs),
+            WebSocketMapper(**static_kwargs),
+            BusinessLogicMapper(**static_kwargs),
         ]
         return [m for m in all_mappers if m.category in self._enabled]
 
@@ -120,6 +136,9 @@ class SurfaceMappingEngine:
             report.results.extend(mapper.results)
             report.findings.extend(mapper.findings)
             report.summaries.append(mapper.summary())
+
+        # Cross-mapper correlation pass - upgrades confidence where signals overlap
+        report.results = correlate(report.results)
 
         # Prioritize all results
         report.results = prioritize_surfaces(report.results)
