@@ -7,36 +7,20 @@ from typing import List, Set, Tuple
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import (
+    ALL_FILE_PARAMS as _ALL_FILE_PARAMS,
+    HIGH_FILE_PARAMS as _HIGH_FILE_PARAMS,
+    HIGH_PATH_PARAM_NAMES,
+    classify_param,
+    ParamType,
+    tier_to_confidence_level,
+)
 from ...storage.models import ScanResult, Endpoint
-
-# Param names strongly associated with file/path operations
-_HIGH_FILE_PARAMS = {
-    "file", "filename", "path", "filepath", "dir", "directory",
-    "folder", "doc", "document",
-}
-
-# Medium signal - often used for page includes and downloads
-_MEDIUM_FILE_PARAMS = {
-    "page", "template", "view", "include", "load", "read",
-    "download", "export", "attachment", "resource",
-}
-
-# Lower signal - asset serving
-_LOW_FILE_PARAMS = {
-    "asset", "image", "img", "photo", "pdf", "report",
-}
-
-_ALL_FILE_PARAMS = _HIGH_FILE_PARAMS | _MEDIUM_FILE_PARAMS | _LOW_FILE_PARAMS
 
 # Path fragments that suggest file serving or download functionality
 _FILE_PATH_SIGNALS = {
     "/download", "/export", "/file", "/document", "/attachment",
     "/static", "/assets", "/media", "/upload",
-}
-
-# Path param names that strongly suggest REST-style file references
-_HIGH_PATH_PARAM_NAMES = {
-    "filename", "filepath", "file", "path", "document", "doc",
 }
 
 # File extensions in a param VALUE that indicate HIGH confidence
@@ -137,30 +121,23 @@ def _pick_burp_notes(ep_path: str, param_name: str, example_value: str) -> str:
 
 
 def _path_confidence(name: str, ep_path: str, example_value: str = "") -> str:
-    name_lower = name.lower()
-    ep_lower   = ep_path.lower()
+    ep_lower     = ep_path.lower()
     is_file_path = any(sig in ep_lower for sig in _FILE_PATH_SIGNALS)
     url_has_ext  = _url_has_file_extension(ep_path)
 
-    # Extension in param example value is a strong direct signal
+    # Value extension is a direct, unambiguous signal - always HIGH
     if example_value and _has_high_value_extension(example_value):
         return ConfidenceLevel.HIGH
 
-    # High-signal param name + URL contains a file extension (e.g. /download?file=report.pdf)
-    if name_lower in _HIGH_FILE_PARAMS and url_has_ext:
+    # Use centralized classifier for base tier
+    cls  = classify_param(name, example_value)
+    conf = tier_to_confidence_level(cls.tier)
+
+    # Boost HIGH-tier names when URL/path context also signals file serving
+    if conf == ConfidenceLevel.HIGH and (is_file_path or url_has_ext):
         return ConfidenceLevel.HIGH
 
-    # Classic: high-signal param name on a file-serving endpoint
-    if name_lower in _HIGH_FILE_PARAMS and is_file_path:
-        return ConfidenceLevel.HIGH
-
-    if name_lower in _HIGH_FILE_PARAMS:
-        return ConfidenceLevel.MEDIUM
-
-    if name_lower in _MEDIUM_FILE_PARAMS:
-        return ConfidenceLevel.MEDIUM
-
-    return ConfidenceLevel.LOW
+    return conf
 
 
 class PathTraversalMapper(BaseSurfaceMapper):
@@ -200,6 +177,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                 if example_val and _has_windows_path_signal(example_val):
                     evidence.append(f"Param example value contains Windows path indicator: '{example_val}'")
                 burp = _pick_burp_notes(ep_path, name, example_val)
+                qp_cls = classify_param(name, example_val)
                 if _deduped_candidate(
                     method     = method,
                     url        = ep_url,
@@ -214,11 +192,12 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep_url,
-                                context       = f"File/path-signal query param '{name}'",
-                                details       = f"Param name '{name}' commonly references a file path",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep_url,
+                                context        = f"File/path-signal query param '{name}'",
+                                details        = f"Param name '{name}' commonly references a file path",
+                                raw_confidence = int(qp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "Path Traversal / LFI",
@@ -235,6 +214,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     continue
                 example_val = _get_param_example_value(bf)
                 confidence  = _path_confidence(name, ep_path, example_val)
+                bf_cls      = classify_param(name, example_val)
                 evidence    = [f"File/path-signal body field '{name}' on {method} {ep_url}"]
                 if example_val and _has_high_value_extension(example_val):
                     evidence.append(f"Body field example value has file extension: '{example_val}'")
@@ -255,11 +235,12 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep_url,
-                                context       = f"File/path-signal body field '{name}'",
-                                details       = f"Body field '{name}' commonly references a file path",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep_url,
+                                context        = f"File/path-signal body field '{name}'",
+                                details        = f"Body field '{name}' commonly references a file path",
+                                raw_confidence = int(bf_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "Path Traversal / LFI",
@@ -277,6 +258,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                 # Existing: param name matches known file param sets
                 if name in _ALL_FILE_PARAMS:
                     confidence = _path_confidence(name, ep_path, example_val)
+                    pp_cls     = classify_param(name, example_val)
                     evidence   = [f"File/path-signal path parameter '{name}' on {ep_url}"]
                     if example_val and _has_high_value_extension(example_val):
                         evidence.append(f"Path param example value has file extension: '{example_val}'")
@@ -295,11 +277,12 @@ class PathTraversalMapper(BaseSurfaceMapper):
                         self._emit_evidence(
                             evidence     = [
                                 Evidence(
-                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                    source        = "static",
-                                    asset         = ep_url,
-                                    context       = f"File/path-signal path param '{name}'",
-                                    details       = f"Path param '{name}' commonly references a file path",
+                                    evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                    source         = "static",
+                                    asset          = ep_url,
+                                    context        = f"File/path-signal path param '{name}'",
+                                    details        = f"Path param '{name}' commonly references a file path",
+                                    raw_confidence = int(pp_cls.raw_confidence * 100),
                                 ),
                             ],
                             surface_type = "Path Traversal / LFI",
@@ -350,6 +333,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
 
                 # Also catch REST path params where the example value has a file extension
                 if example_val and _has_high_value_extension(example_val):
+                    ext_cls = classify_param(name, example_val)
                     if _deduped_candidate(
                         method     = method,
                         url        = ep_url,
@@ -367,11 +351,12 @@ class PathTraversalMapper(BaseSurfaceMapper):
                         self._emit_evidence(
                             evidence     = [
                                 Evidence(
-                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                    source        = "static",
-                                    asset         = ep_url,
-                                    context       = f"Path param '{name}' example value has file extension",
-                                    details       = f"example value: '{example_val}'",
+                                    evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                    source         = "static",
+                                    asset          = ep_url,
+                                    context        = f"Path param '{name}' example value has file extension",
+                                    details        = f"example value: '{example_val}'",
+                                    raw_confidence = int(ext_cls.raw_confidence * 100),
                                 ),
                             ],
                             surface_type = "Path Traversal / LFI",
