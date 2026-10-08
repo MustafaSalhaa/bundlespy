@@ -73,16 +73,47 @@ def score_endpoint(ep: Endpoint) -> float:
     return min(1.0, score)
 
 
+def _url_priority_score(url: str, method: str, auth_context: str) -> float:
+    """
+    Lightweight endpoint priority score derived from URL path and method.
+    Used as a tiebreaker in prioritize_surfaces() when confidence and category match.
+    Returns 0.0-1.0 (higher = higher priority).
+    """
+    score = 0.0
+    path = (url or "").lower()
+    m = (method or "GET").upper()
+
+    if any(s in path for s in _ADMIN_SIGNALS):
+        score += 0.4
+    if any(s in path for s in _AUTH_SIGNALS):
+        score += 0.3
+    if any(s in path for s in _FILE_SIGNALS):
+        score += 0.2
+    if any(s in path for s in _FETCH_SIGNALS):
+        score += 0.15
+    if m in ("POST", "PUT", "PATCH", "DELETE"):
+        score += 0.2
+    elif m == "GET":
+        score += 0.05
+    if auth_context and auth_context.lower() not in ("", "none", "unknown"):
+        score += 0.1
+
+    return min(1.0, score)
+
+
 def prioritize_surfaces(results: List[SurfaceResult]) -> List[SurfaceResult]:
     """
     Sort SurfaceResult list by:
     1. Confidence: HIGH > MEDIUM > LOW
-    2. Category priority: IDOR > Injection > XSS > SSRF > Redirect > CSRF > PathTraversal > Config
+    2. Category priority: ACCESS_CONTROL > INJECTION > CORS > ... > CONFIGURATION
+    3. Endpoint priority score (tiebreaker): admin/auth paths, state-changing methods
     """
     def sort_key(r: SurfaceResult):
+        ep_score = _url_priority_score(r.endpoint_url, r.method, r.auth_context)
         return (
             ConfidenceLevel.order(r.confidence),
             AttackCategory.priority(r.category),
+            -ep_score,
         )
 
     return sorted(results, key=sort_key)
@@ -91,7 +122,7 @@ def prioritize_surfaces(results: List[SurfaceResult]) -> List[SurfaceResult]:
 def prioritize_findings(findings: List[SurfaceFinding]) -> List[SurfaceFinding]:
     """
     Sort SurfaceFinding list by:
-    1. Confidence score descending (higher int = higher priority)
-    2. Risk level: CRITICAL > HIGH > MEDIUM > LOW > INFO
+    1. Risk level: CRITICAL > HIGH > MEDIUM > LOW > INFO
+    2. Confidence score descending (higher int = higher priority)
     """
-    return sorted(findings, key=lambda f: (-f.confidence, RiskLevel.order(f.risk)))
+    return sorted(findings, key=lambda f: (RiskLevel.order(f.risk), -f.confidence))
