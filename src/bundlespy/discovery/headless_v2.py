@@ -246,6 +246,19 @@ if (_origSW) {
     };
 }
 
+// EventSource / SSE
+const _origES = window.EventSource;
+if (_origES) {
+    window.EventSource = function(url, ...a) {
+        try { window.__bundlespy_requests.push({url: String(url), method: 'GET', type: 'sse'}); } catch(e) {}
+        return new _origES(url, ...a);
+    };
+    window.EventSource.prototype = _origES.prototype;
+    window.EventSource.CONNECTING = _origES.CONNECTING;
+    window.EventSource.OPEN       = _origES.OPEN;
+    window.EventSource.CLOSED     = _origES.CLOSED;
+}
+
 // Dynamic iframe tracking
 const _origCE = document.createElement.bind(document);
 document.createElement = function(tag, ...a) {
