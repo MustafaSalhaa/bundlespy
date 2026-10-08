@@ -20,28 +20,32 @@ from typing import List, Optional
 
 class EvidenceType:
     """What kind of observation produced this evidence."""
-    STATIC_JS           = "STATIC_JS"          # raw JS file content match
-    AST                 = "AST"                 # AST-level call / assignment match
-    HTML                = "HTML"                # HTML attribute / inline script
-    DOM                 = "DOM"                 # DOM sink / source in JS
-    ROUTE_DECLARATION   = "ROUTE_DECLARATION"   # framework route definition
-    NETWORK_REQUEST     = "NETWORK_REQUEST"     # runtime request observed by browser
-    NETWORK_RESPONSE    = "NETWORK_RESPONSE"    # runtime response field / header
-    RESPONSE_HEADER     = "RESPONSE_HEADER"     # specific HTTP response header observed
-    RESPONSE_JSON       = "RESPONSE_JSON"       # JSON field in response body
-    SOURCE_MAP          = "SOURCE_MAP"          # recovered via .map file
-    WEBPACK_RUNTIME     = "WEBPACK_RUNTIME"     # webpack chunk manifest / runtime
-    WORKER              = "WORKER"              # web worker / service worker reference
-    IFRAME              = "IFRAME"              # iframe context
-    SERVICE_WORKER      = "SERVICE_WORKER"      # service worker registration
-    GRAPHQL_OPERATION   = "GRAPHQL_OPERATION"   # observed GraphQL query / mutation
-    WEBSOCKET           = "WEBSOCKET"           # WebSocket frame or endpoint
-    ARCHIVE             = "ARCHIVE"             # Wayback / CommonCrawl historical
-    METADATA            = "METADATA"            # robots.txt / sitemap / header disclosure
-    COOKIE              = "COOKIE"              # Set-Cookie attribute analysis
-    STORAGE             = "STORAGE"             # localStorage / sessionStorage usage
-    PARAMETER_SEMANTIC  = "PARAMETER_SEMANTIC"  # parameter name matches security pattern
-    CROSS_ENDPOINT      = "CROSS_ENDPOINT"      # identifier reused across endpoints
+    STATIC_JS                    = "STATIC_JS"                    # raw JS file content match
+    AST                          = "AST"                          # AST-level call / assignment match
+    HTML                         = "HTML"                         # HTML attribute / inline script
+    DOM                          = "DOM"                          # DOM sink / source in JS
+    ROUTE_DECLARATION            = "ROUTE_DECLARATION"            # framework route definition
+    NETWORK_REQUEST              = "NETWORK_REQUEST"              # runtime request observed by browser
+    NETWORK_RESPONSE             = "NETWORK_RESPONSE"             # runtime response field / header
+    DIRECT_RUNTIME_OBSERVATION   = "DIRECT_RUNTIME_OBSERVATION"   # active probe confirmed live response
+    RESPONSE_HEADER              = "RESPONSE_HEADER"              # specific HTTP response header observed
+    RESPONSE_STATUS_CODE         = "RESPONSE_STATUS_CODE"         # HTTP status code from probe
+    RESPONSE_JSON                = "RESPONSE_JSON"                # JSON field in response body
+    SOURCE_MAP                   = "SOURCE_MAP"                   # recovered via .map file
+    WEBPACK_RUNTIME              = "WEBPACK_RUNTIME"              # webpack chunk manifest / runtime
+    WORKER                       = "WORKER"                       # web worker / service worker reference
+    IFRAME                       = "IFRAME"                       # iframe context
+    SERVICE_WORKER               = "SERVICE_WORKER"               # service worker registration
+    GRAPHQL_OPERATION            = "GRAPHQL_OPERATION"            # observed GraphQL query / mutation
+    WEBSOCKET                    = "WEBSOCKET"                    # WebSocket frame or endpoint
+    ARCHIVE                      = "ARCHIVE"                      # Wayback / CommonCrawl historical
+    METADATA                     = "METADATA"                     # robots.txt / sitemap / header disclosure
+    COOKIE                       = "COOKIE"                       # Set-Cookie attribute analysis
+    COOKIE_ATTRIBUTE             = "COOKIE_ATTRIBUTE"             # specific cookie flag (SameSite, Secure, HttpOnly)
+    STORAGE                      = "STORAGE"                      # localStorage / sessionStorage usage
+    PARAMETER_SEMANTIC           = "PARAMETER_SEMANTIC"           # parameter name matches security pattern
+    CROSS_ENDPOINT               = "CROSS_ENDPOINT"               # identifier reused across endpoints
+    AUTHENTICATION_CONTEXT       = "AUTHENTICATION_CONTEXT"       # auth mechanism or token type observed
 
 
 # ── Surface status ─────────────────────────────────────────────────────────────
