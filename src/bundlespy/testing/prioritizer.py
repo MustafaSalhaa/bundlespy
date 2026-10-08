@@ -6,6 +6,7 @@ Category priority: IDOR > Injection > XSS > SSRF > Redirect > CSRF > PathTravers
 from typing import List
 from ..storage.models import Endpoint
 from .models import SurfaceResult, ConfidenceLevel, AttackCategory
+from .evidence import SurfaceFinding, RiskLevel
 
 _ADMIN_SIGNALS    = ["/admin", "/management", "/dashboard", "/panel", "/console"]
 _AUTH_SIGNALS     = ["/login", "/logout", "/auth", "/register", "/signin", "/token", "/oauth"]
@@ -85,3 +86,12 @@ def prioritize_surfaces(results: List[SurfaceResult]) -> List[SurfaceResult]:
         )
 
     return sorted(results, key=sort_key)
+
+
+def prioritize_findings(findings: List[SurfaceFinding]) -> List[SurfaceFinding]:
+    """
+    Sort SurfaceFinding list by:
+    1. Confidence score descending (higher int = higher priority)
+    2. Risk level: CRITICAL > HIGH > MEDIUM > LOW > INFO
+    """
+    return sorted(findings, key=lambda f: (-f.confidence, RiskLevel.order(f.risk)))
