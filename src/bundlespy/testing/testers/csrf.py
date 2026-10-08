@@ -6,21 +6,13 @@ from typing import List, Set
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import ALL_CSRF_PARAMS as _CSRF_BODY_SIGNALS, classify_param
 from ...storage.models import ScanResult, Endpoint
 
 # Header names that indicate CSRF protection
 _CSRF_HEADER_SIGNALS = {
     "x-csrf-token", "x-xsrf-token", "x-requested-with",
     "x-csrftoken",
-}
-
-# Body field names that indicate CSRF token presence.
-# "token" is intentionally excluded - it's too generic and suppresses valid
-# CSRF findings on endpoints with unrelated token fields (auth tokens, API keys,
-# payment tokens, etc.). Only match names that are clearly CSRF-specific.
-_CSRF_BODY_SIGNALS = {
-    "csrf", "_token", "authenticity_token", "csrfmiddlewaretoken",
-    "xsrf_token", "csrf_token", "_csrf",
 }
 
 # JS patterns that indicate CSRF token management
@@ -163,22 +155,36 @@ class CsrfMapper(BaseSurfaceMapper):
             # emit structured evidence alongside the legacy candidate
             csrf_ev = []
             if has_csrf:
-                # CSRF token signal found - PARAMETER_SEMANTIC for the token name
+                # Find the matched CSRF token name for classify_param
+                matched_csrf = ""
+                for bf in (ep.body_fields or []):
+                    bname = (bf.get("name") or "").lower()
+                    if bname in _CSRF_BODY_SIGNALS:
+                        matched_csrf = bname
+                        break
+                if not matched_csrf:
+                    for hk in (ep.request_headers or {}):
+                        if hk.lower() in _CSRF_HEADER_SIGNALS:
+                            matched_csrf = hk.lower()
+                            break
+                csrf_cls = classify_param(matched_csrf)
                 csrf_ev.append(Evidence(
-                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                    source        = "static",
-                    asset         = ep.url or "",
-                    context       = f"CSRF token signal on {method} {ep.url}",
-                    details       = "Header or body field indicates CSRF protection; verify server-side enforcement",
+                    evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                    source         = "static",
+                    asset          = ep.url or "",
+                    context        = f"CSRF token signal on {method} {ep.url}",
+                    details        = "Header or body field indicates CSRF protection; verify server-side enforcement",
+                    raw_confidence = int(csrf_cls.raw_confidence * 100),
                 ))
             else:
                 # No CSRF signal found - missing protection is the signal
                 csrf_ev.append(Evidence(
-                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                    source        = "static",
-                    asset         = ep.url or "",
-                    context       = f"No CSRF token on state-changing {method} {ep.url}",
-                    details       = "No CSRF header or body token observed on this endpoint",
+                    evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                    source         = "static",
+                    asset          = ep.url or "",
+                    context        = f"No CSRF token on state-changing {method} {ep.url}",
+                    details        = "No CSRF header or body token observed on this endpoint",
+                    raw_confidence = 0,
                 ))
             if is_authed and auth_ctx:
                 csrf_ev.append(Evidence(
