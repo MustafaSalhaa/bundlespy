@@ -6,6 +6,7 @@ from typing import List, Dict, Set
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import classify_param
 from ...storage.models import ScanResult, Endpoint, JSFile
 
 # ─── DOM SINKS ───────────────────────────────────────────────────────────────
@@ -591,19 +592,21 @@ class XssMapper(BaseSurfaceMapper):
                     burp_notes   = burp_notes,
                     auth_context = auth_ctx,
                 )
+                qp_cls  = classify_param(name)
                 ev_list = [
                     Evidence(
-                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                        source        = "static",
-                        endpoint      = ep.url or "",
-                        method        = method,
-                        parameter     = name,
-                        context       = (
+                        evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                        source         = "static",
+                        endpoint       = ep.url or "",
+                        method         = method,
+                        parameter      = name,
+                        context        = (
                             "JSONP callback parameter" if is_jsonp else
                             f"High-signal reflection param '{name}'" if is_high else
                             f"Reflection param '{name}'"
                         ),
-                        details       = evidence[0] if evidence else "",
+                        details        = evidence[0] if evidence else "",
+                        raw_confidence = int(qp_cls.raw_confidence * 100),
                     ),
                 ]
                 if source_sinks:
@@ -672,19 +675,21 @@ class XssMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_STORED,
                         auth_context = auth_ctx,
                     )
+                    bf_cls    = classify_param(name)
                     stored_ev = [
                         Evidence(
-                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                            source        = "static",
-                            endpoint      = ep.url or "",
-                            method        = method,
-                            parameter     = name,
-                            context       = (
+                            evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                            source         = "static",
+                            endpoint       = ep.url or "",
+                            method         = method,
+                            parameter      = name,
+                            context        = (
                                 f"High-signal stored field '{name}' - likely rendered for other users"
                                 if is_stored_high else
                                 f"Medium-signal stored field '{name}' - may be rendered"
                             ),
-                            details       = evidence[0] if evidence else "",
+                            details        = evidence[0] if evidence else "",
+                            raw_confidence = int(bf_cls.raw_confidence * 100),
                         ),
                     ]
                     if is_stored_authed:
