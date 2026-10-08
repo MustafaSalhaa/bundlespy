@@ -40,17 +40,27 @@ class AttackCategory:
     CONFIGURATION        = "Configuration"
     CORS                 = "CORS"
     PROTOTYPE_POLLUTION  = "Prototype Pollution"
+    DESERIALIZATION      = "Deserialization"
+    CACHE_POISONING      = "Cache Poisoning"
+    OAUTH                = "OAuth/OIDC"
+    WEBSOCKET            = "WebSocket"
+    BUSINESS_LOGIC       = "Business Logic"
 
     # Priority order for sorting (lower index = higher priority)
     _PRIORITY = [
         ACCESS_CONTROL,
         INJECTION,
+        DESERIALIZATION,
         CORS,
         PROTOTYPE_POLLUTION,
+        OAUTH,
         XSS,
         SSRF,
         OPEN_REDIRECT,
         CSRF,
+        WEBSOCKET,
+        CACHE_POISONING,
+        BUSINESS_LOGIC,
         PATH_TRAVERSAL,
         CONFIGURATION,
     ]
