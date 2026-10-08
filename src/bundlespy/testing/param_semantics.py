@@ -25,7 +25,9 @@ class ParamType:
     PRIVILEGE      = "PRIVILEGE"       # role/permission controls - privilege escalation
     XML_BODY       = "XML_BODY"        # XML/SOAP body fields - XXE
     LDAP_IDENTITY  = "LDAP_IDENTITY"   # LDAP-specific identity fields
-    ASSET          = "ASSET"           # image/media/asset references - LFI (low signal)
+    GRAPHQL        = "GRAPHQL"         # GraphQL operation names and query params
+    DESERIALIZE    = "DESERIALIZE"     # deserialization sinks - Java/PHP/Node
+    WEBSOCKET      = "WEBSOCKET"       # WebSocket connection or message fields
     UNKNOWN        = "UNKNOWN"
 
 
@@ -41,18 +43,21 @@ class ParamTier:
 # -----------------------------------------------------------------
 # Attack category labels - kept as strings to avoid circular imports
 # -----------------------------------------------------------------
-_CAT_PATH_TRAVERSAL = "PATH_TRAVERSAL"
-_CAT_SSRF           = "SSRF"
-_CAT_OPEN_REDIRECT  = "OPEN_REDIRECT"
-_CAT_CMD_INJECTION  = "INJECTION"
-_CAT_SSTI           = "INJECTION"
-_CAT_SQLI           = "INJECTION"
-_CAT_LDAP           = "INJECTION"
-_CAT_XXE            = "INJECTION"
-_CAT_IDOR           = "ACCESS_CONTROL"
-_CAT_PRIVESC        = "ACCESS_CONTROL"
-_CAT_CSRF           = "CSRF"
-_CAT_TENANT         = "ACCESS_CONTROL"
+_CAT_PATH_TRAVERSAL  = "PATH_TRAVERSAL"
+_CAT_SSRF            = "SSRF"
+_CAT_OPEN_REDIRECT   = "OPEN_REDIRECT"
+_CAT_CMD_INJECTION   = "INJECTION"
+_CAT_SSTI            = "INJECTION"
+_CAT_SQLI            = "INJECTION"
+_CAT_LDAP            = "INJECTION"
+_CAT_XXE             = "INJECTION"
+_CAT_IDOR            = "ACCESS_CONTROL"
+_CAT_PRIVESC         = "ACCESS_CONTROL"
+_CAT_CSRF            = "CSRF"
+_CAT_TENANT          = "ACCESS_CONTROL"
+_CAT_GRAPHQL         = "INJECTION"
+_CAT_DESERIALIZE     = "INJECTION"
+_CAT_WEBSOCKET       = "INJECTION"
 
 
 @dataclass
@@ -98,7 +103,14 @@ _FILE_PATH_MEDIUM: FrozenSet[str] = frozenset({
 })
 
 _FILE_PATH_LOW: FrozenSet[str] = frozenset({
-    "asset", "image", "img", "photo", "pdf", "report",
+    "attachment", "upload", "src_file", "input_file",
+})
+
+# Image/media param names - NOT path traversal, but may be SSRF if they accept URLs
+# Kept separate to prevent false positive flood from image-heavy apps
+_IMAGE_PARAMS: FrozenSet[str] = frozenset({
+    "asset", "image", "img", "photo", "pdf", "icon", "logo",
+    "thumbnail", "avatar", "cover", "banner", "media",
 })
 
 # -- URL (SSRF candidates) --
@@ -165,17 +177,51 @@ _REDIRECT_LOW: FrozenSet[str] = frozenset({
 _COMMAND_HIGH: FrozenSet[str] = frozenset({
     "cmd", "exec", "command", "run", "shell", "execute",
     "ping", "subprocess", "process", "script",
-    "eval", "code", "input",
-    # note: "query" excluded - too generic; SEARCH_FILTER is the right home for it
+    "eval", "code",
+    # note: "query" and "input" excluded - too generic; SEARCH_FILTER is the right home
 })
+
+# Value patterns that strongly suggest command injection intent in a param value
+_COMMAND_VALUE_SIGNALS: tuple = (";", "&&", "||", "|", "`", "$(",  "$(", "%0a", "%0d%0a")
 
 # -- TEMPLATE (SSTI) --
 _TEMPLATE_HIGH: FrozenSet[str] = frozenset({
     "template", "render", "layout", "theme",
+    "body_template", "email_template", "html_template",
+    "subject_template", "message_template", "tpl",
 })
 
 _TEMPLATE_MEDIUM: FrozenSet[str] = frozenset({
     "view", "format", "style", "page", "content", "text",
+})
+
+# -- GRAPHQL params --
+_GRAPHQL_HIGH: FrozenSet[str] = frozenset({
+    "operationname", "query",
+    "persistedquery", "extensions",
+})
+
+_GRAPHQL_MEDIUM: FrozenSet[str] = frozenset({
+    "variables", "operation", "mutation",
+})
+
+# -- DESERIALIZE (deserialization sinks) --
+_DESERIALIZE_HIGH: FrozenSet[str] = frozenset({
+    "serialized", "jndi", "rmi_object", "java_object",
+    "ois_payload", "serialized_object", "b64_object",
+    "viewstate", "__viewstate", "__eventvalidation",
+    "ro0", "deserialize", "object_data",
+})
+
+_DESERIALIZE_MEDIUM: FrozenSet[str] = frozenset({
+    "state", "session_data", "cached_obj", "encoded_obj",
+    "pickle", "marshal", "snapshot",
+})
+
+# -- WEBSOCKET params --
+_WEBSOCKET_HIGH: FrozenSet[str] = frozenset({
+    "ws_url", "socket_url", "ws_endpoint", "websocket_url",
+    "wss_url", "socket_endpoint",
 })
 
 # -- TENANT --
@@ -263,6 +309,10 @@ _LOOKUP: list = [
     # COMMAND - highest priority, narrow name set, unambiguous intent
     (_COMMAND_HIGH, ParamType.COMMAND, ParamTier.HIGH, 0.90, frozenset({_CAT_CMD_INJECTION})),
 
+    # DESERIALIZE - very high signal, narrow set
+    (_DESERIALIZE_HIGH, ParamType.DESERIALIZE, ParamTier.HIGH, 0.90, frozenset({_CAT_DESERIALIZE})),
+    (_DESERIALIZE_MEDIUM, ParamType.DESERIALIZE, ParamTier.MEDIUM, 0.55, frozenset({_CAT_DESERIALIZE})),
+
     # TEMPLATE / SSTI
     (_TEMPLATE_HIGH, ParamType.TEMPLATE, ParamTier.HIGH, 0.80, frozenset({_CAT_SSTI})),
     (_TEMPLATE_MEDIUM, ParamType.TEMPLATE, ParamTier.MEDIUM, 0.45, frozenset({_CAT_SSTI})),
@@ -280,6 +330,13 @@ _LOOKUP: list = [
     # TENANT isolation
     (_TENANT_HIGH, ParamType.TENANT, ParamTier.HIGH, 0.80, frozenset({_CAT_TENANT})),
 
+    # WEBSOCKET endpoint params
+    (_WEBSOCKET_HIGH, ParamType.WEBSOCKET, ParamTier.HIGH, 0.80, frozenset({_CAT_WEBSOCKET})),
+
+    # GRAPHQL operation params - check before generic search to avoid false positives
+    (_GRAPHQL_HIGH, ParamType.GRAPHQL, ParamTier.HIGH, 0.75, frozenset({_CAT_GRAPHQL})),
+    (_GRAPHQL_MEDIUM, ParamType.GRAPHQL, ParamTier.MEDIUM, 0.50, frozenset({_CAT_GRAPHQL})),
+
     # REDIRECT (check before URL since redirect names are more specific)
     (_REDIRECT_HIGH, ParamType.REDIRECT, ParamTier.HIGH, 0.85, frozenset({_CAT_OPEN_REDIRECT})),
     (_REDIRECT_MEDIUM, ParamType.REDIRECT, ParamTier.MEDIUM, 0.55, frozenset({_CAT_OPEN_REDIRECT})),
@@ -290,10 +347,10 @@ _LOOKUP: list = [
     (_URL_MEDIUM, ParamType.URL, ParamTier.MEDIUM, 0.55, frozenset({_CAT_SSRF})),
     (_URL_LOW, ParamType.URL, ParamTier.LOW, 0.25, frozenset({_CAT_SSRF})),
 
-    # FILE_PATH - path traversal / LFI
+    # FILE_PATH - path traversal / LFI (image names excluded - use _IMAGE_PARAMS if needed)
     (_FILE_PATH_HIGH, ParamType.FILE_PATH, ParamTier.HIGH, 0.85, frozenset({_CAT_PATH_TRAVERSAL})),
     (_FILE_PATH_MEDIUM, ParamType.FILE_PATH, ParamTier.MEDIUM, 0.55, frozenset({_CAT_PATH_TRAVERSAL})),
-    (_FILE_PATH_LOW, ParamType.FILE_PATH, ParamTier.LOW, 0.25, frozenset({_CAT_PATH_TRAVERSAL, _CAT_SSRF})),
+    (_FILE_PATH_LOW, ParamType.FILE_PATH, ParamTier.LOW, 0.30, frozenset({_CAT_PATH_TRAVERSAL, _CAT_SSRF})),
 
     # XML_BODY - XXE
     (_XML_BODY_HIGH, ParamType.XML_BODY, ParamTier.HIGH, 0.70, frozenset({_CAT_XXE})),
@@ -363,6 +420,20 @@ def classify_param(name: str, value: str = "") -> ParamClassification:
                     final_conf = min(1.0, conf + 0.10)
                     boosted = True
 
+            # Value boost - shell metacharacters in COMMAND param value
+            if ptype == ParamType.COMMAND and value:
+                v = value.lower()
+                if any(sig in v for sig in _COMMAND_VALUE_SIGNALS):
+                    final_conf = min(1.0, conf + 0.08)
+                    boosted = True
+
+            # Value boost - known elevated role strings in PRIVILEGE param value
+            if ptype == ParamType.PRIVILEGE and value:
+                v = value.lower()
+                if v in {"admin", "administrator", "superuser", "root", "true", "1", "staff", "moderator"}:
+                    final_conf = min(1.0, conf + 0.10)
+                    boosted = True
+
             return ParamClassification(
                 param_type        = ptype,
                 tier              = final_tier,
@@ -399,6 +470,18 @@ def is_id_param(name: str) -> bool:
     return c.param_type in (ParamType.OBJECT_ID, ParamType.TENANT)
 
 
+def is_deserialize_param(name: str, value: str = "") -> bool:
+    """Quick check - does this param carry serialized data? Used by DeserializationMapper."""
+    c = classify_param(name, value)
+    return c.param_type == ParamType.DESERIALIZE
+
+
+def is_graphql_param(name: str) -> bool:
+    """Quick check - is this a GraphQL operation param? Used by InjectionMapper."""
+    c = classify_param(name)
+    return c.param_type == ParamType.GRAPHQL
+
+
 def tier_to_confidence_level(tier: str) -> str:
     """Map a ParamTier to a ConfidenceLevel string (matches constants in models.py)."""
     return {
@@ -409,6 +492,7 @@ def tier_to_confidence_level(tier: str) -> str:
 
 
 # Convenience exports - mappers can import these directly instead of redefining
+# ALL_FILE_PARAMS excludes image/media names to avoid false positive flood on image-heavy apps
 ALL_FILE_PARAMS: FrozenSet[str]    = _FILE_PATH_HIGH | _FILE_PATH_MEDIUM | _FILE_PATH_LOW
 ALL_SSRF_PARAMS: FrozenSet[str]    = _URL_HIGH | _URL_MEDIUM | _URL_LOW
 ALL_REDIRECT_PARAMS: FrozenSet[str] = _REDIRECT_HIGH | _REDIRECT_MEDIUM | _REDIRECT_LOW
@@ -421,6 +505,10 @@ ALL_LDAP_PARAMS: FrozenSet[str]    = _LDAP_HIGH | _LDAP_MEDIUM
 ALL_XXE_PARAMS: FrozenSet[str]     = _XML_BODY_HIGH
 ALL_CSRF_PARAMS: FrozenSet[str]    = _AUTH_TOKEN_HIGH
 ALL_SEARCH_PARAMS: FrozenSet[str]  = _SEARCH_HIGH | _SEARCH_MEDIUM
+ALL_GRAPHQL_PARAMS: FrozenSet[str] = _GRAPHQL_HIGH | _GRAPHQL_MEDIUM
+ALL_DESERIALIZE_PARAMS: FrozenSet[str] = _DESERIALIZE_HIGH | _DESERIALIZE_MEDIUM
+ALL_WEBSOCKET_PARAMS: FrozenSet[str] = _WEBSOCKET_HIGH
+ALL_IMAGE_PARAMS: FrozenSet[str]   = _IMAGE_PARAMS  # for SSRF on image URL params
 
 HIGH_FILE_PARAMS: FrozenSet[str]   = _FILE_PATH_HIGH
 HIGH_SSRF_PARAMS: FrozenSet[str]   = _URL_HIGH
