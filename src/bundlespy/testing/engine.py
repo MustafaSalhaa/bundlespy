@@ -12,7 +12,8 @@ from typing import List, Optional
 
 from .models import SurfaceReport, SurfaceSummary, SurfaceStatus, AttackCategory
 from .safety import SurfaceSafetyPolicy
-from .prioritizer import prioritize_surfaces
+from .prioritizer import prioritize_surfaces, prioritize_findings
+from .fingerprint import deduplicate
 from .testers.access_control import AccessControlMapper
 from .testers.xss import XssMapper
 from .testers.injection import InjectionMapper
@@ -117,10 +118,15 @@ class SurfaceMappingEngine:
             _log.debug("%s done in %.1fs - %d candidates", mapper.category, elapsed, len(mapper.results))
 
             report.results.extend(mapper.results)
+            report.findings.extend(mapper.findings)
             report.summaries.append(mapper.summary())
 
         # Prioritize all results
         report.results = prioritize_surfaces(report.results)
+
+        # Deduplicate and prioritize structured findings
+        report.findings = deduplicate(report.findings)
+        report.findings = prioritize_findings(report.findings)
 
         # Aggregate counts
         for r in report.results:
