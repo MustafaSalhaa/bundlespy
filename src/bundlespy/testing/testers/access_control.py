@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import (
+    ALL_IDOR_PARAMS   as _IDOR_PARAM_NAMES,
+    ALL_PRIVESC_PARAMS as _PRIVESC_PARAMS,
+    classify_param,
+)
 from ...storage.models import ScanResult, Endpoint
 
 # Regex patterns that indicate an object identifier in the path
@@ -29,32 +34,12 @@ _IDOR_HEADER_NAMES = {
     "x-forwarded-user", "x-authenticated-user",
 }
 
-# Query/body param names that suggest object identifiers
-_IDOR_PARAM_NAMES = {
-    "id", "user_id", "account_id", "order_id", "item_id",
-    "product_id", "report_id", "doc_id", "document_id",
-    "file_id", "message_id", "record_id", "object_id",
-    "uid", "user", "account", "record",
-    # Object reference params often seen in APIs
-    "ref", "resource_id", "entity_id", "invoice_id",
-    "ticket_id", "post_id", "comment_id", "transaction_id",
-    "payment_id", "subscription_id", "member_id",
-}
-
 # Body field names that suggest object references in PUT/PATCH
+# Subset not in the main IDOR set - ownership/assignment fields
 _IDOR_BODY_REFS = {
     "owner_id", "created_by", "assigned_to", "author_id",
     "parent_id", "target_id", "subject_id", "resource_id",
     "referenced_id", "linked_id",
-}
-
-# Param/field names that suggest privilege or role manipulation
-_PRIVESC_PARAMS = {
-    "role", "is_admin", "admin", "privilege", "privileges",
-    "permission", "permissions", "group", "access_level",
-    "user_type", "account_type", "plan", "tier", "scope",
-    "authority", "can_admin", "superuser", "is_superuser",
-    "is_staff", "is_moderator", "elevation",
 }
 
 _BURP_NOTES = (
@@ -350,12 +335,16 @@ class AccessControlMapper(BaseSurfaceMapper):
                     )
                     bola_ev = []
                     for p in params_found:
+                        # Extract bare param name for classify_param (strip prefix like query:, body:, etc.)
+                        bare_name = p.split(":", 1)[-1] if ":" in p else p
+                        p_cls     = classify_param(bare_name)
                         bola_ev.append(Evidence(
-                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                            source        = "static",
-                            asset         = ep.url or "",
-                            context       = f"Object ID signal: {p} on {method} {ep.url}",
-                            details       = f"Parameter '{p}' commonly references an owned resource",
+                            evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                            source         = "static",
+                            asset          = ep.url or "",
+                            context        = f"Object ID signal: {p} on {method} {ep.url}",
+                            details        = f"Parameter '{p}' commonly references an owned resource",
+                            raw_confidence = int(p_cls.raw_confidence * 100),
                         ))
                     if auth_ctx and auth_ctx.lower() not in ("", "none"):
                         bola_ev.append(Evidence(
@@ -425,13 +414,15 @@ class AccessControlMapper(BaseSurfaceMapper):
                             burp_notes   = _BURP_NOTES_PRIVESC,
                             auth_context = auth_ctx,
                         )
-                        privesc_ev = [
+                        privesc_cls = classify_param(param_name)
+                        privesc_ev  = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Privilege escalation param '{param_name}' on {method} {ep.url}",
-                                details       = f"Param '{param_name}' commonly controls role or permission level",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Privilege escalation param '{param_name}' on {method} {ep.url}",
+                                details        = f"Param '{param_name}' commonly controls role or permission level",
+                                raw_confidence = int(privesc_cls.raw_confidence * 100),
                             ),
                         ]
                         if auth_ctx and auth_ctx.lower() not in ("", "none"):
