@@ -14,7 +14,7 @@ from ..param_semantics import (
     ALL_PRIVESC_PARAMS as _PRIVESC_PARAMS,
     classify_param,
 )
-from ...storage.models import ScanResult, Endpoint
+from ...storage.models import ScanResult, Endpoint, AccessState, RouteState
 
 # Regex patterns that indicate an object identifier in the path
 _NUMERIC_ID_RE  = re.compile(r'/(\d{1,12})(?=/|$|\?)')
@@ -77,6 +77,27 @@ _BURP_NOTES_PRIVESC = (
     "Test by submitting role=admin, is_admin=true, privilege=superuser alongside the normal request. "
     "On PUT/PATCH, include this field with an elevated value and check if accepted. "
     "Try both integer (1, 0) and string (admin, true, superuser) values."
+)
+
+_BURP_NOTES_403_BYPASS = (
+    "HTTP 403 observed - endpoint exists but is restricted. "
+    "Test common bypass techniques: "
+    "X-Forwarded-For: 127.0.0.1, X-Original-URL: /admin, X-Rewrite-URL: /admin, "
+    "path case variation (/Admin), double-slash (/admin//endpoint), "
+    "trailing dot (/admin.), URL encoding. "
+    "Also try with verbose method override headers (X-HTTP-Method-Override: GET)."
+)
+
+_BURP_NOTES_PUBLIC_ACCESSIBLE = (
+    "Endpoint responded 2xx with no auth challenge despite being expected to require auth. "
+    "Test: request without session cookie, with empty Authorization header, with deleted auth token. "
+    "If it still returns 2xx - authentication is not enforced server-side."
+)
+
+_BURP_NOTES_AUTH_BYPASS = (
+    "Endpoint access state indicates authenticated access required, "
+    "but auth context is not observed in collected data. "
+    "Test for auth bypass: request without credentials, with invalid token, with another user's token."
 )
 
 # Paths where a short hash is unlikely to be a real ID (static assets, etc.)
@@ -275,16 +296,17 @@ class AccessControlMapper(BaseSurfaceMapper):
                     )
                     hdr_ev = [
                         Evidence(
-                            evidence_type = EvidenceType.ROUTE_DECLARATION,
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
                             source        = "static",
                             asset         = ep.url or "",
                             context       = f"Identity headers on {method} {ep.url}",
                             details       = f"Headers: {', '.join(header_hits)} - may control which user/resource is accessed",
+                            raw_confidence = 55,
                         ),
                     ]
                     if auth_ctx and auth_ctx.lower() not in ("", "none"):
                         hdr_ev.append(Evidence(
-                            evidence_type = EvidenceType.METADATA,
+                            evidence_type = EvidenceType.AUTHENTICATION_CONTEXT,
                             source        = "static",
                             asset         = ep.url or "",
                             context       = f"Auth context: {auth_ctx}",
@@ -348,7 +370,7 @@ class AccessControlMapper(BaseSurfaceMapper):
                         ))
                     if auth_ctx and auth_ctx.lower() not in ("", "none"):
                         bola_ev.append(Evidence(
-                            evidence_type = EvidenceType.METADATA,
+                            evidence_type = EvidenceType.AUTHENTICATION_CONTEXT,
                             source        = "static",
                             asset         = ep.url or "",
                             context       = f"Auth context: {auth_ctx}",
@@ -427,7 +449,7 @@ class AccessControlMapper(BaseSurfaceMapper):
                         ]
                         if auth_ctx and auth_ctx.lower() not in ("", "none"):
                             privesc_ev.append(Evidence(
-                                evidence_type = EvidenceType.METADATA,
+                                evidence_type = EvidenceType.AUTHENTICATION_CONTEXT,
                                 source        = "static",
                                 asset         = ep.url or "",
                                 context       = f"Auth context: {auth_ctx}",
@@ -441,5 +463,150 @@ class AccessControlMapper(BaseSurfaceMapper):
                             parameter    = hit,
                             notes        = _BURP_NOTES_PRIVESC,
                         )
+
+        # 9. Access state and route state intelligence
+        # These fields come from the crawler/runtime and give ground-truth access signals
+        for ep in result.endpoints:
+            path        = ep.path or urlparse(ep.url).path or ""
+            method      = (ep.method or "GET").upper()
+            auth_ctx    = ep.auth_context or ""
+            http_status = getattr(ep, "http_status", 0) or 0
+            access_st   = getattr(ep, "access_state", "") or ""
+            route_st    = getattr(ep, "route_state", "") or ""
+
+            # 9a. 403 observed - endpoint exists, restricted, potentially bypassable
+            if route_st == RouteState.FORBIDDEN or http_status == 403:
+                pat = _path_pattern(path)
+                dedup_key = f"403bypass:{method}:{pat}"
+                if dedup_key not in seen_patterns:
+                    seen_patterns.add(dedup_key)
+                    ev_403 = [
+                        Evidence(
+                            evidence_type  = EvidenceType.DIRECT_RUNTIME_OBSERVATION,
+                            source         = "runtime",
+                            asset          = ep.url or "",
+                            context        = f"HTTP 403 at {method} {ep.url}",
+                            details        = "Endpoint exists and returns 403 - test access control bypass techniques",
+                            raw_confidence = 60,
+                        ),
+                        Evidence(
+                            evidence_type  = EvidenceType.RESPONSE_STATUS_CODE,
+                            source         = "runtime",
+                            asset          = ep.url or "",
+                            context        = "HTTP 403 Forbidden",
+                            details        = "Access is blocked client-side; bypass via header manipulation or path variation",
+                        ),
+                    ]
+                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                        ev_403.append(Evidence(
+                            evidence_type = EvidenceType.AUTHENTICATION_CONTEXT,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = "Auth-gated 403 - bypass would grant unauthorized access",
+                        ))
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "Access Control Bypass (403)",
+                        parameters   = [],
+                        confidence   = ConfidenceLevel.HIGH if auth_ctx and auth_ctx.lower() not in ("", "none") else ConfidenceLevel.MEDIUM,
+                        evidence     = [e.context for e in ev_403],
+                        burp_notes   = _BURP_NOTES_403_BYPASS,
+                        auth_context = auth_ctx,
+                    )
+                    self._emit_evidence(
+                        evidence     = ev_403,
+                        surface_type = "Access Control Bypass (403)",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = "",
+                        notes        = _BURP_NOTES_403_BYPASS,
+                    )
+
+            # 9b. Authenticated state required but endpoint is publicly accessible (potential auth bypass)
+            if access_st == AccessState.AUTHENTICATED and http_status in (200, 201, 204):
+                # If it returned 2xx but its access_state says it needs auth, something is wrong
+                if not (auth_ctx and auth_ctx.lower() not in ("", "none")):
+                    pat = _path_pattern(path)
+                    dedup_key = f"authbypass:{method}:{pat}"
+                    if dedup_key not in seen_patterns:
+                        seen_patterns.add(dedup_key)
+                        ev_bypass = [
+                            Evidence(
+                                evidence_type  = EvidenceType.DIRECT_RUNTIME_OBSERVATION,
+                                source         = "runtime",
+                                asset          = ep.url or "",
+                                context        = f"HTTP {http_status} on {method} {ep.url} - no auth context observed",
+                                details        = "Endpoint returned success status without observed authentication",
+                                raw_confidence = 70,
+                            ),
+                            Evidence(
+                                evidence_type  = EvidenceType.AUTHENTICATION_CONTEXT,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Access state: {access_st} but no auth context detected",
+                                details        = "Endpoint classified as requiring auth but responded 2xx without auth signal",
+                            ),
+                        ]
+                        self._candidate(
+                            endpoint     = ep,
+                            surface_type = "Unauthenticated Access",
+                            parameters   = [],
+                            confidence   = ConfidenceLevel.HIGH,
+                            evidence     = [e.context for e in ev_bypass],
+                            burp_notes   = _BURP_NOTES_PUBLIC_ACCESSIBLE,
+                            auth_context = auth_ctx,
+                        )
+                        self._emit_evidence(
+                            evidence     = ev_bypass,
+                            surface_type = "Unauthenticated Access",
+                            endpoint     = ep.url or "",
+                            method       = method,
+                            parameter    = "",
+                            notes        = _BURP_NOTES_PUBLIC_ACCESSIBLE,
+                        )
+
+            # 9c. Privileged access required - emit as separate candidate with HIGH confidence
+            if access_st == AccessState.PRIVILEGED:
+                pat = _path_pattern(path)
+                dedup_key = f"privileged:{method}:{pat}"
+                if dedup_key not in seen_patterns:
+                    seen_patterns.add(dedup_key)
+                    ev_priv = [
+                        Evidence(
+                            evidence_type  = EvidenceType.AUTHENTICATION_CONTEXT,
+                            source         = "runtime",
+                            asset          = ep.url or "",
+                            context        = f"Privileged endpoint: {method} {ep.url}",
+                            details        = "Access state indicates elevated privileges required - test horizontal/vertical escalation",
+                            raw_confidence = 65,
+                        ),
+                    ]
+                    if http_status in (200, 201, 204):
+                        ev_priv.append(Evidence(
+                            evidence_type  = EvidenceType.DIRECT_RUNTIME_OBSERVATION,
+                            source         = "runtime",
+                            asset          = ep.url or "",
+                            context        = f"HTTP {http_status} returned on privileged endpoint",
+                            details        = "Privileged endpoint is accessible - verify it requires elevated session",
+                            raw_confidence = 55,
+                        ))
+                    self._candidate(
+                        endpoint     = ep,
+                        surface_type = "Privilege Escalation (Privileged Endpoint)",
+                        parameters   = [],
+                        confidence   = ConfidenceLevel.HIGH,
+                        evidence     = [e.context for e in ev_priv],
+                        burp_notes   = _BURP_NOTES_PRIVESC,
+                        auth_context = auth_ctx,
+                    )
+                    self._emit_evidence(
+                        evidence     = ev_priv,
+                        surface_type = "Privilege Escalation (Privileged Endpoint)",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = "",
+                        notes        = _BURP_NOTES_PRIVESC,
+                    )
 
         return self._results
