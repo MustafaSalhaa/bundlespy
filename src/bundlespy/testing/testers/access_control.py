@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # Regex patterns that indicate an object identifier in the path
@@ -287,6 +288,31 @@ class AccessControlMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_HEADER,
                         auth_context = auth_ctx,
                     )
+                    hdr_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.ROUTE_DECLARATION,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Identity headers on {method} {ep.url}",
+                            details       = f"Headers: {', '.join(header_hits)} - may control which user/resource is accessed",
+                        ),
+                    ]
+                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                        hdr_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = "Auth-gated endpoint - IDOR impact is higher",
+                        ))
+                    self._emit_evidence(
+                        evidence     = hdr_ev,
+                        surface_type = "IDOR via Request Header",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"header:{header_hits[0]}" if header_hits else "",
+                        notes        = _BURP_NOTES_HEADER,
+                    )
 
             if not params_found:
                 # Skip to privilege escalation check even if no IDOR params found
@@ -321,6 +347,31 @@ class AccessControlMapper(BaseSurfaceMapper):
                         evidence     = evidence,
                         burp_notes   = burp,
                         auth_context = auth_ctx,
+                    )
+                    bola_ev = []
+                    for p in params_found:
+                        bola_ev.append(Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Object ID signal: {p} on {method} {ep.url}",
+                            details       = f"Parameter '{p}' commonly references an owned resource",
+                        ))
+                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                        bola_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = "Auth-gated endpoint - IDOR impact is higher",
+                        ))
+                    self._emit_evidence(
+                        evidence     = bola_ev,
+                        surface_type = "IDOR/BOLA",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = params_found[0] if params_found else "",
+                        notes        = burp,
                     )
 
             # 8. Privilege escalation - check query params, body fields on ALL methods
@@ -373,6 +424,31 @@ class AccessControlMapper(BaseSurfaceMapper):
                             evidence     = [e for e in privesc_evidence if param_name in e],
                             burp_notes   = _BURP_NOTES_PRIVESC,
                             auth_context = auth_ctx,
+                        )
+                        privesc_ev = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Privilege escalation param '{param_name}' on {method} {ep.url}",
+                                details       = f"Param '{param_name}' commonly controls role or permission level",
+                            ),
+                        ]
+                        if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                            privesc_ev.append(Evidence(
+                                evidence_type = EvidenceType.METADATA,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Auth context: {auth_ctx}",
+                                details       = "Auth-gated endpoint - privilege escalation impact is higher",
+                            ))
+                        self._emit_evidence(
+                            evidence     = privesc_ev,
+                            surface_type = "Privilege Escalation",
+                            endpoint     = ep.url or "",
+                            method       = method,
+                            parameter    = hit,
+                            notes        = _BURP_NOTES_PRIVESC,
                         )
 
         return self._results
