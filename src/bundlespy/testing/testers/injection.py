@@ -6,6 +6,12 @@ from typing import List
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import (
+    ALL_TENANT_PARAMS  as _TENANT_PARAMS,
+    ALL_CMD_PARAMS     as _COMMAND_INJECTION_PARAMS,
+    ALL_LDAP_PARAMS    as _LDAP_PARAMS,
+    classify_param,
+)
 from ...storage.models import ScanResult, Endpoint
 
 # Classic SQL/NoSQL injection - direct DB access signals
@@ -18,20 +24,6 @@ _MEDIUM_SIGNAL_PARAMS = {
     "filter", "category", "sort", "order", "page", "limit",
     "where", "query", "select", "table", "column", "field",
     "key", "value", "type", "status", "role", "group",
-}
-
-# Multi-tenant / org context params - high value for injection + IDOR
-_TENANT_PARAMS = {
-    "group_id", "org_id", "organization_id", "tenant_id",
-    "customer_id", "client_id", "team_id", "workspace_id",
-    "company_id", "account_id", "site_id", "store_id",
-}
-
-# Command injection signals - these almost certainly talk to a shell
-_COMMAND_INJECTION_PARAMS = {
-    "cmd", "exec", "command", "run", "shell", "execute",
-    "ping", "query", "subprocess", "process", "script",
-    "eval", "code", "input",
 }
 
 # SSTI signals - template rendering with user input.
@@ -86,12 +78,6 @@ _XXE_BODY_FIELDS = {
 # XXE - content-type values that indicate XML parsing
 _XXE_CONTENT_TYPES = {
     "application/xml", "text/xml", "application/soap+xml", "application/xhtml+xml",
-}
-
-# LDAP - param names that commonly map to directory attributes
-_LDAP_PARAMS = {
-    "username", "user", "cn", "dn", "ldap", "login", "uid",
-    "samaccountname", "userprincipalname", "email", "mail",
 }
 
 # LDAP - always LDAP-specific regardless of path context
@@ -296,6 +282,7 @@ class InjectionMapper(BaseSurfaceMapper):
 
                 if name in _COMMAND_INJECTION_PARAMS:
                     # Command injection via path param is very high signal
+                    pp_cls = classify_param(name)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "Command Injection",
@@ -311,11 +298,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Command injection path param '{name}' on {method} {ep.url}",
-                                details       = f"Path param '{name}' commonly maps to shell/OS execution",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Command injection path param '{name}' on {method} {ep.url}",
+                                details        = f"Path param '{name}' commonly maps to shell/OS execution",
+                                raw_confidence = int(pp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "Command Injection",
@@ -326,6 +314,7 @@ class InjectionMapper(BaseSurfaceMapper):
                     )
                 elif name in _TENANT_PARAMS:
                     # Multi-tenant path param: both SQLi AND IDOR risk
+                    pp_cls = classify_param(name)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "SQL/NoSQL Injection + Tenant IDOR",
@@ -341,11 +330,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Multi-tenant path param '{name}' on {method} {ep.url}",
-                                details       = f"Tenant/org ID '{name}' - test SQLi and cross-tenant access",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Multi-tenant path param '{name}' on {method} {ep.url}",
+                                details        = f"Tenant/org ID '{name}' - test SQLi and cross-tenant access",
+                                raw_confidence = int(pp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "SQL/NoSQL Injection + Tenant IDOR",
@@ -356,6 +346,7 @@ class InjectionMapper(BaseSurfaceMapper):
                     )
                 elif name in _HIGH_SIGNAL_PARAMS:
                     # Core ID/name params in path - high SQLi signal
+                    pp_cls = classify_param(name)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "SQL/NoSQL Injection",
@@ -370,11 +361,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"High-signal injection path param '{name}' on {method} {ep.url}",
-                                details       = f"Path param '{name}' commonly interpolated into DB queries",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"High-signal injection path param '{name}' on {method} {ep.url}",
+                                details        = f"Path param '{name}' commonly interpolated into DB queries",
+                                raw_confidence = int(pp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "SQL/NoSQL Injection",
@@ -384,6 +376,7 @@ class InjectionMapper(BaseSurfaceMapper):
                         notes        = _BURP_NOTES_SQLI,
                     )
                 elif name in _MEDIUM_SIGNAL_PARAMS:
+                    pp_cls = classify_param(name)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "SQL/NoSQL Injection",
@@ -397,11 +390,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Injection-relevant path param '{name}' on {method} {ep.url}",
-                                details       = f"Path param '{name}' may be used in DB query construction",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Injection-relevant path param '{name}' on {method} {ep.url}",
+                                details        = f"Path param '{name}' may be used in DB query construction",
+                                raw_confidence = int(pp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "SQL/NoSQL Injection",
@@ -412,6 +406,7 @@ class InjectionMapper(BaseSurfaceMapper):
                     )
                 elif name in _HIGH_SSTI_PARAMS:
                     # Template param in path = SSTI even without path corroboration
+                    pp_cls = classify_param(name)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "SSTI",
@@ -426,11 +421,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Template-relevant path param '{name}' on {method} {ep.url}",
-                                details       = f"Path param '{name}' likely feeds a server-side template engine",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Template-relevant path param '{name}' on {method} {ep.url}",
+                                details        = f"Path param '{name}' likely feeds a server-side template engine",
+                                raw_confidence = int(pp_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "SSTI",
@@ -453,6 +449,7 @@ class InjectionMapper(BaseSurfaceMapper):
                 surface_type = _injection_type(name)
                 confidence   = _injection_confidence(name, method, path)
                 burp_notes   = _injection_burp(name, path)
+                qp_cls       = classify_param(name)
 
                 evidence = [f"Injection-relevant query param '{name}' on {method} {ep.url}"]
                 if name in _CONTEXT_SSTI_PARAMS:
@@ -472,11 +469,12 @@ class InjectionMapper(BaseSurfaceMapper):
                 self._emit_evidence(
                     evidence     = [
                         Evidence(
-                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                            source        = "static",
-                            asset         = ep.url or "",
-                            context       = f"Injection-relevant query param '{name}' on {method} {ep.url}",
-                            details       = f"Param '{name}' commonly maps to DB query, command, or template input",
+                            evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                            source         = "static",
+                            asset          = ep.url or "",
+                            context        = f"Injection-relevant query param '{name}' on {method} {ep.url}",
+                            details        = f"Param '{name}' commonly maps to DB query, command, or template input",
+                            raw_confidence = int(qp_cls.raw_confidence * 100),
                         ),
                     ],
                     surface_type = surface_type,
@@ -500,6 +498,7 @@ class InjectionMapper(BaseSurfaceMapper):
                     surface_type = _injection_type(name)
                     confidence   = _injection_confidence(name, method, path)
                     burp_notes   = _injection_burp(name, path)
+                    bf_cls       = classify_param(name)
 
                     body_evidence = [f"Injection-relevant body field '{name}' on {method} {ep.url}"]
                     if name in _CONTEXT_SSTI_PARAMS:
@@ -519,11 +518,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"Injection-relevant body field '{name}' on {method} {ep.url}",
-                                details       = f"Body field '{name}' commonly maps to DB query, command, or template input",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"Injection-relevant body field '{name}' on {method} {ep.url}",
+                                details        = f"Body field '{name}' commonly maps to DB query, command, or template input",
+                                raw_confidence = int(bf_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = surface_type,
@@ -597,14 +597,16 @@ class InjectionMapper(BaseSurfaceMapper):
                         evidence     = evidence,
                         burp_notes   = _BURP_NOTES_XXE,
                     )
+                    xxe_cls = classify_param(name)
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"XXE-signal body field '{name}' on {method} {ep.url}",
-                                details       = f"Body field '{name}' commonly carries XML payloads",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"XXE-signal body field '{name}' on {method} {ep.url}",
+                                details        = f"Body field '{name}' commonly carries XML payloads",
+                                raw_confidence = int(xxe_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "XXE",
@@ -630,6 +632,7 @@ class InjectionMapper(BaseSurfaceMapper):
 
                 if pname in _LDAP_SPECIFIC_PARAMS:
                     # Always LDAP-specific - flag regardless of path
+                    ldap_cls = classify_param(pname)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "LDAP Injection",
@@ -644,11 +647,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"LDAP-specific param '{pname}' on {method} {ep.url}",
-                                details       = f"Param '{pname}' is a native LDAP directory attribute name",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"LDAP-specific param '{pname}' on {method} {ep.url}",
+                                details        = f"Param '{pname}' is a native LDAP directory attribute name",
+                                raw_confidence = int(ldap_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "LDAP Injection",
@@ -659,6 +663,7 @@ class InjectionMapper(BaseSurfaceMapper):
                     )
                 elif pname in _LDAP_PARAMS and path_is_ldap:
                     # Generic auth param but path confirms directory/auth context
+                    ldap_cls = classify_param(pname)
                     self._candidate(
                         endpoint     = ep,
                         surface_type = "LDAP Injection",
@@ -673,11 +678,12 @@ class InjectionMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                source        = "static",
-                                asset         = ep.url or "",
-                                context       = f"LDAP-signal param '{pname}' on auth/directory path {ep.url}",
-                                details       = f"Param '{pname}' on LDAP-signal path - likely directory/auth backend",
+                                evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                source         = "static",
+                                asset          = ep.url or "",
+                                context        = f"LDAP-signal param '{pname}' on auth/directory path {ep.url}",
+                                details        = f"Param '{pname}' on LDAP-signal path - likely directory/auth backend",
+                                raw_confidence = int(ldap_cls.raw_confidence * 100),
                             ),
                         ],
                         surface_type = "LDAP Injection",
@@ -705,14 +711,16 @@ class InjectionMapper(BaseSurfaceMapper):
                             ],
                             burp_notes   = _BURP_NOTES_SQLI,
                         )
+                        search_cls = classify_param(name)
                         self._emit_evidence(
                             evidence     = [
                                 Evidence(
-                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                                    source        = "static",
-                                    asset         = ep.url or "",
-                                    context       = f"Search/filter body field '{name}' on {method} {ep.url}",
-                                    details       = f"Body field '{name}' commonly feeds into WHERE clauses or document search",
+                                    evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                                    source         = "static",
+                                    asset          = ep.url or "",
+                                    context        = f"Search/filter body field '{name}' on {method} {ep.url}",
+                                    details        = f"Body field '{name}' commonly feeds into WHERE clauses or document search",
+                                    raw_confidence = int(search_cls.raw_confidence * 100),
                                 ),
                             ],
                             surface_type = "SQL/NoSQL Injection",
