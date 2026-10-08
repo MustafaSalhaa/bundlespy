@@ -229,19 +229,22 @@ class ConfigurationMapper(BaseSurfaceMapper):
                     status_code  = status_code,
                     status       = SurfaceStatus.MAPPED,
                 )
+                # Use DIRECT_RUNTIME_OBSERVATION for the HTTP probe result
+                # and RESPONSE_STATUS_CODE for the status code - both are active, real observations
                 config_ev = [
                     Evidence(
-                        evidence_type = EvidenceType.ROUTE_DECLARATION,
+                        evidence_type = EvidenceType.DIRECT_RUNTIME_OBSERVATION,
                         source        = "active",
                         asset         = probe_url,
-                        context       = f"Config probe: {path} returned HTTP {status_code}",
-                        details       = f"Path '{path}' is accessible at {probe_url}",
+                        context       = f"Config probe: GET {path} returned HTTP {status_code}",
+                        details       = f"Path '{path}' responded at {probe_url}",
+                        raw_confidence = 70 if status_code == 200 else (50 if status_code in (401, 403) else 30),
                     ),
                     Evidence(
-                        evidence_type = EvidenceType.METADATA,
+                        evidence_type = EvidenceType.RESPONSE_STATUS_CODE,
                         source        = "active",
                         asset         = probe_url,
-                        context       = f"HTTP {status_code} response at {path}",
+                        context       = f"HTTP {status_code} at {path}",
                         details       = evidence[0] if evidence else f"HTTP {status_code}",
                     ),
                 ]
