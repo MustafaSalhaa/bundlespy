@@ -5,6 +5,7 @@ Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 from typing import List
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # Param names with high SSRF signal - clearly expect a URL or callback
@@ -174,6 +175,29 @@ class SsrfMapper(BaseSurfaceMapper):
                     ],
                     burp_notes   = _BURP_NOTES_JS,
                 )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.STATIC_JS,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = "HTTP client calls in JS file",
+                            details       = ", ".join(fetch_hits[:3]),
+                        ),
+                        Evidence(
+                            evidence_type = EvidenceType.DOM,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = "Server-side URL source feeding HTTP client",
+                            details       = ", ".join(server_hits[:3]),
+                        ),
+                    ],
+                    surface_type = "SSRF via JS Fetch",
+                    endpoint     = js_url,
+                    method       = "GET",
+                    parameter    = "",
+                    notes        = _BURP_NOTES_JS,
+                )
             else:
                 # Only client-side sources - browser makes the request, not the server.
                 # Flag at LOW as open redirect / client-side request forgery risk instead.
@@ -190,6 +214,29 @@ class SsrfMapper(BaseSurfaceMapper):
                         "SSRF is unlikely; check for open redirect or client-side request forgery",
                     ],
                     burp_notes   = _BURP_NOTES_JS,
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.STATIC_JS,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = "HTTP client calls in JS file",
+                            details       = ", ".join(fetch_hits[:3]),
+                        ),
+                        Evidence(
+                            evidence_type = EvidenceType.DOM,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = "Client-side URL sources only - browser-originated request",
+                            details       = ", ".join(client_hits[:3]),
+                        ),
+                    ],
+                    surface_type = "SSRF via JS Fetch",
+                    endpoint     = js_url,
+                    method       = "GET",
+                    parameter    = "",
+                    notes        = _BURP_NOTES_JS,
                 )
 
         for ep in result.endpoints:
@@ -209,6 +256,22 @@ class SsrfMapper(BaseSurfaceMapper):
                     ],
                     burp_notes   = _BURP_NOTES_PATH,
                 )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.ROUTE_DECLARATION,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"SSRF-signal path pattern in {ep.url}",
+                            details       = "import/webhook/proxy/fetch path commonly performs outbound requests",
+                        ),
+                    ],
+                    surface_type = "SSRF",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = "path:ssrf_endpoint",
+                    notes        = _BURP_NOTES_PATH,
+                )
 
             # Check query params
             for qp in (ep.query_params or []):
@@ -225,6 +288,22 @@ class SsrfMapper(BaseSurfaceMapper):
                     ],
                     burp_notes   = _ssrf_burp(name),
                 )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"SSRF-signal query param '{name}'",
+                            details       = f"Param name '{name}' commonly carries a URL or external resource reference",
+                        ),
+                    ],
+                    surface_type = "SSRF",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = f"query:{name}",
+                    notes        = _ssrf_burp(name),
+                )
 
             # Check body fields
             for bf in (ep.body_fields or []):
@@ -240,6 +319,22 @@ class SsrfMapper(BaseSurfaceMapper):
                         f"SSRF-signal body field '{name}' on {method} {ep.url}",
                     ],
                     burp_notes   = _ssrf_burp(name),
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"SSRF-signal body field '{name}'",
+                            details       = f"Body field '{name}' commonly carries a URL or external resource reference",
+                        ),
+                    ],
+                    surface_type = "SSRF",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = f"body:{name}",
+                    notes        = _ssrf_burp(name),
                 )
 
         return self._results
