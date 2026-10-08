@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, SurfaceStatus, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ..safety import SurfaceSafetyPolicy
 from ...storage.models import ScanResult, Endpoint
 
@@ -227,6 +228,30 @@ class ConfigurationMapper(BaseSurfaceMapper):
                     evidence     = evidence,
                     status_code  = status_code,
                     status       = SurfaceStatus.MAPPED,
+                )
+                config_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.ROUTE_DECLARATION,
+                        source        = "active",
+                        asset         = probe_url,
+                        context       = f"Config probe: {path} returned HTTP {status_code}",
+                        details       = f"Path '{path}' is accessible at {probe_url}",
+                    ),
+                    Evidence(
+                        evidence_type = EvidenceType.METADATA,
+                        source        = "active",
+                        asset         = probe_url,
+                        context       = f"HTTP {status_code} response at {path}",
+                        details       = evidence[0] if evidence else f"HTTP {status_code}",
+                    ),
+                ]
+                self._emit_evidence(
+                    evidence     = config_ev,
+                    surface_type = surface_type,
+                    endpoint     = probe_url,
+                    method       = "GET",
+                    parameter    = "",
+                    notes        = _get_burp_notes(path),
                 )
 
         return self._results
