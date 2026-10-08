@@ -27,40 +27,17 @@ from typing import List, Set
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import (
+    ALL_REDIRECT_PARAMS  as _ALL_REDIRECT_PARAMS,
+    HIGH_REDIRECT_PARAMS as _HIGH_REDIRECT_PARAMS,
+    classify_param,
+    ParamTier,
+    tier_to_confidence_level,
+)
 from ...storage.models import ScanResult, Endpoint
 
-# ── Param name tiers ──────────────────────────────────────────────────────────
-
-_HIGH_REDIRECT_PARAMS: Set[str] = {
-    "redirect", "redirect_uri", "redirect_url", "redirecturi", "redirecturl",
-    "next", "next_url", "nexturl",
-    "return_url", "returnurl", "return_to", "returnto",
-    "after_login", "afterlogin", "post_login_redirect",
-    "callback_url", "callbackurl",
-    "target_url", "targeturl",
-    "login_redirect", "loginredirect",
-    "success_url", "successurl",
-    "checkout_url", "checkouturl",
-}
-
-_MEDIUM_REDIRECT_PARAMS: Set[str] = {
-    "return", "destination", "dest",
-    "goto", "go",
-    "continue", "cont",
-    "back", "backurl", "back_url",
-    "forward", "fwd",
-    "after", "then",
-    "follow",
-    "navigate", "nav",
-    "cancel_url", "cancelurl",
-    "exit_url", "exiturl",
-    "checkout_redirect",
-    "oauth_redirect",
-    "landing",
-    "rurl", "redir",
-}
-
-# Low-signal / noisy — only flag on auth paths
+# Low-signal redirect param names - only flag on auth paths
+# These live here because param_semantics doesn't export a LOW_REDIRECT set separately
 _LOW_REDIRECT_PARAMS: Set[str] = {
     "to", "url", "uri",
     "ref", "referrer",
@@ -68,10 +45,6 @@ _LOW_REDIRECT_PARAMS: Set[str] = {
     "location", "loc",
     "page",
 }
-
-_ALL_REDIRECT_PARAMS = (
-    _HIGH_REDIRECT_PARAMS | _MEDIUM_REDIRECT_PARAMS | _LOW_REDIRECT_PARAMS
-)
 
 # ── Auth-path amplifier ───────────────────────────────────────────────────────
 
@@ -189,16 +162,18 @@ def _is_auth_path(path: str) -> bool:
 
 
 def _param_confidence(name: str, path: str, is_body: bool = False) -> str:
-    nl      = name.lower()
     is_auth = _is_auth_path(path)
-
-    if nl in _HIGH_REDIRECT_PARAMS:
-        return ConfidenceLevel.HIGH if is_auth else ConfidenceLevel.MEDIUM
-    if nl in _MEDIUM_REDIRECT_PARAMS:
-        return ConfidenceLevel.HIGH if is_auth else ConfidenceLevel.MEDIUM
-    if nl in _LOW_REDIRECT_PARAMS:
-        return ConfidenceLevel.MEDIUM if is_auth else ConfidenceLevel.LOW
-    return ConfidenceLevel.LOW
+    cls     = classify_param(name)
+    conf    = tier_to_confidence_level(cls.tier)
+    # Low-signal params (url, to, ref, etc.) only flag on auth paths
+    if name.lower() in _LOW_REDIRECT_PARAMS and not is_auth:
+        return ConfidenceLevel.LOW
+    # Auth path bumps any redirect param one tier higher
+    if is_auth:
+        if conf == ConfidenceLevel.LOW:
+            return ConfidenceLevel.MEDIUM
+        return ConfidenceLevel.HIGH
+    return conf
 
 
 def _response_header_keys(ep: Endpoint) -> List[str]:
@@ -251,9 +226,10 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                     continue
                 seen.add(key)
 
-                conf  = _param_confidence(name, path)
-                notes = _BURP_NOTES_AUTH if is_auth else _BURP_NOTES_HIGH
-                ev    = [f"Redirect-signal query param '{name}' on {url}"]
+                qp_cls = classify_param(name)
+                conf   = _param_confidence(name, path)
+                notes  = _BURP_NOTES_AUTH if is_auth else _BURP_NOTES_HIGH
+                ev     = [f"Redirect-signal query param '{name}' on {url}"]
                 if is_auth:
                     ev.append(
                         "Auth / OAuth path — redirect param here is a critical attack surface. "
@@ -274,11 +250,12 @@ class OpenRedirectMapper(BaseSurfaceMapper):
 
                 or_ev = [
                     Evidence(
-                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                        source        = "static",
-                        asset         = url,
-                        context       = f"Redirect-signal query param '{name}'",
-                        details       = f"Param name '{name}' commonly carries a redirect destination",
+                        evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                        source         = "static",
+                        asset          = url,
+                        context        = f"Redirect-signal query param '{name}'",
+                        details        = f"Param name '{name}' commonly carries a redirect destination",
+                        raw_confidence = int(qp_cls.raw_confidence * 100),
                     ),
                 ]
                 if is_auth:
@@ -310,7 +287,7 @@ class OpenRedirectMapper(BaseSurfaceMapper):
             if method in ("POST", "PUT", "PATCH"):
                 for bf in (ep.body_fields or []):
                     name = (bf.get("name") or "").lower()
-                    if name not in (_HIGH_REDIRECT_PARAMS | _MEDIUM_REDIRECT_PARAMS):
+                    if name not in (_ALL_REDIRECT_PARAMS - _LOW_REDIRECT_PARAMS):
                         continue
 
                     key = f"or_body:{method}:{url}:{name}"
@@ -318,9 +295,10 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                         continue
                     seen.add(key)
 
-                    conf  = ConfidenceLevel.HIGH if is_auth else _param_confidence(name, path, is_body=True)
-                    notes = _BURP_NOTES_AUTH if is_auth else _BURP_NOTES_HIGH
-                    ev    = [
+                    bf_cls = classify_param(name)
+                    conf   = ConfidenceLevel.HIGH if is_auth else _param_confidence(name, path, is_body=True)
+                    notes  = _BURP_NOTES_AUTH if is_auth else _BURP_NOTES_HIGH
+                    ev     = [
                         f"Redirect-signal POST body field '{name}' on {url}",
                         "POST-based redirect params often bypass client-side validation "
                         "and URL-allowlist checks that only inspect the query string.",
@@ -342,11 +320,12 @@ class OpenRedirectMapper(BaseSurfaceMapper):
 
                     or_body_ev = [
                         Evidence(
-                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                            source        = "static",
-                            asset         = url,
-                            context       = f"Redirect-signal POST body field '{name}'",
-                            details       = f"Body param '{name}' commonly carries a redirect destination",
+                            evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                            source         = "static",
+                            asset          = url,
+                            context        = f"Redirect-signal POST body field '{name}'",
+                            details        = f"Body param '{name}' commonly carries a redirect destination",
+                            raw_confidence = int(bf_cls.raw_confidence * 100),
                         ),
                     ]
                     if is_auth:
@@ -404,13 +383,15 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                     auth_context = auth_ctx,
                 )
 
+                pp_cls     = classify_param(name)
                 or_path_ev = [
                     Evidence(
-                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
-                        source        = "static",
-                        asset         = url,
-                        context       = f"Redirect-signal path param '{{{name}}}'",
-                        details       = f"Path param '{name}' commonly carries a redirect destination",
+                        evidence_type  = EvidenceType.PARAMETER_SEMANTIC,
+                        source         = "static",
+                        asset          = url,
+                        context        = f"Redirect-signal path param '{{{name}}}'",
+                        details        = f"Path param '{name}' commonly carries a redirect destination",
+                        raw_confidence = int(pp_cls.raw_confidence * 100),
                     ),
                 ]
                 if is_auth:
