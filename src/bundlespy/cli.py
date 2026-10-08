@@ -107,6 +107,7 @@ other:
     _cg.add_argument("--exclude",          nargs="+", default=[],  metavar="PAT", help="URL patterns to exclude from crawl (substring match)")
     _cg.add_argument("--max-domain-pages", type=int,  default=0,   metavar="N",   help="Max pages per hostname - prevents one subdomain eating the full budget (default: 0 = unlimited)")
     _cg.add_argument("--protect-session",  action="store_true",                   help="Skip logout/signout URLs to keep authenticated sessions alive during crawl")
+    _cg.add_argument("--force-crawl",      action="store_true",                   help="Run the static crawler even when credentials are supplied (default: skip crawler when --headless + creds)")
 
     # Features
     _fg = scan.add_argument_group("features")
@@ -599,10 +600,16 @@ def run_scan(args) -> int:
     errors: list = []
 
     # ── Active crawl ──────────────────────────────────────────────────────────
-    # Skip crawler when headless + credentials are supplied.
-    # The unauthenticated crawler would only hit the login page and waste time.
-    # Headless handles full discovery with the authenticated session instead.
-    _skip_crawler = args.headless and bool(args.cookie or args.header)
+    # Skip crawler when headless + credentials are supplied unless --force-crawl.
+    # Without auth the static crawler only hits the login page and misses everything.
+    _has_creds = bool(args.cookie or args.header)
+    _force_crawl = getattr(args, "force_crawl", False)
+    _skip_crawler = args.headless and _has_creds and not _force_crawl
+    if _skip_crawler and not args.quiet:
+        phase_warn(
+            "Static crawler disabled - credentials supplied with headless mode. "
+            "Use --force-crawl to run it anyway."
+        )
     crawler = None  # may stay None if skipped or passive
 
     if not args.passive and not _skip_crawler:
