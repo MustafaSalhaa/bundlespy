@@ -243,20 +243,21 @@ class CorsMapper(BaseSurfaceMapper):
                     )
                     cors_ev = [
                         Evidence(
-                            evidence_type = EvidenceType.METADATA,
-                            source        = "static",
-                            asset         = url,
-                            context       = "Access-Control-Allow-Origin: * with credentials",
-                            details       = "ACAO: * + ACAC: true - spec violation, server may also reflect explicit origins",
+                            evidence_type  = EvidenceType.RESPONSE_HEADER,
+                            source         = "static",
+                            asset          = url,
+                            context        = "Access-Control-Allow-Origin: * with credentials",
+                            details        = "ACAO: * + ACAC: true - spec violation, server may also reflect explicit origins",
+                            raw_confidence = 70,
                         ),
                     ]
                     if auth_ctx:
                         cors_ev.append(Evidence(
-                            evidence_type = EvidenceType.METADATA,
-                            source        = "static",
-                            asset         = url,
-                            context       = f"Auth context: {auth_ctx}",
-                            details       = auth_ctx,
+                            evidence_type  = EvidenceType.AUTHENTICATION_CONTEXT,
+                            source         = "static",
+                            asset          = url,
+                            context        = f"Auth context: {auth_ctx}",
+                            details        = auth_ctx,
                         ))
                     self._emit_evidence(
                         evidence     = cors_ev,
@@ -296,28 +297,30 @@ class CorsMapper(BaseSurfaceMapper):
                     )
                     refl_ev = [
                         Evidence(
-                            evidence_type = EvidenceType.METADATA,
-                            source        = "static",
-                            asset         = url,
-                            context       = f"Origin reflection: ACAO: {acao} with ACAC: true",
-                            details       = "Specific origin in ACAO + credentials - likely reflective policy",
+                            evidence_type  = EvidenceType.RESPONSE_HEADER,
+                            source         = "static",
+                            asset          = url,
+                            context        = f"Origin reflection: ACAO: {acao} with ACAC: true",
+                            details        = "Specific origin in ACAO + credentials - likely reflective policy",
+                            raw_confidence = 70,
                         ),
                     ]
                     if not vary_ok:
                         refl_ev.append(Evidence(
-                            evidence_type = EvidenceType.METADATA,
-                            source        = "static",
-                            asset         = url,
-                            context       = "Vary: Origin header missing",
-                            details       = "Permissive ACAO response may be cached and served to other users",
+                            evidence_type  = EvidenceType.RESPONSE_HEADER,
+                            source         = "static",
+                            asset          = url,
+                            context        = "Vary: Origin header missing",
+                            details        = "Permissive ACAO response may be cached and served to other users",
+                            raw_confidence = 40,
                         ))
                     if auth_ctx:
                         refl_ev.append(Evidence(
-                            evidence_type = EvidenceType.METADATA,
-                            source        = "static",
-                            asset         = url,
-                            context       = f"Auth context: {auth_ctx}",
-                            details       = auth_ctx,
+                            evidence_type  = EvidenceType.AUTHENTICATION_CONTEXT,
+                            source         = "static",
+                            asset          = url,
+                            context        = f"Auth context: {auth_ctx}",
+                            details        = auth_ctx,
                         ))
                     self._emit_evidence(
                         evidence     = refl_ev,
@@ -350,11 +353,12 @@ class CorsMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.METADATA,
-                                source        = "static",
-                                asset         = url,
-                                context       = "Access-Control-Allow-Origin: null",
-                                details       = "Null origin trust - exploitable from sandboxed iframes",
+                                evidence_type  = EvidenceType.RESPONSE_HEADER,
+                                source         = "static",
+                                asset          = url,
+                                context        = "Access-Control-Allow-Origin: null",
+                                details        = "Null origin trust - exploitable from sandboxed iframes",
+                                raw_confidence = 65,
                             ),
                         ],
                         surface_type = "CORS: Null Origin Trust",
@@ -388,11 +392,12 @@ class CorsMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.METADATA,
-                                source        = "static",
-                                asset         = url,
-                                context       = f"Subdomain wildcard ACAO: {acao}",
-                                details       = "XSS on any allowed subdomain escalates to cross-origin read",
+                                evidence_type  = EvidenceType.RESPONSE_HEADER,
+                                source         = "static",
+                                asset          = url,
+                                context        = f"Subdomain wildcard ACAO: {acao}",
+                                details        = "XSS on any allowed subdomain escalates to cross-origin read",
+                                raw_confidence = 55,
                             ),
                         ],
                         surface_type = "CORS: Subdomain Wildcard",
@@ -423,11 +428,12 @@ class CorsMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.METADATA,
-                                source        = "static",
-                                asset         = url,
-                                context       = f"Reflective ACAO without Vary: Origin",
-                                details       = f"ACAO: {acao} - missing Vary header may cause CDN cache poisoning",
+                                evidence_type  = EvidenceType.RESPONSE_HEADER,
+                                source         = "static",
+                                asset          = url,
+                                context        = f"Reflective ACAO without Vary: Origin",
+                                details        = f"ACAO: {acao} - missing Vary header may cause CDN cache poisoning",
+                                raw_confidence = 40,
                             ),
                         ],
                         surface_type = "CORS: Missing Vary Header",
@@ -460,11 +466,12 @@ class CorsMapper(BaseSurfaceMapper):
                     self._emit_evidence(
                         evidence     = [
                             Evidence(
-                                evidence_type = EvidenceType.METADATA,
-                                source        = "static",
-                                asset         = url,
-                                context       = f"Unsafe CORS methods: {', '.join(unsafe)}",
-                                details       = f"ACAM includes write methods with permissive ACAO: {acao}",
+                                evidence_type  = EvidenceType.RESPONSE_HEADER,
+                                source         = "static",
+                                asset          = url,
+                                context        = f"Unsafe CORS methods: {', '.join(unsafe)}",
+                                details        = f"ACAM includes write methods with permissive ACAO: {acao}",
+                                raw_confidence = 55,
                             ),
                         ],
                         surface_type = "CORS: Unsafe Methods Allowed",
