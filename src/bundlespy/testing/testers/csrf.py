@@ -5,6 +5,7 @@ Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 from typing import List, Set
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # Header names that indicate CSRF protection
@@ -157,6 +158,43 @@ class CsrfMapper(BaseSurfaceMapper):
                 evidence     = evidence,
                 burp_notes   = burp_notes,
                 auth_context = auth_ctx,
+            )
+
+            # emit structured evidence alongside the legacy candidate
+            csrf_ev = []
+            if has_csrf:
+                # CSRF token signal found - PARAMETER_SEMANTIC for the token name
+                csrf_ev.append(Evidence(
+                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                    source        = "static",
+                    asset         = ep.url or "",
+                    context       = f"CSRF token signal on {method} {ep.url}",
+                    details       = "Header or body field indicates CSRF protection; verify server-side enforcement",
+                ))
+            else:
+                # No CSRF signal found - missing protection is the signal
+                csrf_ev.append(Evidence(
+                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                    source        = "static",
+                    asset         = ep.url or "",
+                    context       = f"No CSRF token on state-changing {method} {ep.url}",
+                    details       = "No CSRF header or body token observed on this endpoint",
+                ))
+            if is_authed and auth_ctx:
+                csrf_ev.append(Evidence(
+                    evidence_type = EvidenceType.METADATA,
+                    source        = "static",
+                    asset         = ep.url or "",
+                    context       = f"Auth-gated endpoint: {auth_ctx}",
+                    details       = "Authenticated endpoint - CSRF impact is higher",
+                ))
+            self._emit_evidence(
+                evidence     = csrf_ev,
+                surface_type = "CSRF",
+                endpoint     = ep.url or "",
+                method       = method,
+                parameter    = "",
+                notes        = burp_notes,
             )
 
         return self._results
