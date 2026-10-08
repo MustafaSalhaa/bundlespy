@@ -14,6 +14,7 @@ from .config import BundleSpyConfig, CrawlerConfig, ScopeConfig, ReportingConfig
 from .config import PROJECT_NAME, PROJECT_VERSION, AUTHOR_NAME, GITHUB_URL
 from .safety.network import validate_url
 from .crawler.fetcher import Fetcher
+from .crawler.cache import FetchCache
 from .crawler.scope import ScopeChecker
 from .crawler.crawler import Crawler
 from .analysis.secrets import SecretScanner
@@ -578,12 +579,14 @@ def run_scan(args) -> int:
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
 
+    fetch_cache = FetchCache()
     fetcher = Fetcher(
         timeout=args.timeout,
         requests_per_second=args.rate,
         stealth=args.stealth,
         extra_headers=extra_headers,
         verify_ssl=not args.no_verify,
+        cache=fetch_cache,
     )
     scope = ScopeChecker(
         target_url=target,
@@ -747,6 +750,7 @@ def run_scan(args) -> int:
                         stealth=args.stealth,
                         extra_headers=extra_headers,
                         verify_ssl=not args.no_verify,
+                        cache=fetch_cache,
                     )
                     if not args.quiet:
                         phase_done(
