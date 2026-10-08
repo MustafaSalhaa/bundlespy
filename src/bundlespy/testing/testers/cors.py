@@ -24,6 +24,7 @@ from typing import List, Dict, Set
 
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # --- Response header name constants (lowercased for comparison) ---
@@ -240,6 +241,31 @@ class CorsMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_WILDCARD_CREDS,
                         auth_context = auth_ctx,
                     )
+                    cors_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = "Access-Control-Allow-Origin: * with credentials",
+                            details       = "ACAO: * + ACAC: true - spec violation, server may also reflect explicit origins",
+                        ),
+                    ]
+                    if auth_ctx:
+                        cors_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = auth_ctx,
+                        ))
+                    self._emit_evidence(
+                        evidence     = cors_ev,
+                        surface_type = "CORS: Wildcard + Credentials",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Access-Control-Allow-Origin",
+                        notes        = _BURP_NOTES_WILDCARD_CREDS,
+                    )
 
             # Case 2: Origin reflection (specific origin in ACAO + credentials)
             elif _is_reflective_marker(acao) and acac:
@@ -268,6 +294,39 @@ class CorsMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_REFLECTION,
                         auth_context = auth_ctx,
                     )
+                    refl_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Origin reflection: ACAO: {acao} with ACAC: true",
+                            details       = "Specific origin in ACAO + credentials - likely reflective policy",
+                        ),
+                    ]
+                    if not vary_ok:
+                        refl_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = "Vary: Origin header missing",
+                            details       = "Permissive ACAO response may be cached and served to other users",
+                        ))
+                    if auth_ctx:
+                        refl_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = auth_ctx,
+                        ))
+                    self._emit_evidence(
+                        evidence     = refl_ev,
+                        surface_type = "CORS: Origin Reflection",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Access-Control-Allow-Origin",
+                        notes        = _BURP_NOTES_REFLECTION,
+                    )
 
             # Case 3: Null origin trust
             elif acao.lower() == "null":
@@ -287,6 +346,22 @@ class CorsMapper(BaseSurfaceMapper):
                         ] + ([f"Auth context: {auth_ctx}"] if auth_ctx else []),
                         burp_notes   = _BURP_NOTES_NULL_ORIGIN,
                         auth_context = auth_ctx,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.METADATA,
+                                source        = "static",
+                                asset         = url,
+                                context       = "Access-Control-Allow-Origin: null",
+                                details       = "Null origin trust - exploitable from sandboxed iframes",
+                            ),
+                        ],
+                        surface_type = "CORS: Null Origin Trust",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Access-Control-Allow-Origin",
+                        notes        = _BURP_NOTES_NULL_ORIGIN,
                     )
 
             # Case 4: Subdomain wildcard (*.example.com)
@@ -310,6 +385,22 @@ class CorsMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_SUBDOMAIN,
                         auth_context = auth_ctx,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.METADATA,
+                                source        = "static",
+                                asset         = url,
+                                context       = f"Subdomain wildcard ACAO: {acao}",
+                                details       = "XSS on any allowed subdomain escalates to cross-origin read",
+                            ),
+                        ],
+                        surface_type = "CORS: Subdomain Wildcard",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Access-Control-Allow-Origin",
+                        notes        = _BURP_NOTES_SUBDOMAIN,
+                    )
 
             # Case 5: Reflective ACAO without credentials but missing Vary
             elif _is_reflective_marker(acao) and not acac and not vary_ok:
@@ -328,6 +419,22 @@ class CorsMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_VARY,
                         auth_context = auth_ctx,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.METADATA,
+                                source        = "static",
+                                asset         = url,
+                                context       = f"Reflective ACAO without Vary: Origin",
+                                details       = f"ACAO: {acao} - missing Vary header may cause CDN cache poisoning",
+                            ),
+                        ],
+                        surface_type = "CORS: Missing Vary Header",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Vary",
+                        notes        = _BURP_NOTES_VARY,
                     )
 
             # Case 6: Unsafe methods in ACAM with permissive ACAO
@@ -349,6 +456,22 @@ class CorsMapper(BaseSurfaceMapper):
                         ] + ([f"Auth context: {auth_ctx}"] if auth_ctx else []),
                         burp_notes   = _BURP_NOTES_UNSAFE_METHODS,
                         auth_context = auth_ctx,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.METADATA,
+                                source        = "static",
+                                asset         = url,
+                                context       = f"Unsafe CORS methods: {', '.join(unsafe)}",
+                                details       = f"ACAM includes write methods with permissive ACAO: {acao}",
+                            ),
+                        ],
+                        surface_type = "CORS: Unsafe Methods Allowed",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = "Access-Control-Allow-Methods",
+                        notes        = _BURP_NOTES_UNSAFE_METHODS,
                     )
 
         # Phase 2: JS file analysis for credentialed fetch patterns
@@ -393,6 +516,7 @@ class CorsMapper(BaseSurfaceMapper):
                     auth_context="",
                     source_type="static",
                 )
+                user_sources = [s for s in _USER_CONTROLLED_URL_SOURCES if s in content]
                 self._candidate(
                     endpoint     = synthetic_ep,
                     surface_type = "CORS: Credentialed Fetch + User-Controlled URL",
@@ -403,12 +527,33 @@ class CorsMapper(BaseSurfaceMapper):
                         "and has a user-controlled URL source nearby.",
                         "If the fetch URL can be influenced by an attacker (via URL params, postMessage, etc.), "
                         "the victim's cookies will be sent to an attacker-chosen endpoint (CORS-SSRF chain).",
-                        "Taint sources found: " + ", ".join(
-                            s for s in _USER_CONTROLLED_URL_SOURCES if s in content
-                        ),
+                        "Taint sources found: " + ", ".join(user_sources),
                     ],
                     burp_notes   = _BURP_NOTES_JS_CREDS,
                     auth_context = "",
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.STATIC_JS,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = f"Credentialed fetch: {creds_signal}",
+                            details       = "credentials:include or withCredentials=true in JS",
+                        ),
+                        Evidence(
+                            evidence_type = EvidenceType.DOM,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = "User-controlled URL source near credentialed fetch",
+                            details       = ", ".join(user_sources[:3]),
+                        ),
+                    ],
+                    surface_type = "CORS: Credentialed Fetch + User-Controlled URL",
+                    endpoint     = js_url,
+                    method       = "GET",
+                    parameter    = creds_signal,
+                    notes        = _BURP_NOTES_JS_CREDS,
                 )
             else:
                 from ...storage.models import Endpoint as _Endpoint
@@ -439,6 +584,22 @@ class CorsMapper(BaseSurfaceMapper):
                     ],
                     burp_notes   = _BURP_NOTES_CREDS_INCLUDE,
                     auth_context = "",
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.STATIC_JS,
+                            source        = "static",
+                            asset         = js_url,
+                            context       = f"Credentialed cross-origin fetch: {creds_signal}",
+                            details       = "credentials:include or withCredentials=true, no user-controlled URL detected",
+                        ),
+                    ],
+                    surface_type = "CORS: Credentialed Cross-Origin Fetch",
+                    endpoint     = js_url,
+                    method       = "GET",
+                    parameter    = creds_signal,
+                    notes        = _BURP_NOTES_CREDS_INCLUDE,
                 )
 
         return self._results
