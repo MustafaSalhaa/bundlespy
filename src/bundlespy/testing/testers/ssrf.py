@@ -6,32 +6,13 @@ from typing import List
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
 from ..evidence import Evidence, EvidenceType
+from ..param_semantics import (
+    ALL_SSRF_PARAMS as _ALL_SSRF_PARAMS,
+    classify_param,
+    ParamTier,
+    tier_to_confidence_level,
+)
 from ...storage.models import ScanResult, Endpoint
-
-# Param names with high SSRF signal - clearly expect a URL or callback
-_HIGH_SSRF_PARAMS = {
-    "url", "uri", "callback", "webhook", "endpoint",
-    "image_url", "avatar_url", "icon_url", "logo_url",
-    "photo_url", "thumbnail_url", "cover_url",
-    "feed_url", "rss_url", "api_endpoint", "api_url",
-    "return_url", "redirect_url",  # can SSRF even when intended for redirect
-}
-
-# Param names with medium SSRF signal - context-dependent
-_MEDIUM_SSRF_PARAMS = {
-    "redirect", "target", "src", "source", "dest", "destination",
-    "remote", "proxy", "forward",
-    "import", "export", "upload_url", "download_url",
-    "attachment_url", "media_url", "resource",
-}
-
-# Param names with lower SSRF signal - need supporting context
-_LOW_SSRF_PARAMS = {
-    "link", "fetch", "load", "pull", "path", "file", "host", "domain",
-    "origin", "location", "address", "server", "base_url",
-}
-
-_ALL_SSRF_PARAMS = _HIGH_SSRF_PARAMS | _MEDIUM_SSRF_PARAMS | _LOW_SSRF_PARAMS
 
 # Path patterns that suggest import/webhook/integration functionality
 _SSRF_PATH_SIGNALS = {
@@ -97,13 +78,10 @@ _BURP_NOTES_JS = (
 )
 
 
-def _ssrf_confidence(name: str) -> str:
-    name = name.lower()
-    if name in _HIGH_SSRF_PARAMS:
-        return ConfidenceLevel.HIGH
-    if name in _MEDIUM_SSRF_PARAMS:
-        return ConfidenceLevel.MEDIUM
-    return ConfidenceLevel.LOW
+def _ssrf_confidence(name: str, value: str = "") -> str:
+    """Map param name to confidence level via centralized classifier."""
+    cls = classify_param(name, value)
+    return tier_to_confidence_level(cls.tier)
 
 
 def _ssrf_burp(name: str) -> str:
@@ -278,11 +256,14 @@ class SsrfMapper(BaseSurfaceMapper):
                 name = (qp.get("name") or "").lower()
                 if name not in _ALL_SSRF_PARAMS:
                     continue
+                qp_val   = (qp.get("example") or qp.get("value") or "")
+                qp_cls   = classify_param(name, qp_val)
+                qp_conf  = tier_to_confidence_level(qp_cls.tier)
                 self._candidate(
                     endpoint     = ep,
                     surface_type = "SSRF",
                     parameters   = [f"query:{name}"],
-                    confidence   = _ssrf_confidence(name),
+                    confidence   = qp_conf,
                     evidence     = [
                         f"SSRF-signal query param '{name}' on {ep.url}",
                     ],
@@ -296,6 +277,7 @@ class SsrfMapper(BaseSurfaceMapper):
                             asset         = ep.url or "",
                             context       = f"SSRF-signal query param '{name}'",
                             details       = f"Param name '{name}' commonly carries a URL or external resource reference",
+                            raw_confidence = int(qp_cls.raw_confidence * 100),
                         ),
                     ],
                     surface_type = "SSRF",
@@ -310,11 +292,14 @@ class SsrfMapper(BaseSurfaceMapper):
                 name = (bf.get("name") or "").lower()
                 if name not in _ALL_SSRF_PARAMS:
                     continue
+                bf_val   = (bf.get("example") or bf.get("value") or "")
+                bf_cls   = classify_param(name, bf_val)
+                bf_conf  = tier_to_confidence_level(bf_cls.tier)
                 self._candidate(
                     endpoint     = ep,
                     surface_type = "SSRF",
                     parameters   = [f"body:{name}"],
-                    confidence   = _ssrf_confidence(name),
+                    confidence   = bf_conf,
                     evidence     = [
                         f"SSRF-signal body field '{name}' on {method} {ep.url}",
                     ],
@@ -328,6 +313,7 @@ class SsrfMapper(BaseSurfaceMapper):
                             asset         = ep.url or "",
                             context       = f"SSRF-signal body field '{name}'",
                             details       = f"Body field '{name}' commonly carries a URL or external resource reference",
+                            raw_confidence = int(bf_cls.raw_confidence * 100),
                         ),
                     ],
                     surface_type = "SSRF",
