@@ -103,13 +103,13 @@ _FILE_PATH_MEDIUM: FrozenSet[str] = frozenset({
 })
 
 _FILE_PATH_LOW: FrozenSet[str] = frozenset({
-    "attachment", "upload", "src_file", "input_file",
+    "attachment", "upload", "src_file", "input_file", "asset", "image",
 })
 
 # Image/media param names - NOT path traversal, but may be SSRF if they accept URLs
 # Kept separate to prevent false positive flood from image-heavy apps
 _IMAGE_PARAMS: FrozenSet[str] = frozenset({
-    "asset", "image", "img", "photo", "pdf", "icon", "logo",
+    "img", "photo", "pdf", "icon", "logo",
     "thumbnail", "avatar", "cover", "banner", "media",
 })
 
@@ -197,7 +197,7 @@ _TEMPLATE_MEDIUM: FrozenSet[str] = frozenset({
 
 # -- GRAPHQL params --
 _GRAPHQL_HIGH: FrozenSet[str] = frozenset({
-    "operationname", "query",
+    "operationname",
     "persistedquery", "extensions",
 })
 
