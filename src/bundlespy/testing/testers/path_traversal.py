@@ -6,6 +6,7 @@ import re
 from typing import List, Set, Tuple
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # Param names strongly associated with file/path operations
@@ -169,12 +170,14 @@ class PathTraversalMapper(BaseSurfaceMapper):
         # Dedup by (method, url, param_name) to avoid duplicate candidates
         seen: Set[Tuple[str, str, str]] = set()
 
-        def _deduped_candidate(method: str, url: str, param_name: str, **kwargs) -> None:
+        def _deduped_candidate(method: str, url: str, param_name: str, **kwargs) -> bool:
+            # Returns True if the candidate was emitted, False if dedup'd
             key = (method.upper(), url, param_name)
             if key in seen:
-                return
+                return False
             seen.add(key)
             self._candidate(**kwargs)
+            return True
 
         for ep in result.endpoints:
             ep_path = ep.path or ep.url or ""
@@ -197,7 +200,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                 if example_val and _has_windows_path_signal(example_val):
                     evidence.append(f"Param example value contains Windows path indicator: '{example_val}'")
                 burp = _pick_burp_notes(ep_path, name, example_val)
-                _deduped_candidate(
+                if _deduped_candidate(
                     method     = method,
                     url        = ep_url,
                     param_name = f"query:{name}",
@@ -207,7 +210,23 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     confidence   = confidence,
                     evidence     = evidence,
                     burp_notes   = burp,
-                )
+                ):
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep_url,
+                                context       = f"File/path-signal query param '{name}'",
+                                details       = f"Param name '{name}' commonly references a file path",
+                            ),
+                        ],
+                        surface_type = "Path Traversal / LFI",
+                        endpoint     = ep_url,
+                        method       = method,
+                        parameter    = f"query:{name}",
+                        notes        = burp,
+                    )
 
             # 2. Body fields
             for bf in (ep.body_fields or []):
@@ -222,7 +241,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                 if example_val and _has_windows_path_signal(example_val):
                     evidence.append(f"Body field example value contains Windows path indicator: '{example_val}'")
                 burp = _pick_burp_notes(ep_path, name, example_val)
-                _deduped_candidate(
+                if _deduped_candidate(
                     method     = method,
                     url        = ep_url,
                     param_name = f"body:{name}",
@@ -232,7 +251,23 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     confidence   = confidence,
                     evidence     = evidence,
                     burp_notes   = burp,
-                )
+                ):
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep_url,
+                                context       = f"File/path-signal body field '{name}'",
+                                details       = f"Body field '{name}' commonly references a file path",
+                            ),
+                        ],
+                        surface_type = "Path Traversal / LFI",
+                        endpoint     = ep_url,
+                        method       = method,
+                        parameter    = f"body:{name}",
+                        notes        = burp,
+                    )
 
             # 3. Path params - existing logic + REST-style file reference detection
             for pp in (ep.path_params or []):
@@ -246,7 +281,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     if example_val and _has_high_value_extension(example_val):
                         evidence.append(f"Path param example value has file extension: '{example_val}'")
                     burp = _pick_burp_notes(ep_path, name, example_val)
-                    _deduped_candidate(
+                    if _deduped_candidate(
                         method     = method,
                         url        = ep_url,
                         param_name = f"path_param:{name}",
@@ -256,7 +291,23 @@ class PathTraversalMapper(BaseSurfaceMapper):
                         confidence   = confidence,
                         evidence     = evidence,
                         burp_notes   = burp,
-                    )
+                    ):
+                        self._emit_evidence(
+                            evidence     = [
+                                Evidence(
+                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                    source        = "static",
+                                    asset         = ep_url,
+                                    context       = f"File/path-signal path param '{name}'",
+                                    details       = f"Path param '{name}' commonly references a file path",
+                                ),
+                            ],
+                            surface_type = "Path Traversal / LFI",
+                            endpoint     = ep_url,
+                            method       = method,
+                            parameter    = f"path_param:{name}",
+                            notes        = burp,
+                        )
                     continue
 
                 # New: REST-style file reference - /files/{filename}, /docs/{document_id}
@@ -268,7 +319,7 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     ]
                     if example_val and _has_high_value_extension(example_val):
                         evidence.append(f"Path param example value has file extension: '{example_val}'")
-                    _deduped_candidate(
+                    if _deduped_candidate(
                         method     = method,
                         url        = ep_url,
                         param_name = f"path_param:{name}",
@@ -278,12 +329,28 @@ class PathTraversalMapper(BaseSurfaceMapper):
                         confidence   = ConfidenceLevel.HIGH,
                         evidence     = evidence,
                         burp_notes   = _BURP_NOTES,
-                    )
+                    ):
+                        self._emit_evidence(
+                            evidence     = [
+                                Evidence(
+                                    evidence_type = EvidenceType.ROUTE_DECLARATION,
+                                    source        = "static",
+                                    asset         = ep_url,
+                                    context       = f"REST-style file reference path param '{name}'",
+                                    details       = f"Path param name '{name}' is a known file-reference identifier",
+                                ),
+                            ],
+                            surface_type = "Path Traversal / LFI",
+                            endpoint     = ep_url,
+                            method       = method,
+                            parameter    = f"path_param:{name}",
+                            notes        = _BURP_NOTES,
+                        )
                     continue
 
                 # Also catch REST path params where the example value has a file extension
                 if example_val and _has_high_value_extension(example_val):
-                    _deduped_candidate(
+                    if _deduped_candidate(
                         method     = method,
                         url        = ep_url,
                         param_name = f"path_param:{name}",
@@ -296,14 +363,30 @@ class PathTraversalMapper(BaseSurfaceMapper):
                             f"Endpoint: {ep_url}",
                         ],
                         burp_notes   = _BURP_NOTES,
-                    )
+                    ):
+                        self._emit_evidence(
+                            evidence     = [
+                                Evidence(
+                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                    source        = "static",
+                                    asset         = ep_url,
+                                    context       = f"Path param '{name}' example value has file extension",
+                                    details       = f"example value: '{example_val}'",
+                                ),
+                            ],
+                            surface_type = "Path Traversal / LFI",
+                            endpoint     = ep_url,
+                            method       = method,
+                            parameter    = f"path_param:{name}",
+                            notes        = _BURP_NOTES,
+                        )
 
             # 4. Download/file endpoint with no matching params - still worth flagging
             if is_file_path and not any(
                 (qp.get("name") or "").lower() in _ALL_FILE_PARAMS
                 for qp in (ep.query_params or [])
             ):
-                _deduped_candidate(
+                if _deduped_candidate(
                     method     = method,
                     url        = ep_url,
                     param_name = "__no_param__",
@@ -313,6 +396,22 @@ class PathTraversalMapper(BaseSurfaceMapper):
                     confidence   = ConfidenceLevel.LOW,
                     evidence     = [f"File-serving endpoint with no detected params: {ep_path}"],
                     burp_notes   = _BURP_NOTES,
-                )
+                ):
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.ROUTE_DECLARATION,
+                                source        = "static",
+                                asset         = ep_url,
+                                context       = f"File-serving endpoint with no detected file params",
+                                details       = ep_path,
+                            ),
+                        ],
+                        surface_type = "Path Traversal / LFI",
+                        endpoint     = ep_url,
+                        method       = method,
+                        parameter    = "",
+                        notes        = _BURP_NOTES,
+                    )
 
         return self._results
