@@ -6,7 +6,7 @@ and optional stealth mode for WAF evasion.
 import time
 import hashlib
 import logging
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import requests
 import requests.adapters
@@ -15,6 +15,9 @@ import urllib3
 from ..config import USER_AGENT
 from ..safety.network import validate_url
 from ..utils.stealth import random_ua, get_stealth_headers, stealth_delay
+
+if TYPE_CHECKING:
+    from .cache import FetchCache
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -32,6 +35,7 @@ class Fetcher:
         stealth: bool = False,
         extra_headers: dict = None,
         verify_ssl: bool = False,
+        cache: Optional["FetchCache"] = None,
     ):
         self.timeout           = timeout
         self.max_response_size = max_response_size
@@ -47,6 +51,7 @@ class Fetcher:
         # self-signed certs (--no-verify CLI flag). Warnings suppressed regardless
         # since urllib3 warns even for verify=True on some cert chains.
         self.verify_ssl        = verify_ssl
+        self._cache            = cache
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -93,6 +98,21 @@ class Fetcher:
             logger.warning("Blocked request to %s: %s", url, reason)
             return None, 0, "", ""
 
+        # Check cache before hitting the network
+        cached_body: Optional[bytes] = None
+        cache_meta: dict = {}
+        if self._cache is not None:
+            hit, cached_body, cache_meta = self._cache.get(url)
+            if hit and cached_body is not None:
+                # Fresh cache hit - decode and return without a network request
+                try:
+                    content = cached_body.decode("utf-8", errors="replace")
+                except Exception:
+                    content = cached_body.decode("latin-1", errors="replace")
+                sha256 = hashlib.sha256(cached_body).hexdigest()
+                content_type = cache_meta.get("content_type", "")
+                return content, 200, content_type, sha256
+
         self._rate_limit()
 
         # Build headers
@@ -105,6 +125,12 @@ class Fetcher:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        # Add conditional GET headers if we have stale cache data
+        if cache_meta.get("etag"):
+            headers["If-None-Match"] = cache_meta["etag"]
+        if cache_meta.get("last_modified"):
+            headers["If-Modified-Since"] = cache_meta["last_modified"]
+
         try:
             resp = self.session.get(
                 url,
@@ -114,6 +140,18 @@ class Fetcher:
                 stream=True,
                 headers=headers,
             )
+
+            # 304 Not Modified - serve from cache
+            if resp.status_code == 304 and cached_body is not None:
+                if self._cache is not None:
+                    self._cache.record_revalidated(url, len(cached_body))
+                try:
+                    content = cached_body.decode("utf-8", errors="replace")
+                except Exception:
+                    content = cached_body.decode("latin-1", errors="replace")
+                sha256 = hashlib.sha256(cached_body).hexdigest()
+                content_type = cache_meta.get("content_type", "")
+                return content, 200, content_type, sha256
 
             content_type = resp.headers.get("Content-Type", "")
 
@@ -136,6 +174,11 @@ class Fetcher:
                 content = raw.decode("latin-1", errors="replace")
 
             sha256 = hashlib.sha256(raw).hexdigest()
+
+            # Cache successful responses
+            if resp.status_code == 200 and self._cache is not None:
+                self._cache.put(url, raw, dict(resp.headers))
+
             return content, resp.status_code, content_type, sha256
 
         except requests.exceptions.SSLError as e:
@@ -172,6 +215,27 @@ class Fetcher:
             logger.warning("Blocked request to %s: %s", url, reason)
             return None, 0, "", "", {}
 
+        # Check cache before hitting the network
+        cached_body: Optional[bytes] = None
+        cache_meta: dict = {}
+        if self._cache is not None:
+            hit, cached_body, cache_meta = self._cache.get(url)
+            if hit and cached_body is not None:
+                # Fresh cache hit - decode and return without a network request
+                try:
+                    content = cached_body.decode("utf-8", errors="replace")
+                except Exception:
+                    content = cached_body.decode("latin-1", errors="replace")
+                sha256 = hashlib.sha256(cached_body).hexdigest()
+                content_type = cache_meta.get("content_type", "")
+                # Reconstruct minimal response headers from what we stored
+                resp_headers = {"Content-Type": content_type}
+                if cache_meta.get("etag"):
+                    resp_headers["ETag"] = cache_meta["etag"]
+                if cache_meta.get("last_modified"):
+                    resp_headers["Last-Modified"] = cache_meta["last_modified"]
+                return content, 200, content_type, sha256, resp_headers
+
         self._rate_limit()
 
         if self.stealth:
@@ -181,6 +245,12 @@ class Fetcher:
 
         if self.extra_headers:
             headers.update(self.extra_headers)
+
+        # Add conditional GET headers if we have stale cache data
+        if cache_meta.get("etag"):
+            headers["If-None-Match"] = cache_meta["etag"]
+        if cache_meta.get("last_modified"):
+            headers["If-Modified-Since"] = cache_meta["last_modified"]
 
         try:
             resp = self.session.get(
@@ -194,6 +264,18 @@ class Fetcher:
 
             content_type = resp.headers.get("Content-Type", "")
             resp_headers = dict(resp.headers)
+
+            # 304 Not Modified - serve from cache
+            if resp.status_code == 304 and cached_body is not None:
+                if self._cache is not None:
+                    self._cache.record_revalidated(url, len(cached_body))
+                try:
+                    content = cached_body.decode("utf-8", errors="replace")
+                except Exception:
+                    content = cached_body.decode("latin-1", errors="replace")
+                sha256 = hashlib.sha256(cached_body).hexdigest()
+                cached_ct = cache_meta.get("content_type", "")
+                return content, 200, cached_ct, sha256, resp_headers
 
             chunks = []
             total = 0
@@ -214,6 +296,11 @@ class Fetcher:
                 content = raw.decode("latin-1", errors="replace")
 
             sha256 = hashlib.sha256(raw).hexdigest()
+
+            # Cache successful responses
+            if resp.status_code == 200 and self._cache is not None:
+                self._cache.put(url, raw, dict(resp.headers))
+
             return content, resp.status_code, content_type, sha256, resp_headers
 
         except requests.exceptions.SSLError as e:
