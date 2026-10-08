@@ -199,7 +199,13 @@ RE_PROTO_RELATIVE = re.compile(
 
 # data-src lazy-load JS
 RE_DATA_SRC_JS = re.compile(
-    r"""data-(?:src|lazy|url)=['"]([^'"]*\.(?:js|mjs)[^'"]*)['"]""",
+    r"""data-(?:src|lazy|url|script|main|chunk|module|component)=['"]([^'"]*\.(?:js|mjs)[^'"]*)['"]""",
+    re.IGNORECASE,
+)
+
+# data-* attributes that contain API endpoint URLs (React/Angular/Vue SSR apps)
+RE_DATA_API_ATTRS = re.compile(
+    r"""data-(?:endpoint|api(?:-url|-path|-base|-root)?|fetch(?:-url|-path)?|config(?:-url|-path)?|url|action|remote|src|href)=['"]([^'"]{4,512})['"]""",
     re.IGNORECASE,
 )
 
@@ -210,6 +216,18 @@ RE_SOURCE_MAP = re.compile(r"//[#@]\s*sourceMappingURL=([^\s\"']+)")
 RE_NEXT_DATA = re.compile(
     r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>\s*(\{.*?\})\s*</script>',
     re.IGNORECASE | re.DOTALL,
+)
+
+# Nuxt __NUXT__ SSR state blob - window.__NUXT__={...} or window.__NUXT__ = {...}
+RE_NUXT_DATA = re.compile(
+    r'window\.__NUXT__\s*=\s*(\{.*?\})\s*;',
+    re.DOTALL,
+)
+
+# Generic SSR state: window.__INITIAL_STATE__ (Vue/Redux), window.__APP_STATE__, etc.
+RE_INITIAL_STATE = re.compile(
+    r'window\.__(?:INITIAL_STATE|APP_STATE|PRELOADED_STATE|STORE_STATE|APP_DATA)__\s*=\s*(\{.*?\})\s*;',
+    re.DOTALL,
 )
 
 # Vite manifest: imports array inside each entry
@@ -270,6 +288,12 @@ RE_LINK_HEADER = re.compile(r'<([^>]+)>')
 # Workbox precache list in service workers
 RE_SW_PRECACHE = re.compile(
     r'["\']([^"\']*\.(?:js|mjs)(?:\?[^"\']*)?)["\']'
+)
+
+# <meta http-equiv="refresh" content="N;url=..."> redirect target
+RE_META_REFRESH = re.compile(
+    r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\'>\s]+)',
+    re.IGNORECASE,
 )
 
 # <base href="..."> for URL resolution
@@ -677,16 +701,53 @@ def _parse_robots_for_js(content: str, base_url: str) -> List[str]:
     return paths
 
 
+def _parse_robots_disallow_paths(content: str, base_url: str) -> List[str]:
+    """Extract all Disallow/Allow paths from robots.txt as crawlable page URLs.
+    High-value paths (/admin/, /api/, /internal/) are deliberately Disallowed
+    by site owners — exactly where the interesting endpoints live."""
+    parsed = urlparse(base_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    paths: List[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith(("disallow:", "allow:")):
+            path = line.split(":", 1)[1].strip()
+            # Skip wildcards, empty, and root-only
+            if not path or path in ("*", "/") or "*" in path or "?" in path:
+                continue
+            # Normalize trailing wildcard patterns
+            path = path.rstrip("*").rstrip()
+            if path and not path.endswith("/"):
+                paths.append(base + path)
+            elif path:
+                # Directory - add index
+                paths.append(base + path)
+    return paths
+
+
+def _parse_robots_sitemap_urls(content: str) -> List[str]:
+    """Extract Sitemap: directives from robots.txt."""
+    urls: List[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line.lower().startswith("sitemap:"):
+            url = line.split(":", 1)[1].strip()
+            if url.startswith("http"):
+                urls.append(url)
+    return urls
+
+
 def _extract_js_from_link_header(headers: dict, base_url: str) -> List[str]:
-    """Parse Link response header for preloaded/prefetched JS files."""
-    # Try both capitalizations; some servers send X-Link
-    link_hdr = (
-        headers.get("link")
-        or headers.get("Link")
-        or headers.get("x-link")
-        or headers.get("X-Link")
-        or ""
-    )
+    """Parse Link response header for preloaded/prefetched JS files.
+    Handles rel=preload, rel=modulepreload, and rel=prefetch."""
+    # Collect all Link header values (some servers split across multiple headers)
+    link_hdr = ""
+    for key in ("link", "Link", "x-link", "X-Link"):
+        val = headers.get(key, "")
+        if val:
+            link_hdr = (link_hdr + ", " + val) if link_hdr else val
     urls: List[str] = []
     for part in link_hdr.split(","):
         part = part.strip()
@@ -694,8 +755,9 @@ def _extract_js_from_link_header(headers: dict, base_url: str) -> List[str]:
         if not m:
             continue
         url = m.group(1).strip()
-        # Include if explicitly as=script, or if path looks like JS
-        if "as=script" in part or _is_js_url(url):
+        part_lower = part.lower()
+        # Include if: as=script, rel=modulepreload (ES modules), or path looks like JS
+        if "as=script" in part_lower or "modulepreload" in part_lower or _is_js_url(url):
             urls.append(urljoin(base_url, url))
     return urls
 
@@ -753,6 +815,48 @@ def _extract_next_data(html: str) -> Optional[dict]:
         return json.loads(m.group(1))
     except Exception:
         return None
+
+
+def _extract_ssr_state_urls(html: str, base_url: str) -> List[str]:
+    """Walk Nuxt/__INITIAL_STATE__/generic SSR JSON blobs for embedded URL strings."""
+    urls: List[str] = []
+    blobs: List[str] = []
+
+    # Nuxt SSR state
+    m = RE_NUXT_DATA.search(html)
+    if m:
+        blobs.append(m.group(1))
+
+    # Generic SSR states (Vue/Redux/Vuex)
+    for m in RE_INITIAL_STATE.finditer(html):
+        blobs.append(m.group(1))
+
+    for blob in blobs:
+        try:
+            # Nuxt blobs can contain JS function calls - extract the JSON-like portion
+            data = json.loads(blob)
+            _walk_json_for_urls(data, base_url, urls)
+        except Exception:
+            # Fallback: regex scan for path strings
+            for raw in re.findall(r'["\'](\/_?[a-zA-Z0-9_\-/]+(?:\.js)?)["\']', blob):
+                if len(raw) > 2:
+                    urls.append(urljoin(base_url, raw))
+    return urls
+
+
+def _walk_json_for_urls(obj: object, base_url: str, out: List[str], _depth: int = 0) -> None:
+    """Recursively walk a parsed JSON object and collect string values that look like URLs/paths."""
+    if _depth > 20:
+        return
+    if isinstance(obj, str):
+        if obj.startswith(("http://", "https://", "/")):
+            out.append(urljoin(base_url, obj) if obj.startswith("/") else obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _walk_json_for_urls(v, base_url, out, _depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_json_for_urls(item, base_url, out, _depth + 1)
 
 
 def _extract_remix_chunks(content: str, base_url: str) -> List[str]:
@@ -1204,9 +1308,6 @@ class Crawler:
         """Full crawl pipeline - runs all discovery methods."""
         origin = self._origin
 
-        # Phase 1: robots.txt
-        self._discover_from_robots(origin)
-
         # Phase 2: asset manifests (CRA, Vite, Next.js runtime, Laravel Mix, Remix, SvelteKit, etc.)
         self._discover_from_manifests(origin)
 
@@ -1232,6 +1333,9 @@ class Crawler:
         except Exception:
             pass
         self._feed_sitemap_to_queue(origin, queue)
+
+        # Phase 1: robots.txt - JS paths + Disallow targets + Sitemap: directives
+        self._discover_from_robots(origin, queue)
 
         # Phase 6: common page probes -> add live ones to queue
         for path in COMMON_PAGE_PATHS:
@@ -1302,14 +1406,25 @@ class Crawler:
             logger.debug("Skipping binary magic-byte response for %s", url)
             return
 
-        # JSON pages: extract any embedded JS URLs
+        # JSON pages: walk the full object for embedded paths/URLs (Fix #13)
         if "json" in ct_lower:
-            for m in re.finditer(r'["\']([^"\']*\.js)["\']', content):
-                raw = m.group(1)
-                if raw.startswith("/") or raw.startswith("http"):
-                    js_url = urljoin(url, raw)
-                    if self.scope.in_scope(js_url) and _is_js_url(js_url):
-                        self._fetch_js(js_url, url)
+            json_urls: List[str] = []
+            try:
+                data = json.loads(content)
+                _walk_json_for_urls(data, url, json_urls)
+            except Exception:
+                # Fallback - regex scan for anything that looks like a path
+                for m in re.finditer(r'["\'](\/?[a-zA-Z0-9_\-/][a-zA-Z0-9_\-./]{3,511})["\']', content):
+                    raw = m.group(1)
+                    if raw.startswith("/") or raw.startswith("http"):
+                        json_urls.append(urljoin(url, raw))
+            for j_url in json_urls:
+                if not self.scope.in_scope(j_url):
+                    continue
+                if _is_js_url(j_url):
+                    self._fetch_js(j_url, url)
+                elif depth < self.max_depth:
+                    self._enqueue_page(j_url, depth + 1, queue)
             return
 
         if "html" not in ct_lower and "text" not in ct_lower and "xml" not in ct_lower:
@@ -1334,6 +1449,15 @@ class Crawler:
         if not self._astro_detected and ("astro-island" in content or "_astro/" in content):
             self._astro_detected = True
             logger.info("Astro detected on %s", url)
+
+        # Nuxt/__INITIAL_STATE__/generic SSR blobs - enqueue embedded JS and API paths
+        if "__NUXT__" in content or "__INITIAL_STATE__" in content or "__PRELOADED_STATE__" in content:
+            for ssr_url in _extract_ssr_state_urls(content, url):
+                if self.scope.in_scope(ssr_url):
+                    if _is_js_url(ssr_url):
+                        self._fetch_js(ssr_url, url)
+                    elif depth < self.max_depth:
+                        self._enqueue_page(ssr_url, depth + 1, queue)
 
         # Scan HTML attributes/comments for secrets
         html_findings = scan_html(content, url)
@@ -1381,6 +1505,14 @@ class Crawler:
             for htmx_url in extract_htmx_endpoints(content, effective_base_url):
                 self._enqueue_page(htmx_url, depth + 1, queue)
 
+            # meta http-equiv="refresh" redirect target - login flows, legacy redirects
+            meta_refresh_m = RE_META_REFRESH.search(content)
+            if meta_refresh_m:
+                refresh_url = meta_refresh_m.group(1).strip().rstrip(";").rstrip("'\"")
+                refresh_url = urljoin(effective_base_url, refresh_url)
+                if self.scope.in_scope(refresh_url):
+                    self._enqueue_page(refresh_url, depth + 1, queue)
+
             # Gap 3: Static GET form — build ?name=value querystrings and crawl them
             for form_url in _extract_form_get_urls(content, effective_base_url):
                 self._enqueue_page(form_url, depth + 1, queue)
@@ -1392,6 +1524,19 @@ class Crawler:
                 if norm not in self.visited_pages and self.scope.in_scope(ping_url):
                     self.visited_pages.add(norm)
                     self.page_access_states[ping_url] = 0  # unverified
+
+            # data-endpoint/data-api-url/data-fetch-url/data-config - SSR API paths
+            for m in RE_DATA_API_ATTRS.finditer(content):
+                val = m.group(1).strip()
+                if not val or val.startswith("{{") or val.startswith("{%"):
+                    continue  # skip template placeholders
+                if val.startswith("/") or val.startswith("http"):
+                    candidate = urljoin(effective_base_url, val)
+                    if self.scope.in_scope(candidate):
+                        if _is_js_url(candidate):
+                            self._fetch_js(candidate, url)
+                        else:
+                            self._enqueue_page(candidate, depth + 1, queue)
 
 
     def _extract_all_js_from_html(
@@ -1506,12 +1651,31 @@ class Crawler:
                     self._fetch_js(linked_url, url)
 
         tech = fingerprint_tech(content)
+        # Source map URL: check inline comment first, then response headers
         has_map = "sourceMappingURL=" in content
         map_url_str = ""
         if has_map:
             m = RE_SOURCE_MAP.search(content[-3000:]) or RE_SOURCE_MAP.search(content)
             if m:
-                map_url_str = m.group(1)
+                raw = m.group(1).strip()
+                if not raw.startswith("http"):
+                    raw = urljoin(url, raw)
+                map_url_str = raw
+        if not map_url_str and resp_headers and isinstance(resp_headers, dict):
+            # SourceMap: / X-SourceMap: response headers (build pipeline variant)
+            hdr_map = (
+                resp_headers.get("SourceMap")
+                or resp_headers.get("sourcemap")
+                or resp_headers.get("X-SourceMap")
+                or resp_headers.get("x-sourcemap")
+                or ""
+            )
+            if hdr_map:
+                hdr_map = hdr_map.strip()
+                if not hdr_map.startswith("http"):
+                    hdr_map = urljoin(url, hdr_map)
+                map_url_str = hdr_map
+                has_map = True
 
         js_file = JSFile(
             url            = url,
@@ -1601,13 +1765,22 @@ class Crawler:
 
     # ── Discovery helpers ─────────────────────────────────────────────────────
 
-    def _discover_from_robots(self, origin: str) -> None:
+    def _discover_from_robots(self, origin: str, queue: "deque") -> None:
         content, status, _, _ = self.fetcher.get(origin + "/robots.txt")
         if not content or status != 200:
             return
+        robots_url = origin + "/robots.txt"
+        # JS files referenced in robots.txt paths
         for path in _parse_robots_for_js(content, origin):
             if self.scope.in_scope(path):
-                self._fetch_js(path, origin + "/robots.txt")
+                self._fetch_js(path, robots_url)
+        # Disallow/Allow paths - high-value crawl targets (/admin/, /api/, etc.)
+        for page_url in _parse_robots_disallow_paths(content, origin):
+            if self.scope.in_scope(page_url):
+                self._enqueue_page(page_url, 1, queue)
+        # Sitemap: directives in robots.txt
+        for sitemap_url in _parse_robots_sitemap_urls(content):
+            self._feed_sitemap_url(sitemap_url, queue)
 
     def _discover_from_manifests(self, origin: str) -> None:
         """
@@ -1649,55 +1822,48 @@ class Crawler:
                 if self.scope.in_scope(js_url):
                     self._fetch_js(js_url, url)
 
-    def _feed_sitemap_to_queue(self, origin: str, queue: deque) -> None:
-        """
-        Process ALL sitemap paths - no early return after first valid sitemap.
-        Handles sitemap indexes recursively and regular sitemaps.
-        Queues all discovered pages across every sitemap found.
-        """
-        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-        total_queued = 0
+    def _feed_sitemap_url(self, url: str, queue: deque) -> int:
+        """Fetch and process a single sitemap URL - handles both index and regular sitemaps.
+        Returns number of URLs queued."""
+        return self._process_sitemap_content(url, queue, depth=0)
 
+    def _process_sitemap_content(self, url: str, queue: deque, depth: int = 0) -> int:
+        """Recursively process a sitemap URL. depth prevents infinite loops."""
+        if depth > 5:
+            return 0
+        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+        content, status, _, _ = self.fetcher.get(url)
+        if not content or status != 200:
+            return 0
+        queued = 0
+        try:
+            root = ET.fromstring(content)
+            # Sitemap index - recurse into each child
+            child_sitemaps = root.findall(".//sm:sitemap/sm:loc", ns)
+            if child_sitemaps:
+                for elem in child_sitemaps:
+                    if elem.text:
+                        queued += self._process_sitemap_content(elem.text.strip(), queue, depth + 1)
+            # Regular sitemap - enqueue all <url><loc> entries
+            for loc in root.findall(".//sm:url/sm:loc", ns):
+                if loc.text:
+                    page = loc.text.strip()
+                    if self._enqueue_page(page, 1, queue):
+                        queued += 1
+        except Exception:
+            pass
+        return queued
+
+    def _feed_sitemap_to_queue(self, origin: str, queue: deque) -> None:
+        """Probe all known sitemap paths and recursively process any indexes found.
+        Handles sitemap index chains of any depth via _process_sitemap_content."""
+        total_queued = 0
         for path in SITEMAP_PATHS:
             url = origin + path
-            content, status, _, _ = self.fetcher.get(url)
-            if not content or status != 200:
-                continue
-            try:
-                root = ET.fromstring(content)
-
-                # sitemap index: recurse into child sitemaps
-                child_sitemaps = root.findall(".//sm:sitemap/sm:loc", ns)
-                if child_sitemaps:
-                    for sitemap_elem in child_sitemaps:
-                        if not sitemap_elem.text:
-                            continue
-                        child_url = sitemap_elem.text.strip()
-                        child_content, child_status, _, _ = self.fetcher.get(child_url)
-                        if not child_content or child_status != 200:
-                            continue
-                        try:
-                            child_root = ET.fromstring(child_content)
-                            for loc in child_root.findall(".//sm:url/sm:loc", ns):
-                                if loc.text:
-                                    page = loc.text.strip()
-                                    if self._enqueue_page(page, 1, queue):
-                                        total_queued += 1
-                        except Exception:
-                            pass
-
-                # regular sitemap: direct <url><loc> entries
-                for loc in root.findall(".//sm:url/sm:loc", ns):
-                    if loc.text:
-                        page = loc.text.strip()
-                        if self._enqueue_page(page, 1, queue):
-                            total_queued += 1
-
-                if total_queued > 0:
-                    logger.info("Sitemap %s: queued %d URLs total", path, total_queued)
-
-            except Exception:
-                pass
+            n = self._process_sitemap_content(url, queue, depth=0)
+            if n:
+                total_queued += n
+                logger.info("Sitemap %s: queued %d URLs", path, n)
 
     def _discover_module_federation(self, origin: str) -> None:
         """
