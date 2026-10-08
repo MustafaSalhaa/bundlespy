@@ -26,6 +26,7 @@ from typing import List, Set
 
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # ── Param name tiers ──────────────────────────────────────────────────────────
@@ -271,6 +272,40 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                     auth_context = auth_ctx,
                 )
 
+                or_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                        source        = "static",
+                        asset         = url,
+                        context       = f"Redirect-signal query param '{name}'",
+                        details       = f"Param name '{name}' commonly carries a redirect destination",
+                    ),
+                ]
+                if is_auth:
+                    or_ev.append(Evidence(
+                        evidence_type = EvidenceType.METADATA,
+                        source        = "static",
+                        asset         = url,
+                        context       = "Redirect param on auth/OAuth path",
+                        details       = "Auth path amplifier - classic authorization-code theft vector",
+                    ))
+                if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                    or_ev.append(Evidence(
+                        evidence_type = EvidenceType.METADATA,
+                        source        = "static",
+                        asset         = url,
+                        context       = f"Auth context: {auth_ctx}",
+                        details       = auth_ctx,
+                    ))
+                self._emit_evidence(
+                    evidence     = or_ev,
+                    surface_type = "Open Redirect (Query Param)",
+                    endpoint     = url,
+                    method       = method,
+                    parameter    = f"query:{name}",
+                    notes        = notes,
+                )
+
             # Body fields (POST/PUT/PATCH)
             if method in ("POST", "PUT", "PATCH"):
                 for bf in (ep.body_fields or []):
@@ -305,6 +340,40 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                         auth_context = auth_ctx,
                     )
 
+                    or_body_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Redirect-signal POST body field '{name}'",
+                            details       = f"Body param '{name}' commonly carries a redirect destination",
+                        ),
+                    ]
+                    if is_auth:
+                        or_body_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = "Redirect body param on auth/OAuth path",
+                            details       = "Auth path amplifier - POST redirect is the classic login-flow abuse vector",
+                        ))
+                    if auth_ctx and auth_ctx.lower() not in ("", "none"):
+                        or_body_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Auth context: {auth_ctx}",
+                            details       = auth_ctx,
+                        ))
+                    self._emit_evidence(
+                        evidence     = or_body_ev,
+                        surface_type = "Open Redirect (Body Param)",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = f"body:{name}",
+                        notes        = notes,
+                    )
+
             # Path params
             for pp in (ep.path_params or []):
                 name = (pp.get("name") or "").lower()
@@ -335,6 +404,32 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                     auth_context = auth_ctx,
                 )
 
+                or_path_ev = [
+                    Evidence(
+                        evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                        source        = "static",
+                        asset         = url,
+                        context       = f"Redirect-signal path param '{{{name}}}'",
+                        details       = f"Path param '{name}' commonly carries a redirect destination",
+                    ),
+                ]
+                if is_auth:
+                    or_path_ev.append(Evidence(
+                        evidence_type = EvidenceType.METADATA,
+                        source        = "static",
+                        asset         = url,
+                        context       = "Redirect path param on auth path - elevated risk",
+                        details       = "Auth path amplifier applied",
+                    ))
+                self._emit_evidence(
+                    evidence     = or_path_ev,
+                    surface_type = "Open Redirect (Path Param)",
+                    endpoint     = url,
+                    method       = method,
+                    parameter    = f"path:{name}",
+                    notes        = _BURP_NOTES_PATH,
+                )
+
             # Response header signals
             resp_hdrs     = _response_header_keys(ep)
             redirect_hdrs = [h for h in resp_hdrs if h in _REDIRECT_RESPONSE_HEADERS]
@@ -358,6 +453,32 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                         evidence     = ev,
                         burp_notes   = _BURP_NOTES_HEADER,
                         auth_context = auth_ctx,
+                    )
+
+                    or_hdr_ev = [
+                        Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = f"Redirect response header(s): {', '.join(redirect_hdrs)}",
+                            details       = "Location/Refresh/X-Redirect-To header signals server-side redirect logic",
+                        ),
+                    ]
+                    if is_auth:
+                        or_hdr_ev.append(Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = url,
+                            context       = "Redirect header on auth endpoint - critical",
+                            details       = "Auth path amplifier applied",
+                        ))
+                    self._emit_evidence(
+                        evidence     = or_hdr_ev,
+                        surface_type = "Open Redirect (Response Header)",
+                        endpoint     = url,
+                        method       = method,
+                        parameter    = redirect_hdrs[0] if redirect_hdrs else "",
+                        notes        = _BURP_NOTES_HEADER,
                     )
 
         # ── Phase 2: JS DOM-based redirect analysis ───────────────────────────
@@ -390,6 +511,29 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                         burp_notes   = _BURP_NOTES_JS,
                         auth_context = "",
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.STATIC_JS,
+                                source        = "static",
+                                asset         = js_url,
+                                context       = "JS redirect sink(s)",
+                                details       = ", ".join(sink_hits[:3]),
+                            ),
+                            Evidence(
+                                evidence_type = EvidenceType.DOM,
+                                source        = "static",
+                                asset         = js_url,
+                                context       = "User-controlled source feeding redirect sink",
+                                details       = ", ".join(source_hits[:3]),
+                            ),
+                        ],
+                        surface_type = "Open Redirect (DOM-Based)",
+                        endpoint     = js_url,
+                        method       = "GET",
+                        parameter    = sink_hits[0] if sink_hits else "",
+                        notes        = _BURP_NOTES_JS,
+                    )
 
             # Framework router + user-controlled input
             if fw_hits and source_hits and js_url:
@@ -409,6 +553,29 @@ class OpenRedirectMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_FRAMEWORK,
                         auth_context = "",
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.STATIC_JS,
+                                source        = "static",
+                                asset         = js_url,
+                                context       = "Framework router redirect call(s)",
+                                details       = ", ".join(fw_hits[:3]),
+                            ),
+                            Evidence(
+                                evidence_type = EvidenceType.DOM,
+                                source        = "static",
+                                asset         = js_url,
+                                context       = "User-controlled source co-present with router call",
+                                details       = ", ".join(source_hits[:3]),
+                            ),
+                        ],
+                        surface_type = "Open Redirect (Framework Router)",
+                        endpoint     = js_url,
+                        method       = "GET",
+                        parameter    = fw_hits[0] if fw_hits else "",
+                        notes        = _BURP_NOTES_FRAMEWORK,
                     )
 
         return self._results
