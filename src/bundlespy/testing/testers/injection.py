@@ -5,6 +5,7 @@ Pure static analysis of already-collected endpoint data. Zero HTTP requests.
 from typing import List
 from .base import BaseSurfaceMapper
 from ..models import SurfaceResult, AttackCategory, ConfidenceLevel
+from ..evidence import Evidence, EvidenceType
 from ...storage.models import ScanResult, Endpoint
 
 # Classic SQL/NoSQL injection - direct DB access signals
@@ -237,6 +238,22 @@ class InjectionMapper(BaseSurfaceMapper):
                     evidence     = [f"GraphQL endpoint: {ep.url}"],
                     burp_notes   = _BURP_NOTES_GRAPHQL,
                 )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.ROUTE_DECLARATION,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"GraphQL endpoint detected: {ep.url}",
+                            details       = "GraphQL path/category signal - test introspection and injection",
+                        ),
+                    ],
+                    surface_type = "GraphQL Injection",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = "graphql:query",
+                    notes        = _BURP_NOTES_GRAPHQL,
+                )
 
             # Path-based command injection signal (e.g. /api/ping, /exec)
             if any(sig in path for sig in _COMMAND_PATH_SIGNALS):
@@ -250,6 +267,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         "Endpoint name implies shell/system interaction",
                     ],
                     burp_notes   = _BURP_NOTES_CMDI,
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.ROUTE_DECLARATION,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Command injection path signal: {ep.url}",
+                            details       = "Path pattern suggests OS shell/command execution",
+                        ),
+                    ],
+                    surface_type = "Command Injection",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = "path:command_path",
+                    notes        = _BURP_NOTES_CMDI,
                 )
 
             # Path params - /api/users/{id}, /api/posts/{slug}
@@ -275,6 +308,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_CMDI,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Command injection path param '{name}' on {method} {ep.url}",
+                                details       = f"Path param '{name}' commonly maps to shell/OS execution",
+                            ),
+                        ],
+                        surface_type = "Command Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"path_param:{name}",
+                        notes        = _BURP_NOTES_CMDI,
+                    )
                 elif name in _TENANT_PARAMS:
                     # Multi-tenant path param: both SQLi AND IDOR risk
                     self._candidate(
@@ -289,6 +338,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_TENANT,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Multi-tenant path param '{name}' on {method} {ep.url}",
+                                details       = f"Tenant/org ID '{name}' - test SQLi and cross-tenant access",
+                            ),
+                        ],
+                        surface_type = "SQL/NoSQL Injection + Tenant IDOR",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"path_param:{name}",
+                        notes        = _BURP_NOTES_TENANT,
+                    )
                 elif name in _HIGH_SIGNAL_PARAMS:
                     # Core ID/name params in path - high SQLi signal
                     self._candidate(
@@ -302,6 +367,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_SQLI,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"High-signal injection path param '{name}' on {method} {ep.url}",
+                                details       = f"Path param '{name}' commonly interpolated into DB queries",
+                            ),
+                        ],
+                        surface_type = "SQL/NoSQL Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"path_param:{name}",
+                        notes        = _BURP_NOTES_SQLI,
+                    )
                 elif name in _MEDIUM_SIGNAL_PARAMS:
                     self._candidate(
                         endpoint     = ep,
@@ -312,6 +393,22 @@ class InjectionMapper(BaseSurfaceMapper):
                             f"Injection-relevant path param '{name}' on {method} {ep.url}",
                         ],
                         burp_notes   = _BURP_NOTES_SQLI,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Injection-relevant path param '{name}' on {method} {ep.url}",
+                                details       = f"Path param '{name}' may be used in DB query construction",
+                            ),
+                        ],
+                        surface_type = "SQL/NoSQL Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"path_param:{name}",
+                        notes        = _BURP_NOTES_SQLI,
                     )
                 elif name in _HIGH_SSTI_PARAMS:
                     # Template param in path = SSTI even without path corroboration
@@ -325,6 +422,22 @@ class InjectionMapper(BaseSurfaceMapper):
                             "Path param feeding a template renderer → SSTI",
                         ],
                         burp_notes   = _BURP_NOTES_SSTI,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Template-relevant path param '{name}' on {method} {ep.url}",
+                                details       = f"Path param '{name}' likely feeds a server-side template engine",
+                            ),
+                        ],
+                        surface_type = "SSTI",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"path_param:{name}",
+                        notes        = _BURP_NOTES_SSTI,
                     )
 
             # Query params
@@ -355,6 +468,22 @@ class InjectionMapper(BaseSurfaceMapper):
                     confidence   = confidence,
                     evidence     = evidence,
                     burp_notes   = burp_notes,
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"Injection-relevant query param '{name}' on {method} {ep.url}",
+                            details       = f"Param '{name}' commonly maps to DB query, command, or template input",
+                        ),
+                    ],
+                    surface_type = surface_type,
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = f"query:{name}",
+                    notes        = burp_notes,
                 )
 
             # Body fields on state-changing methods
@@ -387,6 +516,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         evidence     = body_evidence,
                         burp_notes   = burp_notes,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Injection-relevant body field '{name}' on {method} {ep.url}",
+                                details       = f"Body field '{name}' commonly maps to DB query, command, or template input",
+                            ),
+                        ],
+                        surface_type = surface_type,
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"body:{name}",
+                        notes        = burp_notes,
+                    )
 
             # --- XXE Detection ---
             # Three trigger conditions:
@@ -408,6 +553,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         "Parser likely accepts external entity declarations",
                     ],
                     burp_notes   = _BURP_NOTES_XXE,
+                )
+                self._emit_evidence(
+                    evidence     = [
+                        Evidence(
+                            evidence_type = EvidenceType.METADATA,
+                            source        = "static",
+                            asset         = ep.url or "",
+                            context       = f"XML content-type on {method} {ep.url}",
+                            details       = "XML content-type header confirmed - parser likely accepts external entities",
+                        ),
+                    ],
+                    surface_type = "XXE",
+                    endpoint     = ep.url or "",
+                    method       = method,
+                    parameter    = "header:content-type",
+                    notes        = _BURP_NOTES_XXE,
                 )
             elif method in ("POST", "PUT", "PATCH"):
                 xxe_body_fields = [
@@ -435,6 +596,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         confidence   = confidence,
                         evidence     = evidence,
                         burp_notes   = _BURP_NOTES_XXE,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"XXE-signal body field '{name}' on {method} {ep.url}",
+                                details       = f"Body field '{name}' commonly carries XML payloads",
+                            ),
+                        ],
+                        surface_type = "XXE",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"body:{name}",
+                        notes        = _BURP_NOTES_XXE,
                     )
 
             # --- LDAP Injection Detection ---
@@ -464,6 +641,22 @@ class InjectionMapper(BaseSurfaceMapper):
                         ],
                         burp_notes   = _BURP_NOTES_LDAP,
                     )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"LDAP-specific param '{pname}' on {method} {ep.url}",
+                                details       = f"Param '{pname}' is a native LDAP directory attribute name",
+                            ),
+                        ],
+                        surface_type = "LDAP Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"{param_source}:{pname}",
+                        notes        = _BURP_NOTES_LDAP,
+                    )
                 elif pname in _LDAP_PARAMS and path_is_ldap:
                     # Generic auth param but path confirms directory/auth context
                     self._candidate(
@@ -476,6 +669,22 @@ class InjectionMapper(BaseSurfaceMapper):
                             "Combination of param name and path suggests LDAP backend",
                         ],
                         burp_notes   = _BURP_NOTES_LDAP,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"LDAP-signal param '{pname}' on auth/directory path {ep.url}",
+                                details       = f"Param '{pname}' on LDAP-signal path - likely directory/auth backend",
+                            ),
+                        ],
+                        surface_type = "LDAP Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"{param_source}:{pname}",
+                        notes        = _BURP_NOTES_LDAP,
                     )
 
             # --- Search param on POST body (missing coverage) ---
@@ -495,6 +704,22 @@ class InjectionMapper(BaseSurfaceMapper):
                                 "These fields commonly feed directly into WHERE clauses or document search",
                             ],
                             burp_notes   = _BURP_NOTES_SQLI,
+                        )
+                        self._emit_evidence(
+                            evidence     = [
+                                Evidence(
+                                    evidence_type = EvidenceType.PARAMETER_SEMANTIC,
+                                    source        = "static",
+                                    asset         = ep.url or "",
+                                    context       = f"Search/filter body field '{name}' on {method} {ep.url}",
+                                    details       = f"Body field '{name}' commonly feeds into WHERE clauses or document search",
+                                ),
+                            ],
+                            surface_type = "SQL/NoSQL Injection",
+                            endpoint     = ep.url or "",
+                            method       = method,
+                            parameter    = f"body:{name}",
+                            notes        = _BURP_NOTES_SQLI,
                         )
 
             # --- Injection-relevant path signal + body field ---
@@ -517,6 +742,22 @@ class InjectionMapper(BaseSurfaceMapper):
                             "Search/filter/lookup endpoints commonly pass input into DB queries",
                         ],
                         burp_notes   = _BURP_NOTES_SQLI,
+                    )
+                    self._emit_evidence(
+                        evidence     = [
+                            Evidence(
+                                evidence_type = EvidenceType.ROUTE_DECLARATION,
+                                source        = "static",
+                                asset         = ep.url or "",
+                                context       = f"Injection-relevant path pattern on {method} {ep.url}",
+                                details       = f"Search/filter/lookup path with body fields: {', '.join(field_names[:5])}",
+                            ),
+                        ],
+                        surface_type = "SQL/NoSQL Injection",
+                        endpoint     = ep.url or "",
+                        method       = method,
+                        parameter    = f"body:{field_names[0]}" if field_names else "",
+                        notes        = _BURP_NOTES_SQLI,
                     )
 
         return self._results
