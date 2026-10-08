@@ -5,6 +5,7 @@ No payloads. No exploitation. Pure signal-to-surface mapping from collected inte
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
+from .evidence import SurfaceFinding
 
 
 class SurfaceStatus:
@@ -97,4 +98,5 @@ class SurfaceReport:
     total_candidates: int = 0
     total_mapped:     int = 0
     total_skipped:    int = 0
-    errors:           List[str] = field(default_factory=list)
+    errors:           List[str]          = field(default_factory=list)
+    findings:         List[SurfaceFinding] = field(default_factory=list)
