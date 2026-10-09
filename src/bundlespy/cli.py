@@ -945,16 +945,28 @@ def run_scan(args) -> int:
                 f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
 
     # ── Webpack chunks ────────────────────────────────────────────────────────
-    chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0}
+    chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0, "manifest": ""}
     if args.chunks:
         if not args.quiet:
             phase("Discovering webpack chunks")
-        from .discovery.webpack_chunks import fetch_chunks, detect_webpack
+        from .discovery.webpack_chunks import (
+            fetch_chunks, detect_webpack, detect_vite, detect_nextjs,
+            fetch_manifest_chunks,
+        )
         seen_chunk_urls = {js.url for js in all_js}
         chunk_files     = []
+
+        # Probe manifests once for the target (not once per JS file)
+        manifest_urls, manifest_type = fetch_manifest_chunks(args.url, fetcher, scope)
+        if manifest_type:
+            chunk_stats["manifest"] = manifest_type
+            logger.info("Manifest probe: %s yielded %d chunk URLs", manifest_type, len(manifest_urls))
+
         for js_file in list(all_js):
             if detect_webpack(js_file.content):
                 chunk_stats["runtime"] = True
+            if detect_nextjs(js_file.content):
+                chunk_stats["manifest"] = chunk_stats["manifest"] or "nextjs-runtime"
             chunks = fetch_chunks(js_file, fetcher, scope, seen_chunk_urls)
             chunk_files.extend(chunks)
         all_js.extend(chunk_files)
@@ -963,7 +975,8 @@ def run_scan(args) -> int:
         extras["chunk_stats"]  = chunk_stats
         extras["chunks_found"] = len(chunk_files)
         if not args.quiet:
-            phase_done("Chunk discovery", f"{len(chunk_files)} chunks")
+            manifest_label = f"  [{chunk_stats['manifest']}]" if chunk_stats["manifest"] else ""
+            phase_done("Chunk discovery", f"{len(chunk_files)} chunks{manifest_label}")
 
     # ── Analysis ──────────────────────────────────────────────────────────────
     if not args.quiet:
