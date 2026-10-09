@@ -62,6 +62,13 @@ deep recon:
   bundlespy scan https://target.com --harvest-subs           extract subdomains from JS + endpoints
   bundlespy scan https://target.com --passive                pull historical JS from web archives
 
+operational:
+  bundlespy scan https://target.com --proxy http://127.0.0.1:8080          route through Burp
+  bundlespy scan https://target.com --proxy socks5://127.0.0.1:1080        route through SOCKS5
+  bundlespy scan https://target.com --user-agent "Mozilla/5.0 (iPhone...)" mobile UA
+  bundlespy scan https://target.com --static-only                          no browser, faster + stealthier
+  bundlespy scan https://target.com --static-only --proxy http://127.0.0.1:8080  fast + through Burp
+
 authenticated scans:
   bundlespy scan https://target.com --cookie "session=abc123"
   bundlespy scan https://target.com --login "url=https://target.com/login,user=admin,pass=secret"
@@ -138,6 +145,18 @@ other:
     _hg.add_argument("--dom-wait-time", type=int, default=1, metavar="SECS",
                      help="Extra seconds of DOM quiet after DOMContentLoaded (default: 1)\n"
                           "Increase on slow SPAs. Only applies to domcontentloaded strategy.")
+
+    # Operational
+    _xg = scan.add_argument_group("operational")
+    _xg.add_argument("--proxy",      default="", metavar="URL",
+                     help="Route all traffic through this proxy (e.g. http://127.0.0.1:8080 for Burp)\n"
+                          "  applies to both the static fetcher and the headless browser")
+    _xg.add_argument("--user-agent", default="", metavar="STRING",
+                     help="Override the default User-Agent for all requests\n"
+                          "  e.g. --user-agent \"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0...)\"")
+    _xg.add_argument("--static-only", action="store_true",
+                     help="Skip headless browser entirely — static JS fetch + analysis only\n"
+                          "  faster and stealthier; misses dynamically-loaded JS and XHR calls")
 
     # Auth
     _ag = scan.add_argument_group("authentication")
@@ -554,6 +573,10 @@ def run_scan(args) -> int:
         args.format = "csv"
         args.quiet  = True
 
+    # --static-only: disable headless browser for this run
+    if getattr(args, "static_only", False):
+        args.headless = False
+
     _setup_logging(args.verbose, getattr(args, "debug", False), args.quiet)
 
     # Apply NO_COLOR
@@ -585,9 +608,18 @@ def run_scan(args) -> int:
     _login_result = None   # populated below after Playwright is available
 
     if not args.quiet:
-        mode = "Passive" if args.passive else ("Headless" if args.headless else "Active")
+        if args.passive:
+            mode = "Passive"
+        elif getattr(args, "static_only", False):
+            mode = "Static-only"
+        elif args.headless:
+            mode = "Headless"
+        else:
+            mode = "Active"
         if args.stealth:
             mode += " + Stealth"
+        if _proxy:
+            mode += " + Proxy"
         if _login_spec:
             mode += " + Auto-Login"
         elif args.cookie or args.header:
@@ -604,6 +636,12 @@ def run_scan(args) -> int:
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
 
+    # --user-agent override (empty = use default)
+    _custom_ua = getattr(args, "user_agent", "").strip()
+    # --proxy: route all HTTP traffic through this proxy (e.g. Burp on 8080)
+    _proxy     = getattr(args, "proxy", "").strip()
+
+    from .config import USER_AGENT as _DEFAULT_UA
     fetch_cache = FetchCache()
     fetcher = Fetcher(
         timeout=args.timeout,
@@ -612,6 +650,8 @@ def run_scan(args) -> int:
         extra_headers=extra_headers,
         verify_ssl=not args.no_verify,
         cache=fetch_cache,
+        user_agent=_custom_ua if _custom_ua else _DEFAULT_UA,
+        proxy=_proxy,
     )
     scope = ScopeChecker(
         target_url=target,
@@ -782,6 +822,8 @@ def run_scan(args) -> int:
                         extra_headers=extra_headers,
                         verify_ssl=not args.no_verify,
                         cache=fetch_cache,
+                        user_agent=_custom_ua if _custom_ua else _DEFAULT_UA,
+                        proxy=_proxy,
                     )
                     if not args.quiet:
                         phase_done(
@@ -876,6 +918,8 @@ def run_scan(args) -> int:
             forms_mode         = getattr(args, "interact", False),
             page_load_strategy = getattr(args, "page_load_strategy", "domcontentloaded"),
             dom_wait_time      = getattr(args, "dom_wait_time", 1),
+            proxy              = _proxy,
+            user_agent         = _custom_ua,
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
