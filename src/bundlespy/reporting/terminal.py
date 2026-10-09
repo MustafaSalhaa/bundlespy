@@ -12,7 +12,7 @@ from ..ui.printer import (
     print_attack_surface, print_coverage, _print_libraries,
     print_login_result,
     print_passive_validation, print_coverage_ledger,
-    print_state_intelligence,
+    print_state_intelligence, print_boot_config,
 )
 
 
@@ -102,6 +102,11 @@ def print_report(
     surface = extras.get("attack_surface")
     if surface:
         print_attack_surface(surface)
+
+    # Boot-time config globals
+    boot_cfg = extras.get("boot_config")
+    if boot_cfg:
+        print_boot_config(boot_cfg)
 
     # Coverage and blind spots
     coverage = extras.get("coverage")
