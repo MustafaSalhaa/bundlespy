@@ -335,10 +335,10 @@ def test_final_analysis_dedup_skips_inline_analyzed():
     scanner = SecretScanner()
 
     # Without inline_analyzed_hashes - should analyze normally
-    findings_normal, endpoints_normal, _, _ = _analyze([js], scanner)
+    findings_normal, endpoints_normal, _, _, _ = _analyze([js], scanner)
 
     # With the hash in inline_analyzed_hashes - should skip
-    findings_skip, endpoints_skip, _, _ = _analyze(
+    findings_skip, endpoints_skip, _, _, _ = _analyze(
         [js], scanner, inline_analyzed_hashes={js.sha256}
     )
 
