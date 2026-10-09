@@ -13,6 +13,7 @@ from ..ui.printer import (
     print_login_result,
     print_passive_validation, print_coverage_ledger,
     print_state_intelligence, print_boot_config,
+    print_gql_surface,
 )
 
 
@@ -91,6 +92,10 @@ def print_report(
 
     if graphql_schemas:
         print_graphql(graphql_schemas)
+
+    # Static GQL surface - always shown when found, independent of --graphql flag
+    if extras.get("gql_surface"):
+        print_gql_surface(extras["gql_surface"])
 
     print_infrastructure(result.infrastructure)
 
