@@ -1129,6 +1129,51 @@ def print_graphql(schemas):
     _p()
 
 
+# ── Boot config ───────────────────────────────────────────────────────────────
+
+def print_boot_config(boot_config: dict) -> None:
+    """Print extracted boot-time config globals and API bases."""
+    if not boot_config:
+        return
+    api_bases  = boot_config.get("api_bases", [])
+    env_vars   = boot_config.get("env_vars", [])
+    flags      = boot_config.get("feature_flags", [])
+    globals_found = boot_config.get("globals_found", [])
+    total = len(api_bases) + len(env_vars) + len(flags)
+    if total == 0:
+        return
+
+    _section("BOOT CONFIG", str(total), A.CYAN)
+
+    if globals_found:
+        _p(f"  {A.GREY}  Globals  {A.RESET}{A.CYAN}{', '.join(globals_found)}{A.RESET}")
+
+    if api_bases:
+        _p(f"\n  {A.YELLOW}API bases ({len(api_bases)}){A.RESET}")
+        for base in api_bases[:20]:
+            _p(f"  {A.GREY}  • {A.RESET}{base}")
+        if len(api_bases) > 20:
+            _p(f"  {A.GREY}  ... and {len(api_bases) - 20} more{A.RESET}")
+
+    if env_vars:
+        _p(f"\n  {A.GREY}Env vars ({len(env_vars)}){A.RESET}")
+        for e in env_vars[:15]:
+            val_display = e.get("value", "")
+            if len(val_display) > 60:
+                val_display = val_display[:57] + "..."
+            _p(f"  {A.GREY}  • {e.get('key','')} = {val_display}{A.RESET}")
+        if len(env_vars) > 15:
+            _p(f"  {A.GREY}  ... and {len(env_vars) - 15} more{A.RESET}")
+
+    if flags:
+        _p(f"\n  {A.GREY}Feature flags ({len(flags)}){A.RESET}")
+        for f in flags[:10]:
+            _p(f"  {A.GREY}  • {f.get('key','')} = {f.get('value','')}{A.RESET}")
+        if len(flags) > 10:
+            _p(f"  {A.GREY}  ... and {len(flags) - 10} more{A.RESET}")
+    _p()
+
+
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
 def print_infrastructure(items):
