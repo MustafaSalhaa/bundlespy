@@ -531,3 +531,5 @@ class ScanResult:
     page_states: Dict[str, "PageAccessRecord"] = field(default_factory=dict, repr=False)
     # Library findings from library_scanner - used to filter known libs from attack surface mappers
     library_findings: List[Any] = field(default_factory=list, repr=False)
+    # WS payload capture - raw {url, data, dir} dicts from headless interception
+    ws_messages: List[dict] = field(default_factory=list, repr=False)
