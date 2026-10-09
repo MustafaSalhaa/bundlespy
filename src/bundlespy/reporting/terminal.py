@@ -49,6 +49,7 @@ def print_report(
             recovered=d.get("recovered", 0),
             sources=d.get("sources", 0),
             details=d.get("items", []),
+            sources_path_only=d.get("sources_path_only", 0),
         )
     if extras.get("chunk_stats"):
         c = extras["chunk_stats"]
