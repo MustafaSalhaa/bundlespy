@@ -335,12 +335,14 @@ def print_source_maps(discovered, valid, recovered, sources, details=None, sourc
     _p()
 
 
-def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0):
+def print_webpack(runtime, discovered, downloaded, endpoints=0, findings=0, manifest=""):
     if not discovered:
         return
     _section("WEBPACK CHUNKS", "", A.YELLOW)
-    rows = [("Runtime", "detected" if runtime else "not found"),
-            ("Discovered", str(discovered)), ("Downloaded", str(downloaded))]
+    rows = [("Runtime", "detected" if runtime else "not found")]
+    if manifest:
+        rows.append(("Manifest", manifest))
+    rows += [("Discovered", str(discovered)), ("Downloaded", str(downloaded))]
     if endpoints:
         rows.append(("New endpoints", str(endpoints)))
     if findings:
