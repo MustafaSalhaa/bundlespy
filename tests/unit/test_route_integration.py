@@ -74,7 +74,7 @@ class TestProcessIntegration:
 
     def test_routes_present_in_endpoint_list(self):
         js = _make_js(self.FIXTURE_JS)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
         paths = _route_paths(endpoints)
 
         assert "/admin/users" in paths, f"expected /admin/users in routes, got: {paths}"
@@ -84,7 +84,7 @@ class TestProcessIntegration:
 
     def test_route_category_is_ROUTE(self):
         js = _make_js(self.FIXTURE_JS)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         route_eps = [ep for ep in endpoints if ep.url in {
             "/admin/users", "/settings", "/reports", "/dashboard"
@@ -97,7 +97,7 @@ class TestProcessIntegration:
 
     def test_routes_are_not_classified_as_API(self):
         js = _make_js(self.FIXTURE_JS)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         api_eps = [ep for ep in endpoints
                    if ep.url in {"/admin/users", "/settings", "/reports", "/dashboard"}
@@ -113,7 +113,7 @@ class TestProcessIntegration:
             navigate("/settings");
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         settings_eps = [ep for ep in endpoints
                         if ep.url == "/settings" and ep.category == "ROUTE"]
@@ -123,7 +123,7 @@ class TestProcessIntegration:
 
     def test_route_source_type_is_static(self):
         js = _make_js(self.FIXTURE_JS)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         route_eps = [ep for ep in endpoints
                      if ep.category == "ROUTE"
@@ -140,7 +140,7 @@ class TestProcessIntegration:
             axios.post("/api/v1/auth/login", payload);
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         route_paths = _route_paths(endpoints)
         assert "/dashboard" in route_paths, (
@@ -160,7 +160,7 @@ class TestProcessIntegration:
             ];
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
         paths = _route_paths(endpoints)
 
         normalized = {p for p in paths if "users" in p}
@@ -177,7 +177,7 @@ class TestProcessIntegration:
         js2 = _make_js(js_content, url="https://app.example.com/chunk-b.js")
         assert js1.sha256 == js2.sha256
 
-        _, endpoints, _, _ = _analyze([js1, js2], _scanner())
+        _, endpoints, _, _, _ = _analyze([js1, js2], _scanner())
         account_routes = [ep for ep in endpoints
                           if ep.url == "/account" and ep.category == "ROUTE"]
         assert len(account_routes) == 1, (
@@ -187,7 +187,7 @@ class TestProcessIntegration:
     def test_route_source_file_recorded(self):
         url = "https://app.example.com/static/main.abc123.js"
         js = _make_js('router.push("/profile");', url=url)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         profile_eps = [ep for ep in endpoints
                        if ep.url == "/profile" and ep.category == "ROUTE"]
@@ -205,7 +205,7 @@ class TestProcessIntegration:
             history.pushState({}, "", "/faq");
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
         paths = _route_paths(endpoints)
 
         assert "/home"  in paths, f"React Router route /home missing; paths={paths}"
@@ -223,7 +223,7 @@ class TestProcessIntegration:
             const cdn = 'https://cdn.jsdelivr.net/npm/vue@3/dist/vue.cjs.js';
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
         paths = _route_paths(endpoints)
 
         for bad in ["/static/css/app.abc123.css", "/images/logo.png",
@@ -383,7 +383,7 @@ class TestLaneSeparation:
             fetch('/admin', { method: 'GET' });
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
 
         admin_eps = [ep for ep in endpoints if ep.url == "/admin"]
         assert admin_eps, "No endpoint found for /admin"
@@ -400,7 +400,7 @@ class TestLaneSeparation:
             new Worker('/workers/crypto.worker.js');
         """
         js = _make_js(js_content)
-        _, endpoints, _, _ = _analyze([js], _scanner())
+        _, endpoints, _, _, _ = _analyze([js], _scanner())
         route_paths = _route_paths(endpoints)
 
         assert "/workers/crypto.worker.js" not in route_paths, (
@@ -416,7 +416,7 @@ class TestLaneSeparation:
             router.push("/users");
         """
         js = _make_js(js_content)
-        _, endpoints, _, graphql_ops = _analyze([js], _scanner())
+        _, endpoints, _, graphql_ops, _ = _analyze([js], _scanner())
         route_paths = _route_paths(endpoints)
 
         assert "/users" in route_paths, (
