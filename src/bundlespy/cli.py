@@ -344,6 +344,7 @@ def _analyze(
     endpoints:     list = []
     infra:         list = []
     graphql_ops:   list = []
+    gql_surfaces:  list = []   # per-file GQLSurface from gql_tracker
     dynamic_urls:  list = []   # worker / chunk / dynamic-import URLs to fetch
     seen_finds:    set  = set()
     seen_eps:      set  = set()
@@ -428,12 +429,31 @@ def _analyze(
         # Infrastructure detection
         infra.extend(extract_infrastructure(content, primary_js.url))
 
-        # GraphQL operation extraction
+        # Axios base URL tracking — resolve relative paths against axios.create() baseURL
+        from .analysis.axios_tracker import process_file as _axios_process
+        _axios_eps, _axios_infra = _axios_process(content, primary_js.url)
+        for ep in _axios_eps:
+            key = ep.url.rstrip("/").lower().split("?")[0]
+            if key not in seen_eps:
+                seen_eps.add(key)
+                _eps_this_file.append(ep)
+                endpoints.append(ep)
+        for item in _axios_infra:
+            if item.value not in {i.value for i in infra}:
+                infra.append(item)
+
+        # GraphQL operation extraction (operation names for classic gql tag detection)
         for op in extract_graphql_operations(content, primary_js.url):
             key = f"{op.op_type}:{op.name}"
             if key not in seen_gql:
                 seen_gql.add(key)
                 graphql_ops.append(op)
+
+        # Deep GQL surface tracking - operations, fragments, variables, field map
+        from .analysis.gql_tracker import process_file as _gql_process
+        _gql_surface = _gql_process(content, primary_js.url)
+        if _gql_surface is not None:
+            gql_surfaces.append(_gql_surface)
 
         # Collect worker / dynamic-import URLs for second-pass fetching
         from urllib.parse import urljoin
@@ -518,7 +538,11 @@ def _analyze(
             )
             _process(chunk_js, [url])
 
-    return findings, endpoints, infra, graphql_ops
+    # Merge per-file GQL surfaces into one report
+    from .analysis.gql_tracker import merge_surfaces as _gql_merge
+    gql_surface = _gql_merge(gql_surfaces) if gql_surfaces else None
+
+    return findings, endpoints, infra, graphql_ops, gql_surface
 
 
 def run_scan(args) -> int:
@@ -986,7 +1010,7 @@ def run_scan(args) -> int:
     _logger = _logging.getLogger("bundlespy.cli")
     _t_analysis = _time.monotonic()
     scanner = SecretScanner()
-    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(all_js, scanner)
+    all_findings, all_endpoints, all_infra, _graphql_ops, _gql_surface = _analyze(all_js, scanner)
     _analysis_ms = int((_time.monotonic() - _t_analysis) * 1000)
     _logger.info("JS analysis took %dms for %d files", _analysis_ms, len(all_js))
 
@@ -1483,6 +1507,10 @@ def run_scan(args) -> int:
         if not args.quiet:
             phase_done("GraphQL", f"{len(gql_urls)} endpoints  {total_ops} operations")
 
+    # Static GQL surface (always runs if any gql tag / operation found)
+    if _gql_surface is not None:
+        extras["gql_surface"] = _gql_surface
+
     # ── Secret validation ─────────────────────────────────────────────────────
     if args.validate_secrets and all_findings:
         if not args.quiet:
@@ -1723,7 +1751,7 @@ def run_local(args) -> int:
         return 0
 
     scanner = SecretScanner()
-    all_findings, all_endpoints, all_infra, _graphql_ops = _analyze(js_files, scanner)
+    all_findings, all_endpoints, all_infra, _graphql_ops, _gql_surface = _analyze(js_files, scanner)
 
     started  = datetime.utcnow()
 
@@ -1797,6 +1825,8 @@ def run_local(args) -> int:
         "attack_surface": attack_surface,
         "coverage":       coverage,
     }
+    if _gql_surface is not None:
+        extras["gql_surface"] = _gql_surface
 
     formats = [f.strip() for f in args.format.split(",")]
     file_paths = {}
