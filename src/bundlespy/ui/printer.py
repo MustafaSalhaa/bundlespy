@@ -1217,6 +1217,65 @@ def print_gql_surface(surface) -> None:
     _p()
 
 
+# ── WebSocket payload ─────────────────────────────────────────────────────────
+
+def print_ws_payload(report) -> None:
+    """Print WebSocket payload analysis results."""
+    if report is None:
+        return
+
+    endpoints = report.endpoints or []
+    if not endpoints:
+        return
+
+    total = report.total_messages
+    _section("WEBSOCKET PAYLOADS", f"{total} messages  {len(endpoints)} endpoints", A.CYAN)
+
+    # Protocol badges
+    protos = set(e.protocol for e in endpoints)
+    proto_str = "  ".join(sorted(protos))
+    _p(f"  {_label('Protocol')}{proto_str}")
+    if report.has_json_rpc:
+        _p(f"  {_label('JSON-RPC')}{A.YELLOW}yes{A.RESET}")
+    if report.has_socket_io:
+        _p(f"  {_label('Socket.IO')}{A.YELLOW}yes{A.RESET}")
+    if report.all_methods:
+        _p(f"  {_label('Methods')}{', '.join(report.all_methods[:12])}")
+    if report.all_sensitive:
+        _p(f"  {A.RED}{_label('Sensitive')}{', '.join(report.all_sensitive)}{A.RESET}")
+    if report.all_paths:
+        _p(f"  {_label('Embedded paths')}{', '.join(report.all_paths[:8])}")
+
+    for ep in endpoints:
+        _p()
+        _p(f"  {A.WHITE}{ep.url}{A.RESET}")
+        _p(f"  {_label('Messages')}{ep.message_count}  ({ep.send_count} out / {ep.recv_count} in)  {A.GREY}{ep.protocol}{A.RESET}")
+
+        if ep.methods:
+            _p(f"  {_label('Methods')}{', '.join(ep.methods[:10])}")
+
+        if ep.sensitive_fields:
+            _p(f"  {A.RED}{_label('Sensitive')}{', '.join(ep.sensitive_fields)}{A.RESET}")
+
+        if ep.embedded_paths:
+            _p(f"  {_label('Paths')}{', '.join(ep.embedded_paths[:6])}")
+
+        if ep.schema_union:
+            # Show up to 8 fields with types
+            items = list(ep.schema_union.items())[:8]
+            schema_str = "  ".join(f"{k}:{A.CYAN}{v}{A.RESET}" for k, v in items)
+            _p(f"  {_label('Schema')}{schema_str}")
+
+        if ep.sample_send:
+            truncated = ep.sample_send[:120].replace("\n", " ")
+            _p(f"  {A.GREY}  send  {truncated}{'...' if len(ep.sample_send) > 120 else ''}{A.RESET}")
+        if ep.sample_recv:
+            truncated = ep.sample_recv[:120].replace("\n", " ")
+            _p(f"  {A.GREY}  recv  {truncated}{'...' if len(ep.sample_recv) > 120 else ''}{A.RESET}")
+
+    _p()
+
+
 # ── Boot config ───────────────────────────────────────────────────────────────
 
 def print_boot_config(boot_config: dict) -> None:
