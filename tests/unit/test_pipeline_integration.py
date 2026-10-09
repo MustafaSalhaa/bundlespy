@@ -105,7 +105,7 @@ class TestWorkerPipeline:
         main_js   = 'const w = new Worker("https://app.example.com/worker.js");'
         fetcher, scope = _make_stub({"/worker.js": worker_js})
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, endpoints, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, endpoints, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
         urls = [e.url for e in endpoints]
         assert "/api/worker-task" in urls, (
             f"Worker endpoint not found. Got: {urls}"
@@ -116,7 +116,7 @@ class TestWorkerPipeline:
         main_js = 'navigator.serviceWorker.register("https://app.example.com/sw.js");'
         fetcher, scope = _make_stub({"/sw.js": sw_js})
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, endpoints, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, endpoints, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
         urls = [e.url for e in endpoints]
         assert "/api/push-subscription" in urls
 
@@ -160,7 +160,7 @@ class TestDynamicImportPipeline:
         main_js  = 'import("./chunks/admin.js").then(m => m.default());'
         fetcher, scope = _make_stub({"/chunks/admin.js": chunk_js})
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, endpoints, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, endpoints, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
         urls = [e.url for e in endpoints]
         assert "/api/admin/dashboard" in urls
 
@@ -169,7 +169,7 @@ class TestDynamicImportPipeline:
         main_js  = 'const m = require("./modules/settings.js");'
         fetcher, scope = _make_stub({"/modules/settings.js": chunk_js})
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, endpoints, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, endpoints, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
         urls = [e.url for e in endpoints]
         assert "/api/settings" in urls
 
@@ -404,7 +404,7 @@ class TestFullPipelineConvergence:
         )
         fetcher, scope = _make_stub({"/worker.js": worker_js})
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, static_eps, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, static_eps, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
 
         # Runtime sees the same endpoint
         runtime_ep = Endpoint(
@@ -434,7 +434,7 @@ class TestFullPipelineConvergence:
         )
         js = _make_js("https://app.example.com/app.js", content,
                       source_page="https://app.example.com")
-        _, endpoints, _, graphql_ops = _run([js])
+        _, endpoints, _, graphql_ops, _ = _run([js])
 
         ep_urls = [e.url for e in endpoints]
         assert "/api/products" in ep_urls
@@ -456,7 +456,7 @@ class TestFullPipelineConvergence:
             "/worker.js": shared_ep_content,
         })
         main = _make_js("https://app.example.com/main.js", main_js)
-        _, endpoints, _, _ = _run([main], fetcher=fetcher, scope=scope)
+        _, endpoints, _, _, _ = _run([main], fetcher=fetcher, scope=scope)
         shared = [e for e in endpoints if "/api/shared" in e.url]
         assert len(shared) == 1, (
             f"/api/shared appears {len(shared)} times, expected 1"
@@ -475,7 +475,7 @@ class TestFullPipelineConvergence:
             "https://app.example.com/app.js", content,
             source_page="https://app.example.com/"
         )
-        findings, endpoints, infra, graphql_ops = _run([js_file])
+        findings, endpoints, infra, graphql_ops, _ = _run([js_file])
 
         result = ScanResult(
             target_url="https://app.example.com",
