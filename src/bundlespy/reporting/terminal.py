@@ -59,6 +59,7 @@ def print_report(
             downloaded=c.get("downloaded", 0),
             endpoints=c.get("endpoints", 0),
             findings=c.get("findings", 0),
+            manifest=c.get("manifest", ""),
         )
     if extras.get("passive_stats"):
         p = extras["passive_stats"]
