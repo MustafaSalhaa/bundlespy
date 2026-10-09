@@ -914,7 +914,7 @@ def run_scan(args) -> int:
             )
 
     # ── Source maps ───────────────────────────────────────────────────────────
-    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "items": []}
+    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "sources_path_only": 0, "items": []}
     if args.source_maps:
         if not args.quiet:
             phase("Analyzing source maps")
@@ -925,13 +925,16 @@ def run_scan(args) -> int:
             if result:
                 sm_details["discovered"] += 1
                 if result.recovered_files:
-                    sm_details["valid"]     += 1
-                    sm_details["recovered"] += 1
-                    sm_details["sources"]   += len(result.recovered_files)
+                    _path_only = sum(1 for f in result.recovered_files if not f.content)
+                    sm_details["valid"]            += 1
+                    sm_details["recovered"]        += 1
+                    sm_details["sources"]          += len(result.recovered_files)
+                    sm_details["sources_path_only"] += _path_only
                     sm_details["items"].append({
-                        "js":      js_file.url.split("/")[-1],
-                        "map":     result.map_url.split("/")[-1] if not result.map_url.startswith("data:") else "inline",
-                        "sources": len(result.recovered_files),
+                        "js":        js_file.url.split("/")[-1],
+                        "map":       result.map_url.split("/")[-1] if not result.map_url.startswith("data:") else "inline",
+                        "sources":   len(result.recovered_files),
+                        "path_only": _path_only,
                     })
                     recovered_files.extend(result.recovered_files)
         all_js.extend(recovered_files)
