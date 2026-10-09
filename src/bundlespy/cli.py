@@ -1362,30 +1362,29 @@ def run_scan(args) -> int:
         and not (ep.url.rstrip("/").lower() == _target_base and ep.method == "UNKNOWN")
     ]
 
-    # Final endpoint dedup — keep parameterized endpoints distinct
-    # Dedup by path + sorted param names (not param values)
-    # so /product?productId=1 and /product?productId=2 merge to one,
-    # but /product?productId and /product?category stay separate
-    seen_final = set()
-    deduped = []
-    for ep in all_endpoints:
-        from urllib.parse import urlparse as _upx
-        _p = _upx(ep.url)
-        _path = _p.path.rstrip("/").lower()
-        # Build param signature from query param names
-        _param_names = sorted(qp.get("name", "") for qp in (ep.query_params or []))
-        _param_sig = ",".join(_param_names)
-        # Method + path + param names = unique attack surface
-        key = f"{ep.method}:{_path}?{_param_sig}"
-        if key not in seen_final:
-            seen_final.add(key)
-            deduped.append(ep)
-    all_endpoints = deduped
+    # Final endpoint dedup - canonicalize parameterized paths first
+    # /api/users/123 and /api/users/456 map to one GET /api/users/{id}
+    # GET and DELETE on the same template remain distinct
+    from .analysis.canonical_endpoint import deduplicate_endpoints
+    all_endpoints = deduplicate_endpoints(all_endpoints)
 
     # ── Attack surface analysis ────────────────────────────────────────────────
     from .analysis.attack_surface import analyze_attack_surface
     attack_surface = analyze_attack_surface(all_endpoints)
     extras["attack_surface"] = attack_surface
+
+    # ── Boot-time config extraction ───────────────────────────────────────────
+    # Reads window.__CONFIG__, window.APP_CONFIG, window.env, process.env.*,
+    # import.meta.env.*, and inline API base URLs from already-collected assets.
+    # No new requests.
+    from .analysis.boot_config import extract_boot_config, summarize_boot_configs
+    _boot_configs = []
+    for _js in all_js:
+        if _js.content:
+            _bc = extract_boot_config(_js.content, _js.url)
+            if not _bc.is_empty():
+                _boot_configs.append(_bc)
+    extras["boot_config"] = summarize_boot_configs(_boot_configs)
 
     # ── Vulnerable library detection ───────────────────────────────────────────
     if not args.quiet and not getattr(args, "silent", False):
