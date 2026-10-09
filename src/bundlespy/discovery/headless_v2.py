@@ -30,6 +30,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from ..storage.models import JSFile, Endpoint
 from ..safety.network import validate_url
+from ..analysis.route_extractor import _is_valid_route, _clean_route
 
 logger = logging.getLogger("bundlespy.discovery.headless")
 
@@ -585,21 +586,15 @@ class PageStabilizer:
             self.wait(max_ms=1000, quiet_ms=150)
 
 
-# ── Inline chunk route extractor (JS regex, no external deps) ────────────────
+# ── Inline chunk route extractor ─────────────────────────────────────────────
 
-# These patterns cover the most common route-bearing patterns in JS chunks.
-# They are intentionally conservative - high precision over high recall.
-# The full analysis pipeline (SecretScanner + ast_endpoints) runs separately.
-
+# Broad structural pattern - captures any /segment path from JS string literals.
+# Noise filtering is done downstream by _is_valid_route() from route_extractor,
+# so we don't need a whitelist here and won't miss /dashboard, /admin, etc.
 _RE_CHUNK_ROUTE = re.compile(
     r'["\x27`]'
-    r'(/(?:api|v\d+|auth|admin|graphql|rest|ws|socket|uploads?|downloads?|'
-    r'users?|accounts?|settings?|profile|dashboard|search|orders?|products?|'
-    r'checkout|billing|webhooks?|integrations?|oauth|token|session|'
-    r'[a-z][a-z0-9_\-]{1,30})'
-    r'(?:/[a-zA-Z0-9_\-{}:]{1,60})*/?)'
+    r'((?:/[a-zA-Z0-9_\-{}:.*[\]]{1,60}){1,10}/?)'
     r'["\x27`]',
-    re.IGNORECASE,
 )
 
 _RE_DYNAMIC_IMPORT = re.compile(
@@ -625,7 +620,7 @@ _SKIP_ROUTE_PREFIXES = {
 def _extract_routes_from_chunk(content: str, base_url: str) -> Set[str]:
     """
     Fast regex-based route extraction from a JS chunk.
-    Returns absolute paths only. No external deps.
+    Returns normalized paths that pass the route validity check.
     """
     routes: Set[str] = set()
 
@@ -633,21 +628,33 @@ def _extract_routes_from_chunk(content: str, base_url: str) -> Set[str]:
         path = m.group(1).split("?")[0].split("#")[0]
         if any(path.startswith(p) for p in _SKIP_ROUTE_PREFIXES):
             continue
-        ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.split("/")[-1] else ""
+        # Skip known static asset extensions
+        last_seg = path.rsplit("/", 1)[-1]
+        ext = "." + last_seg.rsplit(".", 1)[-1].lower() if "." in last_seg else ""
         if ext in _SKIP_EXTENSIONS:
             continue
-        if len(path) > 1:
-            routes.add(path)
+        # Run through the shared route quality filter
+        if not _is_valid_route(path):
+            continue
+        cleaned = _clean_route(path)
+        if cleaned and len(cleaned) > 1:
+            routes.add(cleaned)
 
-    # Dynamic import paths - may be JS chunk URLs but also sometimes route hints
-    parsed_base = urlparse(base_url)
-    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    # Dynamic import paths - can be route hints in code-split apps
     for m in _RE_DYNAMIC_IMPORT.finditer(content):
         path = m.group(1).strip()
-        if path.startswith("/") and not any(path.startswith(p) for p in _SKIP_ROUTE_PREFIXES):
-            ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.split("/")[-1] else ""
-            if ext not in _SKIP_EXTENSIONS and len(path) > 1:
-                routes.add(path)
+        if not path.startswith("/"):
+            continue
+        if any(path.startswith(p) for p in _SKIP_ROUTE_PREFIXES):
+            continue
+        last_seg = path.rsplit("/", 1)[-1]
+        ext = "." + last_seg.rsplit(".", 1)[-1].lower() if "." in last_seg else ""
+        if ext in _SKIP_EXTENSIONS:
+            continue
+        if _is_valid_route(path):
+            cleaned = _clean_route(path)
+            if cleaned and len(cleaned) > 1:
+                routes.add(cleaned)
 
     return routes
 
