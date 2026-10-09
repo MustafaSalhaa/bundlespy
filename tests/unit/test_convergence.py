@@ -64,7 +64,7 @@ def _js(url, content, source_page="https://app.example.com"):
 def _analyze(js_files):
     from bundlespy.cli import _analyze as _cli_analyze
     from bundlespy.analysis.secrets import SecretScanner
-    return _cli_analyze(js_files, SecretScanner())
+    return _cli_analyze(js_files, SecretScanner())  # returns 5-tuple
 
 
 # ─── Worker discovery ─────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ class TestWorkerDiscovery:
         # Worker script that itself contains an API endpoint
         worker_content = 'fetch("/api/worker-data", {method:"POST"});'
         js = _js("https://app.example.com/worker.js", worker_content)
-        _, endpoints, _, _ = _analyze([js])
+        _, endpoints, _, _, _ = _analyze([js])
         urls = [e.url for e in endpoints]
         assert "/api/worker-data" in urls
 
@@ -144,7 +144,7 @@ class TestDynamicImportDiscovery:
         # The chunk itself contains an API endpoint
         chunk_content = 'axios.get("/api/admin/users");'
         js = _js("https://app.example.com/chunks/admin.js", chunk_content)
-        _, endpoints, _, _ = _analyze([js])
+        _, endpoints, _, _, _ = _analyze([js])
         urls = [e.url for e in endpoints]
         assert "/api/admin/users" in urls
 
@@ -251,7 +251,7 @@ class TestContentHashDedup:
         content = 'fetch("/api/notifications");'
         js1 = _js("https://cdn1.com/app.js", content)
         js2 = _js("https://cdn2.com/app.js", content)   # same sha256
-        _, endpoints, _, _ = _analyze([js1, js2])
+        _, endpoints, _, _, _ = _analyze([js1, js2])
         urls = [e.url for e in endpoints]
         assert urls.count("/api/notifications") <= 1
 
@@ -260,21 +260,21 @@ class TestContentHashDedup:
         content = 'fetch("/api/preloaded-data");'
         main  = _js("https://app.example.com/main.js",   content)
         preload = _js("https://app.example.com/preload.js", content)  # same content
-        _, endpoints, _, _ = _analyze([main, preload])
+        _, endpoints, _, _, _ = _analyze([main, preload])
         urls = [e.url for e in endpoints]
         assert urls.count("/api/preloaded-data") <= 1
 
     def test_different_content_both_analyzed(self):
         js1 = _js("a.js", 'fetch("/api/orders");')
         js2 = _js("b.js", 'fetch("/api/products");')
-        _, endpoints, _, _ = _analyze([js1, js2])
+        _, endpoints, _, _, _ = _analyze([js1, js2])
         urls = [e.url for e in endpoints]
         assert "/api/orders" in urls
         assert "/api/products" in urls
 
     def test_empty_content_skipped(self):
         js = _js("empty.js", "")
-        findings, endpoints, _, _ = _analyze([js])
+        findings, endpoints, _, _, _ = _analyze([js])
         assert findings == []
         assert endpoints == []
 
@@ -470,7 +470,7 @@ class TestFullConvergence:
         static_js  = _js("https://app.example.com/main.js",   content)
         preload_js = _js("https://app.example.com/preload.js", content)
 
-        _, endpoints, _, _ = _analyze([static_js, preload_js])
+        _, endpoints, _, _, _ = _analyze([static_js, preload_js])
         urls = [e.url for e in endpoints]
         # Content dedup -> analyzed once -> endpoint appears once
         assert urls.count("/api/shared-resource") <= 1
@@ -483,7 +483,7 @@ class TestFullConvergence:
         fetch("/graphql", {method:"POST"});
         '''
         js = _js("app.js", content)
-        _, endpoints, _, _ = _analyze([js])
+        _, endpoints, _, _, _ = _analyze([js])
         urls = [e.url for e in endpoints]
         # REST endpoint present
         assert "/api/users" in urls
