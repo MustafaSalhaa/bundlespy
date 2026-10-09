@@ -897,6 +897,7 @@ def run_scan(args) -> int:
             "js_intercepted": _js_intercepted,
             "xhr":            headless_stats.get("xhr", 0),
             "fetch":          headless_stats.get("fetch", 0),
+            "beacon":         headless_stats.get("beacon", 0),
             "ws":             headless_stats.get("ws", 0),
             "routes":         headless_stats.get("routes", 0),
             "endpoints":      headless_stats.get("endpoints", 0),
@@ -907,7 +908,7 @@ def run_scan(args) -> int:
             phase_done("Browser discovery",
                 f"{headless_stats.get('pages',0)} pages  "
                 f"{_js_label}  "
-                f"{headless_stats.get('xhr',0)+headless_stats.get('fetch',0)} API calls  "
+                f"{headless_stats.get('xhr',0)+headless_stats.get('fetch',0)+headless_stats.get('beacon',0)} API calls  "
                 f"{headless_stats.get('ws',0)} WS  "
                 f"{headless_stats.get('routes',0)} routes"
             )
