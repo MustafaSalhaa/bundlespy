@@ -260,6 +260,20 @@ if (_origES) {
     window.EventSource.CLOSED     = _origES.CLOSED;
 }
 
+// sendBeacon - fires-and-forgets POST to analytics/tracking endpoints
+const _origBeacon = navigator.sendBeacon.bind(navigator);
+navigator.sendBeacon = function(url, data) {
+    try {
+        window.__bundlespy_requests.push({
+            url: String(url),
+            method: 'POST',
+            type: 'beacon',
+            body: (typeof data === 'string') ? data.substring(0, 500) : null
+        });
+    } catch(e) {}
+    return _origBeacon(url, data);
+};
+
 // Dynamic iframe tracking
 const _origCE = document.createElement.bind(document);
 document.createElement = function(tag, ...a) {
@@ -2377,6 +2391,7 @@ class HeadlessEngine:
             "js":               len(self.js_files),
             "xhr":              sum(1 for c in self.api_calls if c.get("type") == "xhr"),
             "fetch":            sum(1 for c in self.api_calls if c.get("type") == "fetch"),
+            "beacon":           sum(1 for c in self.api_calls if c.get("type") == "beacon"),
             "ws":               len(self.ws_urls),
             "routes":           len(self.routes),
             "endpoints":        len(self.endpoints),
