@@ -376,7 +376,7 @@ class TestRegistryFromAnalyze:
             status_code=200, content_type="application/javascript",
             size_bytes=len(js_content.encode()), sha256=sha, content=js_content,
         )
-        _, endpoints, _, _ = _analyze([js], SecretScanner())
+        _, endpoints, _, _, _ = _analyze([js], SecretScanner())
 
         reg = DiscoveryRegistry()
         for ep in endpoints:
