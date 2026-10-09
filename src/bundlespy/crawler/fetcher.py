@@ -36,11 +36,13 @@ class Fetcher:
         extra_headers: dict = None,
         verify_ssl: bool = False,
         cache: Optional["FetchCache"] = None,
+        proxy: str = "",
     ):
         self.timeout           = timeout
         self.max_response_size = max_response_size
         self.retry_limit       = retry_limit
         self.min_delay         = 1.0 / max(requests_per_second, 1)
+        # --user-agent overrides the default UA (still rotates in stealth mode)
         self.user_agent        = user_agent
         self.stealth           = stealth
         self.rps               = requests_per_second
@@ -52,6 +54,8 @@ class Fetcher:
         # since urllib3 warns even for verify=True on some cert chains.
         self.verify_ssl        = verify_ssl
         self._cache            = cache
+        # Optional HTTP/HTTPS/SOCKS proxy (e.g. http://127.0.0.1:8080 for Burp)
+        self._proxy            = proxy.strip() if proxy else ""
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -64,6 +68,13 @@ class Fetcher:
         )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
+
+        # Wire proxy into the session so every request uses it
+        if self._proxy:
+            self.session.proxies = {
+                "http":  self._proxy,
+                "https": self._proxy,
+            }
 
         if not stealth:
             self.session.headers.update({"User-Agent": self.user_agent})
