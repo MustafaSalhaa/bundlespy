@@ -3087,7 +3087,8 @@ class BrowserPool:
     def __init__(self, num_browsers: int, browser_args: list,
                  ctx_kwargs: dict, cookies: list, init_script: str,
                  block_fn, response_fn,
-                 cdp_request_fn=None, cdp_response_fn=None):
+                 cdp_request_fn=None, cdp_response_fn=None,
+                 proxy: dict = None):
         self._num          = max(1, num_browsers)
         self._browser_args = browser_args
         self._ctx_kwargs   = ctx_kwargs
@@ -3097,6 +3098,8 @@ class BrowserPool:
         self._response_fn  = response_fn
         self._cdp_request_fn  = cdp_request_fn
         self._cdp_response_fn = cdp_response_fn
+        # Optional Playwright proxy dict e.g. {"server": "http://127.0.0.1:8080"}
+        self._proxy        = proxy or None
         # Semaphore caps the number of parallel browser visits.
         self._sem = threading.Semaphore(self._num)
         # Thread-local storage - each worker thread keeps its pw+browser alive
@@ -3113,8 +3116,11 @@ class BrowserPool:
         from playwright.sync_api import sync_playwright as _sync_playwright
         if getattr(self._tls, "pw", None) is not None:
             return  # already initialized for this thread
-        pw      = _sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, args=self._browser_args)
+        pw = _sync_playwright().start()
+        _launch_kw: dict = dict(headless=True, args=self._browser_args)
+        if self._proxy:
+            _launch_kw["proxy"] = self._proxy
+        browser = pw.chromium.launch(**_launch_kw)
         self._tls.pw      = pw
         self._tls.browser = browser
 
@@ -3320,6 +3326,9 @@ class HeadlessEngine:
         forms_mode:                bool  = False, # Enable Tier 2 form interaction (POST forms)
         # Browser pool
         num_browsers:              int   = 5,     # Parallel browser instances (default 5)
+        # Operational flags (Step 9)
+        proxy:                     str   = "",    # HTTP/HTTPS/SOCKS proxy URL for all browser traffic
+        user_agent:                str   = "",    # Custom UA — overrides the default Chrome UA
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -3332,6 +3341,9 @@ class HeadlessEngine:
         self.cookies       = cookies or []        # Playwright cookie dicts
         self.extra_headers = _parse_extra_headers(extra_headers)
         self.seen_hashes   = seen_hashes or set()
+        # Operational: proxy routes all browser traffic; user_agent overrides default Chrome UA
+        self._proxy        = proxy.strip() if proxy else ""
+        self._user_agent   = user_agent.strip() if user_agent else ""
 
         # Katana enhancement params
         self.max_failures          = max(1, max_failures)
@@ -6782,7 +6794,7 @@ class HeadlessEngine:
 
         with sync_playwright() as pw:
             self.timer.start("browser_start")
-            browser = pw.chromium.launch(
+            _p1_launch_kwargs: dict = dict(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -6795,13 +6807,17 @@ class HeadlessEngine:
                     "--disable-sync",
                 ],
             )
+            # Route all Phase 1 browser traffic through --proxy when set
+            if self._proxy:
+                _p1_launch_kwargs["proxy"] = {"server": self._proxy}
+            browser = pw.chromium.launch(**_p1_launch_kwargs)
             self.timer.stop("browser_start")
 
             # ── Single context — created once, cookies injected once ──────────
-            # Always set a realistic Chrome UA — Playwright's default headless
-            # UA ("HeadlessChrome/...") is fingerprinted and blocked by most
-            # WAFs and CDNs (Cloudflare, Akamai, Imperva all check this).
-            _chrome_ua = (
+            # Default to a realistic Chrome UA. --user-agent overrides this.
+            # Playwright's default headless UA ("HeadlessChrome/...") is
+            # fingerprinted and blocked by most WAFs and CDNs.
+            _chrome_ua = self._user_agent or (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/146.0.0.0 Safari/537.36"
@@ -7214,6 +7230,8 @@ class HeadlessEngine:
                 "--disable-background-networking",
                 "--disable-sync",
             ]
+            # Route all Phase 2 (pool) browser traffic through --proxy when set
+            _pool_proxy = {"server": self._proxy} if self._proxy else None
 
             def _pool_response_fn(r, source_url):
                 try:
@@ -7286,6 +7304,7 @@ class HeadlessEngine:
                 # Gap 2: wire up CDP handlers only when raw capture is on
                 cdp_request_fn  = _pool_cdp_request_fn  if self.capture_raw_traffic else None,
                 cdp_response_fn = _pool_cdp_response_fn if self.capture_raw_traffic else None,
+                proxy           = _pool_proxy,
             )
             logger.info(
                 "BrowserPool ready: %d parallel browser slots", self.num_browsers
@@ -8114,6 +8133,9 @@ def collect_headless_full(
     forms_mode:           bool           = False,
     # Browser pool
     num_browsers:         int            = 5,
+    # Operational flags (Step 9)
+    proxy:                str            = "",
+    user_agent:           str            = "",
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -8177,6 +8199,8 @@ def collect_headless_full(
         technology_detection   = technology_detection,
         forms_mode             = forms_mode,
         num_browsers           = num_browsers,
+        proxy                  = proxy,
+        user_agent             = user_agent,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
