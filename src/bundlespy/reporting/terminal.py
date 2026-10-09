@@ -80,6 +80,7 @@ def print_report(
             endpoints=h.get("endpoints", 0),
             workers=h.get("workers", 0),
             timings=h.get("timings"),
+            beacon=h.get("beacon", 0),
         )
 
     print_secret_analysis(result.findings)
