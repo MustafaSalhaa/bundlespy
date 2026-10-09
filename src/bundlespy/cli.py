@@ -850,6 +850,8 @@ def run_scan(args) -> int:
                     "error_message": _err_msg,
                 }
 
+    _ws_messages: list = []   # populated by headless block when WS traffic is captured
+
     # ── Headless ──────────────────────────────────────────────────────────────
     if args.headless:
         if not args.quiet:
@@ -927,6 +929,14 @@ def run_scan(args) -> int:
                 _hf.source_type = "browser"
         headless_endpoints = headless_result.get("endpoints", [])
         headless_stats     = headless_result.get("stats", {})
+
+        # WS payload analysis - only runs when messages were actually captured
+        _ws_messages = headless_result.get("ws_messages", []) or []
+        if _ws_messages:
+            from .analysis.ws_payload import analyze as _analyze_ws
+            _ws_report = _analyze_ws(_ws_messages)
+            if _ws_report:
+                extras["ws_payload"] = _ws_report
 
         # Store auth result — used for mode label correction and report
         _auth_result = headless_result.get("auth_result")
@@ -1594,6 +1604,10 @@ def run_scan(args) -> int:
         infrastructure = all_infra,
         errors         = errors,
     )
+
+    # Store captured WS messages in result (available for downstream reporters/exporters)
+    if _ws_messages:
+        result.ws_messages = _ws_messages
 
     # Stage 6: wire page_states using state_intelligence after result is built
     if _page_access_states:
