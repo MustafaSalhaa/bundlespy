@@ -607,6 +607,10 @@ def run_scan(args) -> int:
     _login_spec = getattr(args, "login", "").strip()
     _login_result = None   # populated below after Playwright is available
 
+    # Resolve these early - needed for mode label before header is printed
+    _custom_ua = getattr(args, "user_agent", "").strip()
+    _proxy     = getattr(args, "proxy", "").strip()
+
     if not args.quiet:
         if args.passive:
             mode = "Passive"
@@ -635,11 +639,6 @@ def run_scan(args) -> int:
             extra_headers[k.strip()] = v.strip()
     if args.cookie:
         extra_headers["Cookie"] = args.cookie
-
-    # --user-agent override (empty = use default)
-    _custom_ua = getattr(args, "user_agent", "").strip()
-    # --proxy: route all HTTP traffic through this proxy (e.g. Burp on 8080)
-    _proxy     = getattr(args, "proxy", "").strip()
 
     from .config import USER_AGENT as _DEFAULT_UA
     fetch_cache = FetchCache()
