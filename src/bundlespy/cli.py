@@ -957,7 +957,7 @@ def run_scan(args) -> int:
         chunk_files     = []
 
         # Probe manifests once for the target (not once per JS file)
-        manifest_urls, manifest_type = fetch_manifest_chunks(args.url, fetcher, scope)
+        manifest_urls, manifest_type = fetch_manifest_chunks(args.target.strip(), fetcher, scope)
         if manifest_type:
             chunk_stats["manifest"] = manifest_type
             logger.info("Manifest probe: %s yielded %d chunk URLs", manifest_type, len(manifest_urls))
