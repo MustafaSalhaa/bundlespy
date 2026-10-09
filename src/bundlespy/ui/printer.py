@@ -359,11 +359,12 @@ def print_passive(source, urls, js, unique, new, errors=None):
 
 
 def print_headless(pages, js, xhr=0, fetch=0, ws=0, routes=0, endpoints=0,
-                   workers=0, timings=None):
+                   workers=0, timings=None, beacon=0):
     _section("BROWSER DISCOVERY", "", A.CYAN)
     rows = [("Engine", "Chromium"), ("Pages", str(pages)), ("JS captured", str(js))]
-    if xhr or fetch:
-        rows.append(("API calls", str(xhr + fetch)))
+    if xhr or fetch or beacon:
+        label = f"API calls ({xhr} xhr, {fetch} fetch" + (f", {beacon} beacon" if beacon else "") + ")"
+        rows.append((label, str(xhr + fetch + beacon)))
     if ws:
         rows.append(("WebSockets", str(ws)))
     if routes:
