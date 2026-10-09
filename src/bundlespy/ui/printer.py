@@ -312,19 +312,26 @@ def print_js_inventory(js_files, verbose=False, per_file_stats=None):
 
 # ── Feature summaries ─────────────────────────────────────────────────────────
 
-def print_source_maps(discovered, valid, recovered, sources, details=None):
+def print_source_maps(discovered, valid, recovered, sources, details=None, sources_path_only=0):
     if not discovered:
         return
     _section("SOURCE MAPS", "", A.YELLOW)
     for label, val in [("Discovered", str(discovered)), ("Valid", str(valid)),
                        ("Recovered", str(recovered)), ("Sources", str(sources))]:
         _p(f"  {_label(label)}{val}")
+    if sources_path_only:
+        _p(f"  {_label('Path-only')}{A.GREY}{sources_path_only} (no inline content){A.RESET}")
     if details:
         for d in details:
             _p(f"\n  {A.WHITE}{d.get('js','')}{A.RESET}")
             _p(f"  {A.GREY}  └─ {d.get('map','')}{A.RESET}")
             if d.get("sources"):
-                _p(f"  {A.GREY}     ├─ {d['sources']} original sources{A.RESET}")
+                path_only = d.get("path_only", 0)
+                if path_only:
+                    inline = d["sources"] - path_only
+                    _p(f"  {A.GREY}     ├─ {d['sources']} sources ({inline} with content, {path_only} path-only){A.RESET}")
+                else:
+                    _p(f"  {A.GREY}     ├─ {d['sources']} original sources{A.RESET}")
     _p()
 
 
