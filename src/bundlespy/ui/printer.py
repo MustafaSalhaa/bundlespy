@@ -1139,6 +1139,84 @@ def print_graphql(schemas):
     _p()
 
 
+def print_gql_surface(surface) -> None:
+    """Print static GQL surface (operations, fragments, type fields)."""
+    if surface is None:
+        return
+    ops   = surface.operations   or []
+    frags = surface.fragments    or []
+    types = surface.type_fields  or {}
+    sens  = surface.sensitive_fields or []
+    if not ops and not frags:
+        return
+
+    queries       = [o for o in ops if o.op_type == "query"]
+    mutations     = [o for o in ops if o.op_type == "mutation"]
+    subscriptions = [o for o in ops if o.op_type == "subscription"]
+
+    total = len(ops)
+    _section("GQL SURFACE", str(total), A.PURPLE)
+
+    _p(f"  {_label('Operations')}{total}")
+    if queries:
+        _p(f"  {_label('Queries')}{len(queries)}")
+    if mutations:
+        _p(f"  {_label('Mutations')}{len(mutations)}")
+    if subscriptions:
+        _p(f"  {_label('Subscriptions')}{len(subscriptions)}")
+    if frags:
+        _p(f"  {_label('Fragments')}{len(frags)}")
+    if types:
+        _p(f"  {_label('Types mapped')}{len(types)}")
+    if sens:
+        _p(f"  {A.RED}{_label('Sensitive')}{len(sens)}{A.RESET}")
+
+    # Queries
+    if queries:
+        _p()
+        _p(f"  {A.GREY}Queries{A.RESET}")
+        for op in queries[:20]:
+            vars_str = ""
+            if op.variables:
+                vars_str = f"  {A.GREY}({', '.join(op.variables[:3])}){A.RESET}"
+            _p(f"  {A.CYAN}  {op.name}{A.RESET}{vars_str}")
+
+    # Mutations
+    if mutations:
+        _p()
+        _p(f"  {A.GREY}Mutations{A.RESET}")
+        for op in mutations[:20]:
+            vars_str = ""
+            if op.variables:
+                vars_str = f"  {A.GREY}({', '.join(op.variables[:3])}){A.RESET}"
+            _p(f"  {A.ORANGE}  {op.name}{A.RESET}{vars_str}")
+
+    # Subscriptions
+    if subscriptions:
+        _p()
+        _p(f"  {A.GREY}Subscriptions{A.RESET}")
+        for op in subscriptions[:10]:
+            _p(f"  {A.YELLOW}  {op.name}{A.RESET}")
+
+    # Type field map (condensed — show types with fields, cap at 8 types)
+    if types:
+        _p()
+        _p(f"  {A.GREY}Type field map{A.RESET}")
+        for type_name, fields in list(types.items())[:8]:
+            field_list = sorted(fields)[:8]
+            trail = " ..." if len(fields) > 8 else ""
+            _p(f"  {A.WHITE}  {type_name}{A.RESET}  {A.GREY}{', '.join(field_list)}{trail}{A.RESET}")
+
+    # Sensitive fields
+    if sens:
+        _p()
+        _p(f"  {A.RED}Sensitive fields{A.RESET}")
+        for sf in sens[:10]:
+            _p(f"  {A.RED}  {sf}{A.RESET}")
+
+    _p()
+
+
 # ── Boot config ───────────────────────────────────────────────────────────────
 
 def print_boot_config(boot_config: dict) -> None:
@@ -1194,7 +1272,10 @@ def print_infrastructure(items):
         by_cls.setdefault(item.classification, []).append(item)
     _section("INFRASTRUCTURE", str(len(items)), A.YELLOW)
     for cls, its in sorted(by_cls.items()):
-        cls_c = A.RED if cls in ("PRIVATE_IP", "CLOUD_METADATA") else (A.ORANGE if "HOSTNAME" in cls else A.GREY)
+        cls_c = (A.RED    if cls in ("PRIVATE_IP", "CLOUD_METADATA") else
+                 A.CYAN   if cls in ("API_BASE", "API_BASE_AUTH") else
+                 A.ORANGE if "HOSTNAME" in cls or "STAGING" in cls or "DEVELOPMENT" in cls else
+                 A.GREY)
         _p(f"\n  {cls_c}{cls}{A.RESET}  {A.GREY}({len(its)}){A.RESET}")
         for item in its[:10]:
             fname = item.source_file.split("/")[-1] if "/" in item.source_file else item.source_file
