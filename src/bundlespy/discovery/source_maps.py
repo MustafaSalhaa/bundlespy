@@ -187,7 +187,7 @@ def recover_sources(
         else:
             full_path = source_path
 
-        # Get content - either inline or mark as external
+        # Get inline content when available; preserve path even when absent
         content = ""
         if i < len(sources_content) and sources_content[i]:
             content = sources_content[i]
@@ -195,9 +195,10 @@ def recover_sources(
                 logger.warning("Recovered source too large, truncating: %s", full_path)
                 content = content[:MAX_SOURCE_SIZE]
         else:
-            # No inline content - could fetch from webpack devServer but skip for safety
-            logger.debug("No inline content for source: %s", full_path)
-            continue
+            # No inline content - keep the path so route/endpoint extractors
+            # can still use the original filename as a signal (e.g. routes.ts,
+            # api/users.js) even without source text to analyze
+            logger.debug("No inline content for source (path preserved): %s", full_path)
 
         recovered.append((full_path, content))
 
