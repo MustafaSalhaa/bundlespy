@@ -490,6 +490,11 @@ class Endpoint:
     evidence:        str   = ""     # Raw JS snippet that revealed this endpoint
     kind:            str   = "api"  # api / route / external / websocket / graphql
     source_type:     str   = "static"  # static | runtime | correlated
+    # Canonical identity - /api/users/123 and /api/users/456 share one canonical_path
+    # canonical_path is the parameterized template; None means not yet computed
+    canonical_path:  Optional[str]  = field(default=None, repr=False)
+    # All observed raw variants that map to this canonical form
+    observed_variants: List[str] = field(default_factory=list, repr=False)
     # Trust model: populated lazily at report-time or by passive validator
     provenance: Optional["Provenance"] = field(default=None, repr=False)
     # Stage 6: Application State Intelligence - populated by crawler + state_intelligence
@@ -524,3 +529,5 @@ class ScanResult:
     graph: Optional[Any] = field(default=None, repr=False)
     # Stage 6: per-URL access records keyed by URL string
     page_states: Dict[str, "PageAccessRecord"] = field(default_factory=dict, repr=False)
+    # Library findings from library_scanner - used to filter known libs from attack surface mappers
+    library_findings: List[Any] = field(default_factory=list, repr=False)
