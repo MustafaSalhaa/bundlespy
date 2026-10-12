@@ -164,11 +164,18 @@ other:
                      help="Session cookie string to send with every request\n  e.g. --cookie \"session=abc123; csrf=xyz\"")
     _ag.add_argument("--header", action="append", default=[], metavar="NAME:VALUE",
                      help="Extra request header (repeat for multiple)\n  e.g. --header \"Authorization: Bearer token\"")
+    _ag.add_argument("-u", "--username", default="", metavar="USER",
+                     help="Username or email for auto-login\n  use with --password; login URL auto-detected or set with --login-url")
+    _ag.add_argument("-p", "--password", default="", metavar="PASS",
+                     help="Password for auto-login (use with --username)")
+    _ag.add_argument("--login-url", default="", metavar="URL",
+                     help="Explicit login page URL for auto-login\n  e.g. --login-url https://app.example.com/auth/login\n  if omitted, BundleSpy uses the scan target as the login page")
     _ag.add_argument("--login", default="", metavar="SPEC",
                      help=(
-                         "Auto-login via browser before scanning. Formats:\n"
+                         "Auto-login via browser (advanced format). Examples:\n"
                          "  url=https://site.com/login,user=admin,pass=secret\n"
-                         "  user=admin,pass=secret  (uses target URL as login page)"
+                         "  user=admin,pass=secret  (uses target as login page)\n"
+                         "  Prefer --username / --password for simple cases."
                      ))
 
     # Output
@@ -604,7 +611,23 @@ def run_scan(args) -> int:
     extras  = {}
 
     # Determine if login will run (before header print so mode label is accurate)
+    # --username/--password is a shorthand that gets merged into _login_spec below
     _login_spec = getattr(args, "login", "").strip()
+    _username   = getattr(args, "username", "").strip()
+    _password   = getattr(args, "password", "").strip()
+    _login_url  = getattr(args, "login_url", "").strip()
+
+    # Build login spec from --username/--password if provided and --login not set
+    if _username and _password and not _login_spec:
+        from .discovery.autologin import build_login_spec as _build_spec
+        _login_spec = _build_spec(_username, _password, _login_url)
+    elif _username and not _password:
+        print("Error: --username requires --password", file=sys.stderr)
+        return 2
+    elif _password and not _username:
+        print("Error: --password requires --username", file=sys.stderr)
+        return 2
+
     _login_result = None   # populated below after Playwright is available
 
     # Resolve these early - needed for mode label before header is printed
@@ -762,20 +785,31 @@ def run_scan(args) -> int:
 
             try:
                 from playwright.sync_api import sync_playwright as _sync_pw
+                from urllib.parse import urlparse as _up_login
+
+                _login_ua = (
+                    _custom_ua if _custom_ua else
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+                # Strip Cookie from extra_http_headers - injected via add_cookies instead
+                _login_hdrs = {k: v for k, v in extra_headers.items() if k.lower() != "cookie"}
+
+                _launch_kwargs = {"headless": True}
+                if _proxy:
+                    _launch_kwargs["proxy"] = {"server": _proxy}
+
                 with _sync_pw() as _pw:
-                    _browser = _pw.chromium.launch(headless=True)
+                    _browser = _pw.chromium.launch(**_launch_kwargs)
                     _ctx     = _browser.new_context(
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/122.0.0.0 Safari/537.36"
-                        ),
-                        extra_http_headers=extra_headers if not args.cookie else {},
+                        user_agent=_login_ua,
+                        extra_http_headers=_login_hdrs,
+                        ignore_https_errors=not args.no_verify,
                     )
-                    # Inject any pre-existing cookies before login
+                    # Inject any pre-existing cookies before login attempt
                     if args.cookie:
                         from .discovery.headless import _parse_cookie_string as _pcs
-                        from urllib.parse import urlparse as _up_login
                         _pre_domain = _up_login(_login_url).netloc.split(":")[0]
                         _pre_cks = _pcs(args.cookie, _pre_domain)
                         if _pre_cks:
@@ -790,14 +824,12 @@ def run_scan(args) -> int:
                     )
                     _browser.close()
 
-                # Merge captured cookies into args.cookie so all downstream
-                # components (crawler, headless engine) use the session
+                # Merge captured session into all downstream components
                 if _login_result.get("success") and _login_result.get("cookie_string"):
-                    # Merge: autologin cookies override / extend existing --cookie
+                    # Merge cookies by name: new values win over existing --cookie
                     _existing = args.cookie.strip()
                     _new_ck   = _login_result["cookie_string"]
                     if _existing:
-                        # Merge by name: new values win
                         _merged = {}
                         for _pair in _existing.split(";"):
                             _pair = _pair.strip()
@@ -812,7 +844,8 @@ def run_scan(args) -> int:
                         args.cookie = "; ".join(f"{k}={v}" for k, v in _merged.items())
                     else:
                         args.cookie = _new_ck
-                    # Also update extra_headers so the static fetcher uses the session
+
+                    # Update extra_headers so static fetcher carries the session
                     extra_headers["Cookie"] = args.cookie
                     fetcher = Fetcher(
                         timeout=args.timeout,
@@ -824,13 +857,29 @@ def run_scan(args) -> int:
                         user_agent=_custom_ua if _custom_ua else _DEFAULT_UA,
                         proxy=_proxy,
                     )
+
+                    # Store localStorage/sessionStorage so headless can inject them
+                    # These carry Bearer tokens, JWTs, and API keys that aren't in cookies
+                    _login_local_storage   = _login_result.get("local_storage") or {}
+                    _login_session_storage = _login_result.get("session_storage") or {}
+                    _login_token_keys      = _login_result.get("token_keys") or []
+
+                    _token_note = ""
+                    if _login_token_keys:
+                        _token_note = f"  tokens: {', '.join(_login_token_keys[:4])}"
+
                     if not args.quiet:
                         phase_done(
                             "Auto-login successful",
-                            f"{len(_login_result.get('cookies', []))} cookies captured  "
-                            f"→ {_login_result.get('final_url', '')}"
+                            f"{len(_login_result.get('cookies', []))} cookies"
+                            + (f"  {len(_login_local_storage)} localStorage keys" if _login_local_storage else "")
+                            + _token_note
+                            + f"  → {_login_result.get('final_url', '')}"
                         )
                 else:
+                    _login_local_storage   = {}
+                    _login_session_storage = {}
+                    _login_token_keys      = []
                     _err = _login_result.get("error_message") or _login_result.get("error") or "unknown"
                     if not args.quiet:
                         phase_warn(f"Auto-login failed: {_err}")
@@ -841,6 +890,9 @@ def run_scan(args) -> int:
                 _err_msg = str(_le)
                 if not args.quiet:
                     phase_warn(f"Auto-login exception: {_err_msg}")
+                _login_local_storage   = {}
+                _login_session_storage = {}
+                _login_token_keys      = []
                 extras["login_result"] = {
                     "success": False, "method": "exception",
                     "login_url": _login_url, "final_url": _login_url,
@@ -849,6 +901,11 @@ def run_scan(args) -> int:
                     "token_keys": [], "username_field": "", "password_field": "",
                     "error_message": _err_msg,
                 }
+    else:
+        # No auto-login - ensure variables are always defined for headless block
+        _login_local_storage   = {}
+        _login_session_storage = {}
+        _login_token_keys      = []
 
     _ws_messages: list = []   # populated by headless block when WS traffic is captured
 
@@ -889,6 +946,23 @@ def run_scan(args) -> int:
         _parsed_domain = _urlparse(target).netloc.split(":")[0]
         _playwright_cookies = _parse_cookie_string(args.cookie, _parsed_domain) if args.cookie else []
 
+        # Build an init script that seeds localStorage/sessionStorage captured from auto-login.
+        # This runs in every page before any application JS - ensures Bearer tokens,
+        # JWTs, and API keys are present when the app boots.
+        _storage_init_script = ""
+        if _login_local_storage or _login_session_storage:
+            import json as _json
+            _ls_json  = _json.dumps(_login_local_storage)
+            _ss_json  = _json.dumps(_login_session_storage)
+            _storage_init_script = f"""
+(function(){{
+  var ls = {_ls_json};
+  var ss = {_ss_json};
+  try {{ for (var k in ls) {{ localStorage.setItem(k, ls[k]); }} }} catch(e) {{}}
+  try {{ for (var k in ss) {{ sessionStorage.setItem(k, ss[k]); }} }} catch(e) {{}}
+}})();
+""".strip()
+
         # Pre-seed headless dedup with content hashes from crawler JS files AND
         # inline scripts the static crawler already captured.  Without the inline
         # hashes headless would re-register every inline <script> block it sees on
@@ -921,6 +995,7 @@ def run_scan(args) -> int:
             dom_wait_time      = getattr(args, "dom_wait_time", 1),
             proxy              = _proxy,
             user_agent         = _custom_ua,
+            storage_init_script = _storage_init_script,
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
