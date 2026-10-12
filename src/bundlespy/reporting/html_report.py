@@ -84,7 +84,7 @@ def _findings_html(findings, extras):
             occ = f'<div class="finding-occ">Also observed in {len(f.occurrences)-1} additional location(s)</div>'
         ctx_block = ""
         if f.context:
-            ctx_block = f'<div class="evidence-block"><div class="evidence-label">Context</div><code class="context-val">{_e(f.context[:300])}</code></div>'
+            ctx_block = f'<div class="evidence-block"><div class="evidence-label">Context</div><button class="copy-btn" onclick="copyText(this,{chr(39)}{_e(f.context[:300])}{chr(39)})">Copy</button><code class="context-val">{_e(f.context[:300])}</code></div>'
         pub_note = '<div class="pub-id-note">Public identifier - not a secret credential</div>' if pub else ""
         rows.append(f"""
 <div class="finding-card" data-severity="{_e(f.severity)}">
@@ -111,6 +111,7 @@ def _findings_html(findings, extras):
     </div>
     <div class="evidence-block">
       <div class="evidence-label">Evidence (redacted)</div>
+      <button class="copy-btn" onclick="copyText(this,'{_e(f.redacted_value)}')">Copy</button>
       <code class="evidence-val">{_e(f.redacted_value)}</code>
     </div>
     {ctx_block}
@@ -401,7 +402,7 @@ def _vulnlibs_html(lib_findings):
 
             cve_cards += f"""<div class="cve-card sev-{_e(cve.severity)}">
   <div class="cve-card-left">
-    <code class="cve-id-badge">{_e(cve.cve_id)}</code>
+    <a href="https://nvd.nist.gov/vuln/detail/{_e(cve.cve_id)}" target="_blank" rel="noopener" style="text-decoration:none"><code class="cve-id-badge" style="cursor:pointer;transition:border-color .12s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor=''">{_e(cve.cve_id)}</code></a>
     <span class="sev-pill" style="background:{sc}1a;color:{sc};border:1px solid {sc}44;font-size:10px">{_e(cve.severity)}</span>
     <span class="exploit-badge {exploit_cls}">{_e(exploit_label)}</span>
   </div>
@@ -703,20 +704,79 @@ def _validation_html(validation_results):
 
 def _sourcemap_html(sm_details):
     if not sm_details or not sm_details.get("discovered"):
-        return '<div class="empty-state"><span class="empty-icon">○</span><p>No source maps found</p></div>'
+        return '<div class="empty-state"><span class="empty-icon">○</span><p>No source maps found. Run with <code>--source-maps</code> to enable.</p></div>'
+
+    discovered  = sm_details.get("discovered", 0)
+    valid       = sm_details.get("valid", 0)
+    total_src   = sm_details.get("sources", 0)
+    path_only   = sm_details.get("sources_path_only", 0)
+    errors      = sm_details.get("errors", 0)
+    with_content = total_src - path_only
     items = sm_details.get("items", [])
-    rows = "".join(f"""<tr>
-  <td><code>{_e(i.get("js",""))}</code></td>
-  <td><code>{_e(i.get("map",""))}</code></td>
-  <td>{i.get("sources",0)}</td>
-</tr>""" for i in items)
-    return f"""<div class="sm-summary">
-  {sm_details.get("discovered",0)} map(s) found · {sm_details.get("sources",0)} source file(s) recovered
-</div>
-<table class="data-table">
-<thead><tr><th>JS File</th><th>Map File</th><th>Sources</th></tr></thead>
+
+    # Summary bar
+    summary_parts = [
+        f'<span class="sm-stat">{discovered} map{"s" if discovered != 1 else ""} found</span>',
+        f'<span class="sm-stat sm-stat-ok">{valid} parsed</span>',
+        f'<span class="sm-stat sm-stat-src">{total_src} source file{"s" if total_src != 1 else ""} recovered</span>',
+    ]
+    if with_content < total_src:
+        summary_parts.append(
+            f'<span class="sm-stat sm-stat-dim">{path_only} path-only (no inline content)</span>'
+        )
+    if errors:
+        summary_parts.append(
+            f'<span class="sm-stat sm-stat-err">{errors} failed</span>'
+        )
+    summary_html = '<div class="sm-summary">' + " · ".join(summary_parts) + "</div>"
+
+    # Per-map rows
+    def _map_row(item):
+        js_name  = _e(item.get("js", ""))
+        map_name = _e(item.get("map", ""))
+        map_type = item.get("map_type", "external")
+        n_src    = item.get("sources", 0)
+        n_path   = item.get("path_only", 0)
+        n_content = n_src - n_path
+
+        type_badge = (
+            '<span class="badge badge-inline">inline</span>'
+            if map_type == "inline"
+            else '<span class="badge badge-external">external</span>'
+        )
+
+        src_label = str(n_src)
+        if n_path:
+            src_label += f' <span class="dim">({n_path} path-only)</span>'
+
+        # Show up to 5 recovered file names as a tooltip / mini-list
+        names = item.get("source_names", [])
+        if names:
+            preview = names[:5]
+            more    = len(names) - len(preview)
+            names_html = "<ul class='sm-names'>" + "".join(
+                f"<li><code>{_e(n)}</code></li>" for n in preview
+            )
+            if more:
+                names_html += f"<li class='dim'>+ {more} more</li>"
+            names_html += "</ul>"
+        else:
+            names_html = ""
+
+        return f"""<tr>
+  <td><code class="sm-js">{js_name}</code></td>
+  <td>{type_badge} <code class="sm-map">{map_name}</code></td>
+  <td>{src_label}{names_html}</td>
+</tr>"""
+
+    rows = "".join(_map_row(i) for i in items)
+
+    table = f"""<table class="data-table">
+<thead><tr><th>JS Bundle</th><th>Map File</th><th>Recovered Sources</th></tr></thead>
 <tbody>{rows}</tbody>
 </table>"""
+
+    return summary_html + table
 
 
 def _attack_mapper_html(attack_report) -> str:
@@ -959,6 +1019,8 @@ def generate(
     info_f     = [f for f in real if f.severity == "INFO"]
 
     lib_findings    = extras.get("lib_findings",      [])
+    lib_crit        = sum(1 for lf in lib_findings if getattr(lf,"severity","") == "CRITICAL")
+    lib_high        = sum(1 for lf in lib_findings if getattr(lf,"severity","") == "HIGH")
     headless_stats  = extras.get("headless_stats",    {})
     auth_result     = extras.get("auth_result",       None)
     login_result    = extras.get("login_result",      None)
@@ -1006,6 +1068,15 @@ def generate(
         '<span class="scan-badge clean-badge">SCAN COMPLETE</span>'
     )
 
+    # Risk score
+    _risk_score = len(critical)*10 + len(high)*7 + len(medium)*4 + len(low)*1 + lib_crit*9 + lib_high*6
+    if _risk_score >= 50:       _risk_cls, _risk_label = "risk-critical", "CRITICAL RISK"
+    elif _risk_score >= 25:     _risk_cls, _risk_label = "risk-high",     "HIGH RISK"
+    elif _risk_score >= 10:     _risk_cls, _risk_label = "risk-medium",   "MEDIUM RISK"
+    elif _risk_score > 0:       _risk_cls, _risk_label = "risk-low",      "LOW RISK"
+    else:                       _risk_cls, _risk_label = "risk-clean",    "CLEAN"
+    _risk_formula = f"crit×10 + high×7 + med×4 + low×1 + lib_crit×9 + lib_high×6 = {_risk_score}"
+
     # Nav badges
     _find_badge_cls = "red" if (critical or high) else "orange" if medium else ""
     _lib_badge_cls  = "orange" if lib_findings else ""
@@ -1021,16 +1092,25 @@ def generate(
     _passive_used  = bool(passive_stats)
 
     _so, _sc = "'", "'"  # quote helpers for onclick JS strings
-    _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ',this)"><span class="nav-icon">⬕</span>Browser Engine</button>' if _headless_used else '')
-    _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ',this)"><span class="nav-icon">◉</span>Authentication</button>' if _auth_used else '')
-    _nav_login    = ('<button class="nav-item" onclick="show(' + _so + 'login' + _sc + ',this)"><span class="nav-icon">⚿</span>Auto-Login</button>' if _login_used else '')
-    _nav_srcmaps  = ('<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ',this)"><span class="nav-icon">⎔</span>Source Maps</button>' if _sm_used else '')
-    _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ',this)"><span class="nav-icon">⬡</span>GraphQL</button>' if _gql_used else '')
-    _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ',this)"><span class="nav-icon">◎</span>Validation</button>' if _val_used else '')
-    _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ',this)"><span class="nav-icon">⊕</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
-    _nav_state    = ('<button class="nav-item" onclick="show(' + _so + 'stateint' + _sc + ',this)"><span class="nav-icon">⊚</span>State Intelligence<span class="nav-badge">' + str(len(page_states)) + '</span></button>' if _state_used else '')
+    _ico_headless = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="12" height="8" rx="1.5"/><path d="M6 12v2M10 12v2M4 14h8"/><circle cx="6" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.2" fill="currentColor" stroke="none"/></svg>'
+    _ico_auth     = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L3 4v4c0 3 2.3 5.4 5 6 2.7-.6 5-3 5-6V4z"/></svg>'
+    _ico_login    = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2h2a2 2 0 012 2v8a2 2 0 01-2 2h-2M7 5l3 3-3 3M1 8h9"/></svg>'
+    _ico_srcmaps  = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2h8l2 2v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z"/><path d="M4 6h8M4 9h5"/></svg>'
+    _ico_graphql  = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="2.5" r="1.3"/><circle cx="13.3" cy="5.5" r="1.3"/><circle cx="13.3" cy="10.5" r="1.3"/><circle cx="8" cy="13.5" r="1.3"/><circle cx="2.7" cy="10.5" r="1.3"/><circle cx="2.7" cy="5.5" r="1.3"/></svg>'
+    _ico_val      = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8l3.5 3.5L13 4.5"/></svg>'
+    _ico_subs     = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><path d="M4 10c0-2.2 1.8-4 4-4s4 1.8 4 4"/></svg>'
+    _ico_state    = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14"/></svg>'
+    _ico_mapper   = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12L5 4l4 6 3-4 2 6"/></svg>'
+    _nav_headless = ('<button class="nav-item" onclick="show(' + _so + 'headless' + _sc + ',this)"><span class="nav-icon">' + _ico_headless + '</span>Browser Engine</button>' if _headless_used else '')
+    _nav_auth     = ('<button class="nav-item" onclick="show(' + _so + 'auth' + _sc + ',this)"><span class="nav-icon">' + _ico_auth + '</span>Authentication</button>' if _auth_used else '')
+    _nav_login    = ('<button class="nav-item" onclick="show(' + _so + 'login' + _sc + ',this)"><span class="nav-icon">' + _ico_login + '</span>Auto-Login</button>' if _login_used else '')
+    _nav_srcmaps  = ('<button class="nav-item" onclick="show(' + _so + 'sourcemaps' + _sc + ',this)"><span class="nav-icon">' + _ico_srcmaps + '</span>Source Maps</button>' if _sm_used else '')
+    _nav_graphql  = ('<button class="nav-item" onclick="show(' + _so + 'graphql' + _sc + ',this)"><span class="nav-icon">' + _ico_graphql + '</span>GraphQL</button>' if _gql_used else '')
+    _nav_val      = ('<button class="nav-item" onclick="show(' + _so + 'validation' + _sc + ',this)"><span class="nav-icon">' + _ico_val + '</span>Validation</button>' if _val_used else '')
+    _nav_subs     = ('<button class="nav-item" onclick="show(' + _so + 'subdomains' + _sc + ',this)"><span class="nav-icon">' + _ico_subs + '</span>Subdomains<span class="nav-badge">' + str(len(subdomains)) + '</span></button>' if _subs_used else '')
+    _nav_state    = ('<button class="nav-item" onclick="show(' + _so + 'stateint' + _sc + ',this)"><span class="nav-icon">' + _ico_state + '</span>State Intelligence<span class="nav-badge">' + str(len(page_states)) + '</span></button>' if _state_used else '')
     _attack_report_candidates = attack_report.total_candidates if attack_report else 0
-    _nav_mapper   = ('<button class="nav-item" onclick="show(' + _so + 'mapper' + _sc + ',this)"><span class="nav-icon">⦿</span>Attack Surface<span class="nav-badge' + (' orange' if _attack_report_candidates else '') + '">' + str(_attack_report_candidates) + '</span></button>' if attack_report else '')
+    _nav_mapper   = ('<button class="nav-item" onclick="show(' + _so + 'mapper' + _sc + ',this)"><span class="nav-icon">' + _ico_mapper + '</span>Attack Surface<span class="nav-badge' + (' orange' if _attack_report_candidates else '') + '">' + str(_attack_report_candidates) + '</span></button>' if attack_report else '')
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1049,7 +1129,7 @@ def generate(
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
 html{{scroll-behavior:smooth}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;
-  background:var(--bg);color:var(--text);font-size:13px;line-height:1.6;min-height:100vh}}
+  background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;min-height:100vh}}
 /* ── Layout ── */
 .layout{{display:flex;min-height:100vh}}
 .sidebar{{width:230px;background:var(--surface);border-right:1px solid var(--border);
@@ -1089,7 +1169,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif
 .clean-badge{{color:var(--green);border:1px solid #1a3a1a;background:#081a08}}
 /* ── Sections ── */
 .section{{display:none}}.section.active{{display:block}}
-.section-title{{font-size:16px;font-weight:600;margin-bottom:18px;display:flex;align-items:center;gap:10px}}
+.section-title{{font-size:17px;font-weight:600;margin-bottom:22px;display:flex;align-items:center;gap:10px}}
 .section-title .count{{font-size:12px;color:var(--text3);font-weight:400}}
 .subsection-title{{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;
   letter-spacing:0.5px;margin-bottom:10px;margin-top:16px}}
@@ -1125,8 +1205,13 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif
 .filter-btn[data-sev="CRITICAL"].active{{border-color:var(--red);color:var(--red);background:rgba(248,81,73,.08)}}
 .filter-btn[data-sev="HIGH"].active{{border-color:var(--orange);color:var(--orange);background:rgba(240,136,62,.08)}}
 .filter-btn[data-sev="MEDIUM"].active{{border-color:var(--yellow);color:var(--yellow);background:rgba(227,179,65,.08)}}
-.finding-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}}
-.finding-card:hover{{border-color:var(--border2)}}
+.finding-card{{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden;transition:border-color .15s,box-shadow .15s}}
+.finding-card:hover{{border-color:var(--border2);box-shadow:0 0 0 1px rgba(88,166,255,.12),0 4px 18px rgba(0,0,0,.3)}}
+.finding-card[data-severity="CRITICAL"]{{border-left-color:#f85149}}
+.finding-card[data-severity="HIGH"]{{border-left-color:#f0883e}}
+.finding-card[data-severity="MEDIUM"]{{border-left-color:#e3b341}}
+.finding-card[data-severity="LOW"]{{border-left-color:#58a6ff}}
+.finding-card[data-severity="INFO"]{{border-left-color:#6e7681}}
 .finding-top{{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;gap:10px;flex-wrap:wrap}}
 .finding-left{{display:flex;align-items:center;gap:8px;flex:1;min-width:0}}
 .finding-name{{font-weight:600;font-size:13px}}
@@ -1163,10 +1248,11 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .ep-cat{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px}}
 .ep-count{{font-size:11px;color:var(--text3)}}
 .ep-table{{width:100%;border-collapse:collapse;border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);overflow:hidden}}
-.ep-table th{{background:#0a0d13;padding:6px 11px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}}
+.ep-table th{{background:#0a0d13;padding:6px 11px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2}}
 .ep-table td{{padding:7px 11px;border-bottom:1px solid var(--border);vertical-align:middle}}
 .ep-table tr:last-child td{{border-bottom:none}}
-.ep-table tr:hover td{{background:rgba(88,166,255,.03)}}
+.ep-table tr:nth-child(even) td{{background:rgba(255,255,255,.015)}}
+.ep-table tr:hover td{{background:rgba(88,166,255,.05)}}
 .ep-url{{font-size:11px;word-break:break-all}}
 .method-badge{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:0.2px;display:inline-block;white-space:nowrap}}
 .method-get{{background:#1a3a1a;color:#3fb950}}.method-post{{background:#3a1a1a;color:#f85149}}
@@ -1262,7 +1348,21 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
 @media(max-width:700px){{.two-col{{grid-template-columns:1fr}}}}
 /* ── Source maps ── */
-.sm-summary{{font-size:12px;color:var(--text2);margin-bottom:10px;padding:8px 12px;background:var(--surface2);border-radius:var(--radius-sm)}}
+.sm-summary{{font-size:12px;color:var(--text2);margin-bottom:10px;padding:8px 12px;background:var(--surface2);border-radius:var(--radius-sm);display:flex;flex-wrap:wrap;gap:8px;align-items:center}}
+.sm-stat{{display:inline-block;padding:2px 8px;border-radius:10px;background:var(--surface3);color:var(--text2);font-size:11px}}
+.sm-stat-ok{{background:rgba(34,197,94,.12);color:#4ade80}}
+.sm-stat-src{{background:rgba(96,165,250,.12);color:#60a5fa}}
+.sm-stat-dim{{background:transparent;color:var(--text3)}}
+.sm-stat-err{{background:rgba(248,81,73,.12);color:#f87171}}
+.sm-js{{color:var(--text1);font-size:11px}}
+.sm-map{{color:var(--text2);font-size:11px}}
+.sm-names{{margin:4px 0 0 0;padding:0;list-style:none}}
+.sm-names li{{font-size:10px;color:var(--text3);padding:1px 0}}
+.sm-names code{{font-size:10px;color:#86efac}}
+.badge{{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}}
+.badge-inline{{background:rgba(167,139,250,.15);color:#a78bfa}}
+.badge-external{{background:rgba(96,165,250,.15);color:#60a5fa}}
+.dim{{color:var(--text3)}}
 /* ── Validation ── */
 .val-summary{{font-size:12px;color:var(--text2);margin-bottom:10px}}
 /* ── GraphQL ── */
@@ -1274,10 +1374,11 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 .gql-error{{color:var(--red);font-size:12px;padding:8px;background:rgba(248,81,73,.06);border-radius:3px;margin-bottom:8px}}
 /* ── Data table ── */
 .data-table{{width:100%;border-collapse:collapse;font-size:12px}}
-.data-table th{{background:#0a0d13;padding:7px 11px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}}
+.data-table th{{background:#0a0d13;padding:7px 11px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2}}
 .data-table td{{padding:8px 11px;border-bottom:1px solid var(--border);vertical-align:top}}
 .data-table tr:last-child td{{border-bottom:none}}
-.data-table tr:hover td{{background:rgba(255,255,255,.015)}}
+.data-table tr:nth-child(even) td{{background:rgba(255,255,255,.012)}}
+.data-table tr:hover td{{background:rgba(88,166,255,.05)}}
 /* ── Graph ── */
 #graph-container{{width:100%;height:680px;background:#070a10;border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}}
 #graph-svg{{width:100%;height:100%}}
@@ -1338,6 +1439,63 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
 ::-webkit-scrollbar{{width:5px;height:5px}}
 ::-webkit-scrollbar-track{{background:var(--bg)}}
 ::-webkit-scrollbar-thumb{{background:var(--border2);border-radius:3px}}
+/* ── Copy button ── */
+.copy-btn{{position:absolute;top:6px;right:6px;background:rgba(30,37,50,.9);border:1px solid var(--border2);color:var(--text3);padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;opacity:0;transition:opacity .15s,color .15s;font-family:inherit}}
+.evidence-block,.context-block{{position:relative}}
+.evidence-block:hover .copy-btn,.context-block:hover .copy-btn{{opacity:1}}
+.copy-btn:hover{{color:var(--accent);border-color:var(--accent)}}
+.copy-btn.copied{{color:var(--green);border-color:var(--green)}}
+/* ── Sidebar target card ── */
+.sidebar-target{{margin:10px 10px 0;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);font-size:11px}}
+.sidebar-target-url{{color:var(--accent);font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:10.5px;word-break:break-all;font-weight:500;margin-bottom:5px}}
+.sidebar-target-row{{display:flex;align-items:center;gap:6px;color:var(--text3)}}
+.sidebar-status-dot{{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);flex-shrink:0}}
+.sidebar-status-dot.warn{{background:var(--orange);box-shadow:0 0 6px var(--orange)}}
+.sidebar-duration{{font-size:10px;color:var(--text3)}}
+/* ── Risk score banner ── */
+.risk-banner{{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;margin-bottom:18px;border-radius:var(--radius);border:1px solid;gap:16px;flex-wrap:wrap}}
+.risk-banner.risk-critical{{background:rgba(248,81,73,.07);border-color:rgba(248,81,73,.25)}}
+.risk-banner.risk-high{{background:rgba(240,136,62,.07);border-color:rgba(240,136,62,.25)}}
+.risk-banner.risk-medium{{background:rgba(227,179,65,.07);border-color:rgba(227,179,65,.2)}}
+.risk-banner.risk-low{{background:rgba(88,166,255,.07);border-color:rgba(88,166,255,.2)}}
+.risk-banner.risk-clean{{background:rgba(63,185,80,.06);border-color:rgba(63,185,80,.18)}}
+.risk-banner-left{{display:flex;align-items:center;gap:14px}}
+.risk-score-val{{font-size:38px;font-weight:800;line-height:1;letter-spacing:-2px}}
+.risk-banner.risk-critical .risk-score-val{{color:var(--red)}}
+.risk-banner.risk-high .risk-score-val{{color:var(--orange)}}
+.risk-banner.risk-medium .risk-score-val{{color:var(--yellow)}}
+.risk-banner.risk-low .risk-score-val{{color:var(--accent)}}
+.risk-banner.risk-clean .risk-score-val{{color:var(--green)}}
+.risk-score-label{{font-size:10px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);font-weight:600;margin-top:2px}}
+.risk-score-desc{{font-size:12px;color:var(--text2);max-width:380px;line-height:1.5}}
+.risk-score-formula{{font-size:10px;color:var(--text3);margin-top:3px;font-family:'SF Mono','Fira Code',Consolas,monospace}}
+/* ── Topbar scan mode badge ── */
+.mode-badge{{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:0.3px;white-space:nowrap}}
+.mode-headless{{color:#39d0d8;border:1px solid rgba(57,208,216,.3);background:rgba(57,208,216,.08)}}
+.mode-auth{{color:#3fb950;border:1px solid rgba(63,185,80,.3);background:rgba(63,185,80,.08)}}
+.mode-passive{{color:#8b949e;border:1px solid rgba(139,148,158,.3);background:rgba(139,148,158,.08)}}
+.print-btn{{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:0.3px;white-space:nowrap;color:var(--text3);border:1px solid var(--border2);background:none;cursor:pointer;transition:all .15s;font-family:inherit}}
+.print-btn:hover{{color:var(--text);border-color:var(--text3)}}
+/* ── Graph search ── */
+.graph-search{{flex:1;max-width:220px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;font-family:inherit;outline:none;transition:border-color .15s}}
+.graph-search::placeholder{{color:var(--text3)}}
+.graph-search:focus{{border-color:var(--accent)}}
+/* ── Section fade-in ── */
+@keyframes fadeInUp{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}
+.section.active{{animation:fadeInUp .22s ease}}
+/* ── Empty state pulse ── */
+@keyframes pulseGlow{{0%,100%{{opacity:.6;transform:scale(1)}}50%{{opacity:1;transform:scale(1.08)}}}}
+.empty-state .empty-icon{{animation:pulseGlow 2.4s ease-in-out infinite}}
+/* ── Print ── */
+@media print{{
+  .sidebar,.topbar,.graph-controls,.print-btn,.filter-btn{{display:none!important}}
+  .main{{margin-left:0}}
+  .section{{display:block!important}}
+  body{{background:#fff;color:#111;font-size:11px}}
+  .finding-card,.vuln-lib-card,.card{{border:1px solid #ccc;box-shadow:none}}
+  a{{color:#0066cc}}
+  #graph-container{{display:none}}
+}}
 </style>
 </head>
 <body>
@@ -1347,21 +1505,28 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <div class="logo-mark">Bundle<span>Spy</span></div>
     <div class="logo-sub">Attack Surface Intelligence</div>
   </div>
+  <div class="sidebar-target">
+    <div class="sidebar-target-url">{_e(result.target_url)}</div>
+    <div class="sidebar-target-row">
+      <div class="sidebar-status-dot{' warn' if (critical or high) else ''}"></div>
+      <span class="sidebar-duration">{dur}</span>
+    </div>
+  </div>
   <nav>
     <div class="nav-group">
       <div class="nav-label">Report</div>
-      <button class="nav-item active" onclick="show('overview',this)"><span class="nav-icon">◈</span>Overview</button>
-      <button class="nav-item" onclick="show('graph',this)"><span class="nav-icon">⬡</span>Attack Surface</button>
+      <button class="nav-item active" onclick="show('overview',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></span>Overview</button>
+      <button class="nav-item" onclick="show('graph',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="4" r="2"/><circle cx="3" cy="12" r="2"/><circle cx="13" cy="12" r="2"/><line x1="8" y1="6" x2="3" y2="10"/><line x1="8" y1="6" x2="13" y2="10"/><line x1="5" y1="12" x2="11" y2="12"/></svg></span>Attack Surface</button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Intelligence</div>
-      <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon">⚑</span>Secret Intelligence<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
-      <button class="nav-item" onclick="show('endpoints',this)"><span class="nav-icon">⇄</span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
+      <button class="nav-item" onclick="show('findings',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1l1.5 4.5H14l-3.7 2.7 1.4 4.3L8 10l-3.7 2.5 1.4-4.3L2 5.5h4.5z"/></svg></span>Secret Intelligence<span class="nav-badge {_find_badge_cls}">{len(real)}</span></button>
+      <button class="nav-item" onclick="show('endpoints',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 8h14M10 4l4 4-4 4"/></svg></span>Endpoints<span class="nav-badge">{len(result.endpoints)}</span></button>
       {_nav_mapper}
       {_nav_state}
-      <button class="nav-item" onclick="show('assets',this)"><span class="nav-icon">◻</span>JS Assets<span class="nav-badge">{len(result.js_files)}</span></button>
-      <button class="nav-item" onclick="show('vulnlibs',this)"><span class="nav-icon">⚠</span>Vuln Libraries<span class="nav-badge {_lib_badge_cls}">{len(lib_findings)}</span></button>
-      <button class="nav-item" onclick="show('infra',this)"><span class="nav-icon">⌖</span>Infrastructure<span class="nav-badge">{len(result.infrastructure)}</span></button>
+      <button class="nav-item" onclick="show('assets',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h12M2 12h7"/></svg></span>JS Assets<span class="nav-badge">{len(result.js_files)}</span></button>
+      <button class="nav-item" onclick="show('vulnlibs',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2L8 9M8 11v2"/><circle cx="8" cy="13" r=".5" fill="currentColor"/><path d="M3 14h10L8 2 3 14z"/></svg></span>Vuln Libraries<span class="nav-badge {_lib_badge_cls}">{len(lib_findings)}</span></button>
+      <button class="nav-item" onclick="show('infra',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="10" width="12" height="4" rx="1"/><rect x="2" y="6" width="12" height="3" rx="1"/><path d="M6 10V9M10 10V9"/></svg></span>Infrastructure<span class="nav-badge">{len(result.infrastructure)}</span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Discovery</div>
@@ -1375,7 +1540,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     </div>
     <div class="nav-group">
       <div class="nav-label">Quality</div>
-      <button class="nav-item" onclick="show('coverage',this)"><span class="nav-icon">▤</span>Coverage</button>
+      <button class="nav-item" onclick="show('coverage',this)"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12L6 7l3 3 2-4 3 4"/></svg></span>Coverage</button>
     </div>
   </nav>
   <div class="sidebar-footer">BundleSpy v1.0.0</div>
@@ -1387,7 +1552,11 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
       <div class="topbar-url">{_e(result.target_url)}</div>
       <div class="topbar-meta">Started {scan_start} &nbsp;·&nbsp; Duration {dur} &nbsp;·&nbsp; Report generated {gen_time}</div>
     </div>
-    <div style="display:flex;gap:8px;flex-shrink:0">{_sev_badge}</div>
+    <div style="display:flex;gap:8px;flex-shrink:0;align-items:center">
+      {'<span class="mode-badge mode-headless">HEADLESS</span>' if _headless_used else ('<span class="mode-badge mode-auth">AUTH</span>' if _auth_used else '<span class="mode-badge mode-passive">PASSIVE</span>')}
+      {_sev_badge}
+      <button class="print-btn" onclick="window.print()">⎙ Print</button>
+    </div>
   </div>
 
   <div class="content">
@@ -1395,6 +1564,19 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
     <!-- OVERVIEW -->
     <div id="section-overview" class="section active">
       <div class="section-title">Overview</div>
+      <div class="risk-banner {_risk_cls}">
+        <div class="risk-banner-left">
+          <div>
+            <div class="risk-score-val">{_risk_score}</div>
+            <div class="risk-score-label">Risk Score</div>
+          </div>
+          <div>
+            <div style="font-size:13px;font-weight:700;color:var(--text)">{_risk_label}</div>
+            <div class="risk-score-desc">{len(critical)} critical · {len(high)} high · {len(medium)} medium · {len(low)} low secrets &nbsp;|&nbsp; {lib_crit} lib-crit · {lib_high} lib-high CVEs</div>
+            <div class="risk-score-formula">{_risk_formula}</div>
+          </div>
+        </div>
+      </div>
       <div class="overview-grid">
         <div class="metric-card {'c-red' if critical else 'c-grey'}"><div class="metric-num">{len(critical)}</div><div class="metric-lbl">Critical</div></div>
         <div class="metric-card {'c-orange' if high else 'c-grey'}"><div class="metric-num">{len(high)}</div><div class="metric-lbl">High</div></div>
@@ -1442,6 +1624,7 @@ code{{font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:11px;backgr
         <div class="graph-legend" id="graph-legend" style="margin:0;flex:1">
           {_legend_html}
         </div>
+        <input class="graph-search" type="text" placeholder="Search nodes..." oninput="searchGraph(this.value)" title="Filter nodes by label or type">
         <button class="graph-btn" id="btn-cluster" onclick="toggleCluster(this)" title="Cluster by type" style="width:auto;padding:0 10px;font-size:10px;letter-spacing:.4px;font-weight:600">GROUP</button>
         <button class="graph-btn" id="btn-labels" onclick="toggleLabels(this)" title="Toggle edge labels" style="width:auto;padding:0 10px;font-size:10px;letter-spacing:.4px;font-weight:600">LABELS</button>
       </div>
@@ -2012,6 +2195,33 @@ document.getElementById('graph-svg').addEventListener('click',e=>{{
     if(gActiveKinds.size) {{ gActiveKinds.clear(); document.querySelectorAll('.legend-item').forEach(el=>el.classList.remove('filtered')); applyKindFilter(); }}
   }}
 }});
+// ── Copy to clipboard ─────────────────────────────────────────────────────────
+function copyText(btn, text) {{
+  navigator.clipboard.writeText(text).then(() => {{
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {{ btn.textContent = 'Copy'; btn.classList.remove('copied'); }}, 1800);
+  }}).catch(() => {{
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied'; btn.classList.add('copied');
+    setTimeout(() => {{ btn.textContent = 'Copy'; btn.classList.remove('copied'); }}, 1800);
+  }});
+}}
+
+// ── Graph search ──────────────────────────────────────────────────────────────
+function searchGraph(val) {{
+  if (!gG) return;
+  const q = val.trim().toLowerCase();
+  gG.selectAll('.gnode').each(function(d) {{
+    const match = !q || (d.label||'').toLowerCase().includes(q) || (d.kind||'').toLowerCase().includes(q);
+    d3.select(this).select('circle').attr('opacity', match ? 1 : 0.15);
+    d3.select(this).select('text').attr('opacity', match ? 1 : 0.08);
+  }});
+  gG.selectAll('line').attr('opacity', q ? 0.07 : 0.5);
+}}
 </script>
 </body>
 </html>"""
