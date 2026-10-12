@@ -991,35 +991,25 @@ def run_scan(args) -> int:
             )
 
     # ── Source maps ───────────────────────────────────────────────────────────
-    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "sources_path_only": 0, "items": []}
+    sm_details = {"discovered": 0, "valid": 0, "recovered": 0, "sources": 0, "sources_path_only": 0, "errors": 0, "items": []}
     if args.source_maps:
         if not args.quiet:
             phase("Analyzing source maps")
-        from .discovery.source_maps import process_js_file
-        recovered_files = []
-        for js_file in list(all_js):
-            result = process_js_file(js_file, fetcher, scope)
-            if result:
-                sm_details["discovered"] += 1
-                if result.recovered_files:
-                    _path_only = sum(1 for f in result.recovered_files if not f.content)
-                    sm_details["valid"]            += 1
-                    sm_details["recovered"]        += 1
-                    sm_details["sources"]          += len(result.recovered_files)
-                    sm_details["sources_path_only"] += _path_only
-                    sm_details["items"].append({
-                        "js":        js_file.url.split("/")[-1],
-                        "map":       result.map_url.split("/")[-1] if not result.map_url.startswith("data:") else "inline",
-                        "sources":   len(result.recovered_files),
-                        "path_only": _path_only,
-                    })
-                    recovered_files.extend(result.recovered_files)
+        from .discovery.source_maps import process_js_files as _process_source_maps
+        # Pass only JS files with content - skip inline scripts and already-recovered sources
+        _sm_candidates = [
+            js for js in all_js
+            if js.content and not js.url.startswith("sourcemap://")
+        ]
+        recovered_files, sm_details = _process_source_maps(_sm_candidates, fetcher, scope)
         all_js.extend(recovered_files)
         extras["source_map_details"] = sm_details
         extras["recovered_sources"]  = len(recovered_files)
         if not args.quiet:
-            phase_done("Source map analysis",
-                f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered")
+            _sm_label = f"{sm_details['discovered']} maps  {len(recovered_files)} sources recovered"
+            if sm_details.get("errors"):
+                _sm_label += f"  {sm_details['errors']} failed"
+            phase_done("Source map analysis", _sm_label)
 
     # ── Webpack chunks ────────────────────────────────────────────────────────
     chunk_stats = {"runtime": False, "discovered": 0, "downloaded": 0, "manifest": ""}
