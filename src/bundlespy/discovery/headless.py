@@ -3301,7 +3301,7 @@ class HeadlessEngine:
         extra_headers:      dict       = None,
         seen_hashes:        Set[str]   = None,
         # ── Katana enhancements ─────────────────────────────────────────────
-        max_failures:       int   = 10,    # MaxFailureCount: halt after N consecutive action failures
+        max_failures:       int   = 30,    # MaxFailureCount: halt after N consecutive hard failures
         max_crawl_duration: int   = 0,     # MaxCrawlDuration in seconds (0 = unlimited); starts AFTER auth
         enable_diagnostics: bool  = False, # DiagnosticsWriter: screenshots + action log
         slow_mo:            int   = 0,     # SlowMotion: ms to sleep between interactions (0 = off)
@@ -7516,10 +7516,38 @@ class HeadlessEngine:
                     return new_urls, _oc_count, True, False, False
 
                 except Exception as e:
+                    _err_str = str(e).lower()
                     if _job_timed_out.is_set():
                         logger.debug("Worker for %s caught exception after job timeout: %s", url, e)
-                    else:
-                        logger.debug("Error visiting %s: %s", url, e)
+                        # Job timed out - real failure, penalize
+                        return [], 0, False, False, False
+                    # Soft navigation errors that aren't real failures:
+                    # - net::ERR_ABORTED: server closed connection (often on redirects or downloads)
+                    # - TimeoutError on pages that still partially loaded (SPA hydration, slow CDN)
+                    # - net::ERR_CONNECTION_RESET / REFUSED: server blip, not a crawl failure
+                    # These shouldn't stop the BFS after 10 occurrences
+                    _soft_errors = (
+                        "net::err_aborted" in _err_str,
+                        "net::err_connection_reset" in _err_str,
+                        "net::err_connection_refused" in _err_str,
+                        "net::err_connection_closed" in _err_str,
+                        "net::err_empty_response" in _err_str,
+                        # Timeout after page already started loading - treat as partial success
+                        ("timeout" in _err_str and slot is not None and slot_page is not None and
+                         slot_page.url and slot_page.url not in ("about:blank", "")),
+                    )
+                    if any(_soft_errors):
+                        logger.debug("Soft navigation error for %s (not penalizing): %s", url, e)
+                        # Still try to extract what loaded before the error
+                        try:
+                            if slot is not None:
+                                _partial_routes = self._flush_page_intel(slot_page, url)
+                                _partial_urls   = self._build_urls(_partial_routes)
+                                return _partial_urls, 0, True, False, False
+                        except Exception:
+                            pass
+                        return [], 0, True, False, False
+                    logger.debug("Error visiting %s: %s", url, e)
                     return [], 0, False, False, False
                 finally:
                     # Signal job is done BEFORE cancelling timer - eliminates the
@@ -8116,7 +8144,7 @@ def collect_headless_full(
     extra_headers:        dict           = None,
     seen_hashes:          set            = None,
     # Katana enhancements (session 1)
-    max_failures:         int            = 10,
+    max_failures:         int            = 30,
     max_crawl_duration:   int            = 0,
     enable_diagnostics:   bool           = False,
     slow_mo:              int            = 0,
