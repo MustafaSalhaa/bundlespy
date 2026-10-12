@@ -7532,9 +7532,9 @@ class HeadlessEngine:
                         "net::err_connection_refused" in _err_str,
                         "net::err_connection_closed" in _err_str,
                         "net::err_empty_response" in _err_str,
-                        # Timeout after page already started loading - treat as partial success
-                        ("timeout" in _err_str and slot is not None and slot_page is not None and
-                         slot_page.url and slot_page.url not in ("about:blank", "")),
+                        # Timeout: treat as soft regardless of page state -
+                        # a page that never loaded isn't a hard route failure
+                        "timeout" in _err_str,
                     )
                     if any(_soft_errors):
                         logger.debug("Soft navigation error for %s (not penalizing): %s", url, e)
@@ -7685,7 +7685,8 @@ class HeadlessEngine:
                                 _wf.cancel()
                                 _inflight.pop(_wf, None)
                                 _inflight_started.pop(_wf, None)
-                                self._consecutive_failures += 1
+                                # Watchdog drops a stalled worker - not a route failure,
+                                # just a page that took too long; don't penalize BFS counter
                         continue
 
                     for _fut in _done:
@@ -7694,8 +7695,15 @@ class HeadlessEngine:
                         try:
                             new_urls, oc_count, success, sess_lost, auth_expired = _fut.result()
                         except Exception as _fe:
-                            logger.debug("Future error for %s: %s", _burl, _fe)
-                            self._consecutive_failures += 1
+                            _fe_str = str(_fe).lower()
+                            # CancelledError comes from watchdog cancel() - not a route failure
+                            _cancelled = (
+                                "cancelled" in _fe_str or
+                                isinstance(_fe, getattr(__builtins__, "CancelledError", type(None)))
+                            )
+                            if not _cancelled:
+                                logger.debug("Future error for %s: %s", _burl, _fe)
+                                self._consecutive_failures += 1
                             continue
 
                         if sess_lost:
