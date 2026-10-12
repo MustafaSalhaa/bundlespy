@@ -145,6 +145,10 @@ other:
     _hg.add_argument("--dom-wait-time", type=int, default=1, metavar="SECS",
                      help="Extra seconds of DOM quiet after DOMContentLoaded (default: 1)\n"
                           "Increase on slow SPAs. Only applies to domcontentloaded strategy.")
+    _hg.add_argument("--max-failures", type=int, default=30, metavar="N",
+                     help="Halt BFS after N consecutive hard page failures (default: 30)\n"
+                          "  Increase for apps with many POST-only routes or aggressive rate-limiting.\n"
+                          "  Use 0 to disable the limit entirely.")
 
     # Operational
     _xg = scan.add_argument_group("operational")
@@ -996,6 +1000,7 @@ def run_scan(args) -> int:
             proxy              = _proxy,
             user_agent         = _custom_ua,
             storage_init_script = _storage_init_script,
+            max_failures       = getattr(args, "max_failures", 30) or 999999,
         )
         headless_files     = headless_result.get("js_files", [])
         # Tag all browser-captured files so the inventory can distinguish them
