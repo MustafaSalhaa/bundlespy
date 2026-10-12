@@ -3328,7 +3328,9 @@ class HeadlessEngine:
         num_browsers:              int   = 5,     # Parallel browser instances (default 5)
         # Operational flags (Step 9)
         proxy:                     str   = "",    # HTTP/HTTPS/SOCKS proxy URL for all browser traffic
-        user_agent:                str   = "",    # Custom UA — overrides the default Chrome UA
+        user_agent:                str   = "",    # Custom UA - overrides the default Chrome UA
+        # Auto-login storage injection
+        storage_init_script:       str   = "",    # JS to inject before page load - sets localStorage/sessionStorage
     ):
         self.target_url  = target_url
         self.scope       = scope
@@ -3344,6 +3346,8 @@ class HeadlessEngine:
         # Operational: proxy routes all browser traffic; user_agent overrides default Chrome UA
         self._proxy        = proxy.strip() if proxy else ""
         self._user_agent   = user_agent.strip() if user_agent else ""
+        # Storage init script injected before page JS - used to seed localStorage/sessionStorage from auto-login
+        self._storage_init_script = storage_init_script.strip() if storage_init_script else ""
 
         # Katana enhancement params
         self.max_failures          = max(1, max_failures)
@@ -7293,12 +7297,17 @@ class HeadlessEngine:
                         "via_cdp":      True,
                     })
 
+            # Combine the network intercept script with any storage injection from auto-login
+            _combined_init_script = INTERCEPT_JS
+            if self._storage_init_script:
+                _combined_init_script = self._storage_init_script + "\n\n" + INTERCEPT_JS
+
             _browser_pool = BrowserPool(
                 num_browsers  = self.num_browsers,
                 browser_args  = _pool_browser_args,
                 ctx_kwargs    = kwargs,
                 cookies       = self.cookies,
-                init_script   = INTERCEPT_JS,
+                init_script   = _combined_init_script,
                 block_fn      = self._should_block,
                 response_fn   = _pool_response_fn,
                 # Gap 2: wire up CDP handlers only when raw capture is on
@@ -8136,6 +8145,8 @@ def collect_headless_full(
     # Operational flags (Step 9)
     proxy:                str            = "",
     user_agent:           str            = "",
+    # Auto-login storage injection
+    storage_init_script:  str            = "",
 ) -> dict:
     """
     Full headless scan — all Katana enhancements exposed.
@@ -8166,6 +8177,8 @@ def collect_headless_full(
                            (JS fetch calls, JSON hrefs, CSS url(), sourcemaps — default True).
     num_browsers:          number of parallel browser instances in the pool for Phase 2 BFS
                            (default 5; lower to 1-2 when WAF rate-limiting is a concern).
+    storage_init_script:   JS injected before every page load - seeds localStorage/sessionStorage
+                           captured from auto-login (used with --username/--password flow).
     """
     engine = HeadlessEngine(
         target_url             = url,
@@ -8201,6 +8214,7 @@ def collect_headless_full(
         num_browsers           = num_browsers,
         proxy                  = proxy,
         user_agent             = user_agent,
+        storage_init_script    = storage_init_script,
     )
     if seed_urls:
         engine.seed_urls = list(seed_urls)
