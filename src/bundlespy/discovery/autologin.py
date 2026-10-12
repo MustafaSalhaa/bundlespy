@@ -23,16 +23,20 @@ USERNAME_NAMES = {
     "username", "user", "login", "email", "mail", "uname",
     "user_name", "user-name", "userid", "user_id",
     "account", "identifier", "handle", "loginid",
+    # common autocomplete values
+    "email", "username", "current-password",
 }
 
 PASSWORD_NAMES = {
     "password", "pass", "passwd", "pwd", "secret",
     "password1", "pass1", "current_password", "user_password",
+    "current-password",
 }
 
 CSRF_NAMES = {
     "_token", "csrf", "csrf_token", "csrfmiddlewaretoken",
     "_csrf", "xsrf", "authenticity_token", "__requestverificationtoken",
+    "x-csrf-token", "xsrf-token",
 }
 
 MFA_NAMES = {
@@ -40,14 +44,28 @@ MFA_NAMES = {
     "two_factor", "2fa", "token", "one_time_password",
 }
 
+# Keywords in aria-label / placeholder that signal username or password
+_USERNAME_HINTS = {"username", "user name", "email", "e-mail", "login", "account", "identifier"}
+_PASSWORD_HINTS = {"password", "pass", "passphrase", "secret"}
 
-def _field_type(name: str, input_type: str) -> Optional[str]:
-    """Classify an input field. Returns 'username', 'password', 'csrf', 'mfa', or None."""
-    n = (name or "").lower().replace("-", "_")
-    t = (input_type or "text").lower()
 
+def _field_type(name: str, input_type: str, aria_label: str = "", placeholder: str = "", autocomplete: str = "") -> Optional[str]:
+    """
+    Classify an input field.
+    Checks name/id, then input type, then aria-label, placeholder, autocomplete.
+    Returns 'username', 'password', 'csrf', 'mfa', or None.
+    """
+    n  = (name or "").lower().replace("-", "_")
+    t  = (input_type or "text").lower()
+    al = (aria_label or "").lower()
+    ph = (placeholder or "").lower()
+    ac = (autocomplete or "").lower()
+
+    # type=password is unambiguous
     if t == "password":
         return "password"
+
+    # name/id match
     if n in PASSWORD_NAMES:
         return "password"
     if n in USERNAME_NAMES or t == "email":
@@ -56,6 +74,22 @@ def _field_type(name: str, input_type: str) -> Optional[str]:
         return "csrf"
     if n in MFA_NAMES:
         return "mfa"
+
+    # autocomplete attribute - very reliable signal (React/Vue often set this)
+    if ac in ("current-password", "new-password"):
+        return "password"
+    if ac in ("username", "email"):
+        return "username"
+
+    # aria-label / placeholder fallback - covers React controlled components
+    # that render <input aria-label="Email" /> with no name attribute
+    for hint in _PASSWORD_HINTS:
+        if hint in al or hint in ph:
+            return "password"
+    for hint in _USERNAME_HINTS:
+        if hint in al or hint in ph:
+            return "username"
+
     return None
 
 
@@ -93,14 +127,12 @@ def _find_login_form(page):
             inputs = form.query_selector_all("input, button[type='submit'], button:not([type])")
             for inp in inputs:
                 try:
-                    itype = (inp.get_attribute("type") or "text").lower()
-                    iname = (
-                        inp.get_attribute("name") or
-                        inp.get_attribute("id") or
-                        inp.get_attribute("autocomplete") or
-                        inp.get_attribute("placeholder") or ""
-                    )
-                    kind = _field_type(iname, itype)
+                    itype  = (inp.get_attribute("type") or "text").lower()
+                    iname  = (inp.get_attribute("name") or inp.get_attribute("id") or "")
+                    iac    = (inp.get_attribute("autocomplete") or "")
+                    iph    = (inp.get_attribute("placeholder") or "")
+                    ial    = (inp.get_attribute("aria-label") or "")
+                    kind   = _field_type(iname, itype, aria_label=ial, placeholder=iph, autocomplete=iac)
 
                     if kind == "password":
                         fields["password"] = inp
@@ -130,24 +162,35 @@ def _find_login_form(page):
 
 def _find_formless_login(page):
     """
-    Fallback for pages with no <form> tag — find a bare password input + submit button.
+    Fallback for pages with no <form> tag - find bare password input + submit button.
+    Covers React/Vue/Angular SPAs that render login UI without a <form> wrapper.
     Returns field_map dict (same shape as _find_login_form's second return value).
     """
     try:
         pw = page.query_selector("input[type='password']")
         if not pw:
             return {}
-        # Find a nearby button or input[type=submit/button]
+
+        # Submit button - prioritize visible buttons near the password field
         submit = (
-            page.query_selector("button[onclick]") or
             page.query_selector("button[type='submit']") or
-            page.query_selector("button:not([type])") or
             page.query_selector("input[type='submit']") or
+            page.query_selector("button[onclick]") or
+            page.query_selector("button:not([type='button']):not([type='reset'])") or
             page.query_selector("input[type='button']")
         )
-        # Username: optional bare text/email input
+
+        # Username: prefer email, then aria-labeled text inputs
         username = (
             page.query_selector("input[type='email']") or
+            page.query_selector("input[autocomplete='username']") or
+            page.query_selector("input[autocomplete='email']") or
+            page.query_selector("input[type='text'][name*='user']") or
+            page.query_selector("input[type='text'][name*='email']") or
+            page.query_selector("input[type='text'][aria-label*='ser']") or
+            page.query_selector("input[type='text'][aria-label*='mail']") or
+            page.query_selector("input[type='text'][placeholder*='ser']") or
+            page.query_selector("input[type='text'][placeholder*='mail']") or
             page.query_selector("input[type='text']")
         )
         return {
@@ -433,31 +476,57 @@ def auto_login(
 
         result["final_url"] = page.url
 
-        # Step 7: Check if still on login page
-        # For formless/JS-only auth the URL never changes — check DOM instead
-        if result["method"] == "formless":
-            # Success = password input gone/hidden OR a new content section appeared
+        # Step 7: Verify login outcome
+        # Three success signals checked in order:
+        #   1. URL changed away from login page (most reliable)
+        #   2. Password field gone from DOM (SPA in-place render)
+        #   3. Success indicator visible in DOM (dashboard/welcome/avatar elements)
+        # Failure: still on login page + error message visible
+
+        final_url_changed = result["final_url"] != pre_submit_url
+
+        if final_url_changed and not _is_still_on_login(page, login_url):
+            result["success"] = True
+            step(f"Login successful - redirected to {result['final_url']}")
+        else:
+            # SPA check: password field removed from DOM = successful JS auth
+            pw_gone = False
             try:
-                pw_visible = page.is_visible("input[type='password']")
+                pw_gone = not page.is_visible("input[type='password']")
             except Exception:
-                pw_visible = True
-            if not pw_visible:
+                pass
+
+            # Success indicator: elements that typically appear after login
+            # (nav avatar, dashboard header, account menu, logout link)
+            spa_success = False
+            if not pw_gone:
+                _success_selectors = [
+                    "[data-testid*='avatar']", "[data-testid*='account']",
+                    "[aria-label*='account']", "[aria-label*='profile']",
+                    ".user-menu", ".account-menu", "#user-nav", "#account-nav",
+                    "a[href*='/logout']", "a[href*='/signout']", "a[href*='/log-out']",
+                    ".dashboard", "#dashboard", "[class*='dashboard']",
+                    "[class*='welcome']", "[class*='logged-in']",
+                ]
+                for sel in _success_selectors:
+                    try:
+                        if page.query_selector(sel) and page.is_visible(sel):
+                            spa_success = True
+                            step(f"Login successful - success indicator visible: {sel}")
+                            break
+                    except Exception:
+                        pass
+
+            if pw_gone:
                 result["success"] = True
-                step("Login successful — password field no longer visible (JS auth)")
+                step("Login successful - password field no longer visible (SPA auth)")
+            elif spa_success:
+                result["success"] = True
             else:
-                # Also check for error text visible on page
                 error_msg = _detect_error_message(page)
                 result["success"]       = False
-                result["error_message"] = error_msg or "JS auth: password field still visible after submit"
-                step(f"Login failed — {result['error_message']}")
-        elif _is_still_on_login(page, login_url):
-            error_msg = _detect_error_message(page)
-            result["success"]       = False
-            result["error_message"] = error_msg or "Still on login page after submit"
-            step(f"Login failed — still on login page. Error: {error_msg or 'none detected'}")
-        else:
-            result["success"] = True
-            step(f"Login successful — redirected to {result['final_url']}")
+                result["error_message"] = error_msg or "Still on login page after submit — check credentials"
+                step(f"Login failed - {result['error_message']}")
 
         # Step 8: Capture session regardless (partial capture on failure is useful)
         step("Capturing session cookies and storage")
@@ -480,6 +549,19 @@ def auto_login(
         logger.debug("AutoLogin exception", exc_info=True)
 
     return result
+
+
+def build_login_spec(username: str, password: str, login_url: str = "") -> str:
+    """
+    Build a --login compatible spec string from separate --username / --password flags.
+    login_url is optional - if not provided, the target URL is used (cli.py handles that).
+    """
+    parts = []
+    if login_url:
+        parts.append(f"url={login_url}")
+    parts.append(f"user={username}")
+    parts.append(f"pass={password}")
+    return ",".join(parts)
 
 
 def parse_login_arg(login_str: str) -> dict:
