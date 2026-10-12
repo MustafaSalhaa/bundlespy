@@ -7195,16 +7195,34 @@ class HeadlessEngine:
                         pass
 
             # Detect page type from root page - drives adaptive wait in Phase 2.
-            # Angular/React/Vue markers = "spa"; plain HTML body = "static".
+            # Angular/React/Vue/Inertia markers = "spa"; plain HTML = "static".
             try:
                 _spa_detected = bool(page.evaluate("""
                     (function() {
+                        // Angular
                         if (document.querySelector('[ng-version]') ||
                             document.querySelector('app-root') ||
                             document.querySelector('router-outlet')) return true;
+                        // React
                         if (document.querySelector('[data-reactroot]') ||
                             document.querySelector('#root > [data-reactroot]')) return true;
+                        // Vue 3
                         if (document.querySelector('[data-v-app]')) return true;
+                        // Inertia.js (Laravel + Vue/React/Svelte)
+                        if (document.querySelector('[data-page]') ||
+                            document.querySelector('#app[data-page]')) return true;
+                        // Generic SPA: single root div with no meaningful child text
+                        // (frameworks mount into an empty #app or #root div)
+                        var root = document.querySelector('#app') || document.querySelector('#root');
+                        if (root && root.children.length > 0 && root.textContent.trim().length > 20) return true;
+                        // Vite/webpack bundle present - likely a JS-driven app
+                        var scripts = Array.from(document.querySelectorAll('script[src]'));
+                        for (var i = 0; i < scripts.length; i++) {
+                            var src = scripts[i].src || '';
+                            if (src.indexOf('/build/') !== -1 || src.indexOf('/assets/') !== -1 ||
+                                src.indexOf('/dist/') !== -1 || src.indexOf('chunk') !== -1 ||
+                                src.indexOf('.vite') !== -1) return true;
+                        }
                         return false;
                     })()
                 """))
