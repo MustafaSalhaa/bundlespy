@@ -126,19 +126,18 @@ bundlespy demo
 
 Many production apps ship with source maps that expose full original source - comments, internal routes, dev notes, everything the minifier stripped. BundleSpy detects `.map` references, downloads them, recovers the original files, and feeds them through the secret and endpoint analyzers.
 
-> 📸 **[SCREENSHOT: Source map recovery output showing list of recovered files and a secret found in original source]**
 
 ### Webpack chunk discovery (`--chunks`)
 
 React, Angular, and Vue apps split code into dozens or hundreds of lazy-loaded chunks. A normal crawler only sees the initial bundle. BundleSpy parses webpack and Vite runtime manifests to enumerate all chunk IDs, then fetches and analyzes each one.
 
-> 📸 **[SCREENSHOT: Chunk discovery showing chunk IDs enumerated and JS files fetched]**
+
 
 ### Passive mode (`--passive`)
 
 Pulls historical JS URLs from Wayback Machine and CommonCrawl without making any direct requests to the target. JS files from 1-2 years ago often contain credentials that are still valid today. Zero noise on the target.
 
-> 📸 **[SCREENSHOT: Passive mode output showing archive URLs collected and any findings]**
+
 
 ### Headless browser (`--headless`)
 
@@ -149,7 +148,7 @@ pip install playwright && playwright install chromium
 bundlespy scan https://example.com --headless --max-pages 9999
 ```
 
-> 📸 **[SCREENSHOT: Headless scan output - pages visited counter, intercepted network calls, endpoints discovered]**
+
 
 ### Async fetching (`--concurrency N`)
 
@@ -259,7 +258,6 @@ DNS resolution is checked before every request to prevent DNS rebinding. POST, P
 - `csv` - one row per finding, ready for Excel or a bug tracker
 - `burp` - Burp Suite sitemap XML and plain URL list
 
-> 📸 **[SCREENSHOT: HTML report opened in browser - show the findings dashboard with severity breakdown and one finding expanded]**
 
 ---
 
