@@ -9,7 +9,7 @@
 ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝╚══════╝╚═╝        ╚═╝   
 ```
 
-**JavaScript attack surface scanner** [_MADE WITH AI_]
+**JavaScript attack surface scanner**
 
 BundleSpy is a security-focused JavaScript attack surface scanner designed to help penetration testers and security teams understand what a web application is really exposing through its frontend code and browser behavior.
 
